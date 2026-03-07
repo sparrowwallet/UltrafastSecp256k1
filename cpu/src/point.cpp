@@ -481,6 +481,41 @@ static inline Point from_jac52(const JacobianPoint52& j) {
 #endif
 }
 
+// ============================================================================
+// 4x64 <-> 5x52 Dual Representation Helpers
+// ============================================================================
+// When SECP256K1_USE_4X64_POINT_OPS is defined, point arithmetic routes
+// through 4x64 FieldElement ops (ADCX/ADOX asm) instead of 5x52.
+// Storage stays FE52 -- only the compute path changes.
+// Conversion cost: ~1ns per field element (5 shifts), negligible vs 100+ ns per point op.
+#if defined(SECP256K1_USE_4X64_POINT_OPS) && defined(SECP256K1_FAST_52BIT)
+
+// FE52 Point members -> 4x64 JacobianPoint (normalize + pack)
+static inline JacobianPoint point_to_jac4x64(const FieldElement52& x,
+                                               const FieldElement52& y,
+                                               const FieldElement52& z,
+                                               bool inf) noexcept {
+    return {x.to_fe(), y.to_fe(), z.to_fe(), inf};
+}
+
+// 4x64 JacobianPoint -> FE52 members (unpack + shift)
+static inline void jac4x64_to_fe52(const JacobianPoint& j,
+                                    FieldElement52& ox, FieldElement52& oy,
+                                    FieldElement52& oz, bool& oinf) noexcept {
+    ox = FieldElement52::from_fe(j.x);
+    oy = FieldElement52::from_fe(j.y);
+    oz = FieldElement52::from_fe(j.z);
+    oinf = j.infinity;
+}
+
+// 4x64 AffinePoint from FE52
+static inline AffinePoint fe52_to_affine4x64(const FieldElement52& x,
+                                              const FieldElement52& y) noexcept {
+    return {x.to_fe(), y.to_fe()};
+}
+
+#endif // SECP256K1_USE_4X64_POINT_OPS && SECP256K1_FAST_52BIT
+
 // -- Point Doubling (5x52) ----------------------------------------------------
 // Formula: libsecp256k1 gej_double (a=0 specialization)
 // L = (3/2)*X^2, S = Y^2, T = -X*S, X3 = L^2+2T, Y3 = -(L*(X3+T)+S^2), Z3 = Y*Z
@@ -2330,6 +2365,15 @@ Point Point::negate() const {
 
 Point Point::next() const {
 #if defined(SECP256K1_FAST_52BIT)
+  #if defined(SECP256K1_USE_4X64_POINT_OPS)
+    JacobianPoint p = point_to_jac4x64(x_, y_, z_, infinity_);
+    AffinePoint const g{kGeneratorX, kGeneratorY};
+    JacobianPoint const r = jacobian_add_mixed(p, g);
+    Point result;
+    jac4x64_to_fe52(r, result.x_, result.y_, result.z_, result.infinity_);
+    result.is_generator_ = false;
+    return result;
+  #else
     static const FieldElement52 kGenX52 = FieldElement52::from_fe(kGeneratorX);
     static const FieldElement52 kGenY52 = FieldElement52::from_fe(kGeneratorY);
     JacobianPoint52 p52{x_, y_, z_, infinity_};
@@ -2351,6 +2395,15 @@ Point Point::next() const {
 
 Point Point::prev() const {
 #if defined(SECP256K1_FAST_52BIT)
+  #if defined(SECP256K1_USE_4X64_POINT_OPS)
+    JacobianPoint p = point_to_jac4x64(x_, y_, z_, infinity_);
+    AffinePoint const ng{kGeneratorX, kNegGeneratorY};
+    JacobianPoint const r = jacobian_add_mixed(p, ng);
+    Point result;
+    jac4x64_to_fe52(r, result.x_, result.y_, result.z_, result.infinity_);
+    result.is_generator_ = false;
+    return result;
+  #else
     static const FieldElement52 kGenX52 = FieldElement52::from_fe(kGeneratorX);
     static const FieldElement52 kNegGenY52 = FieldElement52::from_fe(kNegGeneratorY);
     JacobianPoint52 p52{x_, y_, z_, infinity_};
@@ -2378,6 +2431,13 @@ void Point::next_inplace() {
         return;
     }
 #if defined(SECP256K1_FAST_52BIT)
+  #if defined(SECP256K1_USE_4X64_POINT_OPS)
+    JacobianPoint p = point_to_jac4x64(x_, y_, z_, infinity_);
+    AffinePoint const g{kGeneratorX, kGeneratorY};
+    jacobian_add_mixed_inplace(p, g);
+    jac4x64_to_fe52(p, x_, y_, z_, infinity_);
+    is_generator_ = false;
+  #else
     static const FieldElement52 kGenX52 = FieldElement52::from_fe(kGeneratorX);
     static const FieldElement52 kGenY52 = FieldElement52::from_fe(kGeneratorY);
     JacobianPoint52 p52{x_, y_, z_, infinity_};
@@ -2386,6 +2446,7 @@ void Point::next_inplace() {
     x_ = p52.x; y_ = p52.y; z_ = p52.z;
     infinity_ = p52.infinity;
     is_generator_ = false;
+  #endif
 #else
     // In-place: no return-value copy
     JacobianPoint self{x_, y_, z_, infinity_};
@@ -2405,6 +2466,13 @@ void Point::prev_inplace() {
         return;
     }
 #if defined(SECP256K1_FAST_52BIT)
+  #if defined(SECP256K1_USE_4X64_POINT_OPS)
+    JacobianPoint p = point_to_jac4x64(x_, y_, z_, infinity_);
+    AffinePoint const ng{kGeneratorX, kNegGeneratorY};
+    jacobian_add_mixed_inplace(p, ng);
+    jac4x64_to_fe52(p, x_, y_, z_, infinity_);
+    is_generator_ = false;
+  #else
     static const FieldElement52 kGenX52 = FieldElement52::from_fe(kGeneratorX);
     static const FieldElement52 kNegGenY52 = FieldElement52::from_fe(kNegGeneratorY);
     JacobianPoint52 p52{x_, y_, z_, infinity_};
@@ -2413,6 +2481,7 @@ void Point::prev_inplace() {
     x_ = p52.x; y_ = p52.y; z_ = p52.z;
     infinity_ = p52.infinity;
     is_generator_ = false;
+  #endif
 #else
     // In-place: no return-value copy
     JacobianPoint self{x_, y_, z_, infinity_};
@@ -2429,6 +2498,22 @@ void Point::prev_inplace() {
 void Point::add_inplace(const Point& other) {
     z_one_ = false;
 #if defined(SECP256K1_FAST_52BIT)
+  #if defined(SECP256K1_USE_4X64_POINT_OPS)
+    // Dual representation: FE52 storage -> 4x64 compute -> FE52 storage
+    if (!other.infinity_ && fe52_is_one_raw(other.z_)) {
+        JacobianPoint p = point_to_jac4x64(x_, y_, z_, infinity_);
+        AffinePoint const q = fe52_to_affine4x64(other.x_, other.y_);
+        jacobian_add_mixed_inplace(p, q);
+        jac4x64_to_fe52(p, x_, y_, z_, infinity_);
+        is_generator_ = false;
+        return;
+    }
+    JacobianPoint p = point_to_jac4x64(x_, y_, z_, infinity_);
+    JacobianPoint const q = point_to_jac4x64(other.x_, other.y_, other.z_, other.infinity_);
+    jacobian_add_inplace(p, q);
+    jac4x64_to_fe52(p, x_, y_, z_, infinity_);
+    is_generator_ = false;
+  #else
     // Fast path: if other is affine (z = 1), use mixed addition
     // Raw limb check -- no normalization, z_ from affine construction is already canonical {1,0,0,0,0}
     if (!other.infinity_ && fe52_is_one_raw(other.z_)) {
@@ -2449,6 +2534,7 @@ void Point::add_inplace(const Point& other) {
     x_ = p52.x; y_ = p52.y; z_ = p52.z;
     infinity_ = p52.infinity;
     is_generator_ = false;
+  #endif
 #else
     // Fallback: 4x64 path (non-52-bit platforms)
     JacobianPoint p{x_, y_, z_, infinity_};
@@ -2464,6 +2550,14 @@ void Point::add_inplace(const Point& other) {
 void Point::sub_inplace(const Point& other) {
     z_one_ = false;
 #if defined(SECP256K1_FAST_52BIT)
+  #if defined(SECP256K1_USE_4X64_POINT_OPS)
+    JacobianPoint p = point_to_jac4x64(x_, y_, z_, infinity_);
+    JacobianPoint q = point_to_jac4x64(other.x_, other.y_, other.z_, other.infinity_);
+    q.y = FieldElement::zero() - q.y;
+    jacobian_add_inplace(p, q);
+    jac4x64_to_fe52(p, x_, y_, z_, infinity_);
+    is_generator_ = false;
+  #else
     // 5x52 path: negate other.y, then add in-place
     JacobianPoint52 p52{x_, y_, z_, infinity_};
     JacobianPoint52 q52{other.x_, other.y_, other.z_, other.infinity_};
@@ -2474,6 +2568,7 @@ void Point::sub_inplace(const Point& other) {
     x_ = p52.x; y_ = p52.y; z_ = p52.z;
     infinity_ = p52.infinity;
     is_generator_ = false;
+  #endif
 #else
     // Fallback: 4x64 path (non-52-bit platforms)
     JacobianPoint p{x_, y_, z_, infinity_};
@@ -2527,6 +2622,7 @@ void Point::dbl_inplace() {
     if (SECP256K1_UNLIKELY(infinity_)) return;
     jac52_double_coords(x_, y_, z_);
     is_generator_ = false;
+  #endif
 #else
     // In-place: no return-value copy (eliminates 100B struct copy per call)
     JacobianPoint p{x_, y_, z_, infinity_};
@@ -2543,9 +2639,15 @@ void Point::dbl_inplace() {
 void Point::negate_inplace() {
     // Negation in Jacobian: (X, Y, Z) -> (X, -Y, Z)
 #if defined(SECP256K1_FAST_52BIT)
+  #if defined(SECP256K1_USE_4X64_POINT_OPS)
+    FieldElement fy = y_.to_fe();
+    fy = FieldElement::zero() - fy;
+    y_ = FieldElement52::from_fe(fy);
+  #else
     y_.normalize_weak();
     y_.negate_assign(1);
     y_.normalize_weak();
+  #endif
 #else
     y_ = FieldElement::zero() - y_;
 #endif
@@ -2556,6 +2658,21 @@ void Point::negate_inplace() {
 void Point::add_mixed_inplace(const FieldElement& ax, const FieldElement& ay) {
     z_one_ = false;
 #if defined(SECP256K1_FAST_52BIT)
+  #if defined(SECP256K1_USE_4X64_POINT_OPS)
+    if (SECP256K1_UNLIKELY(infinity_)) {
+        x_ = FieldElement52::from_fe(ax);
+        y_ = FieldElement52::from_fe(ay);
+        z_ = FieldElement52::one();
+        infinity_ = false;
+        is_generator_ = false;
+        return;
+    }
+    JacobianPoint p = point_to_jac4x64(x_, y_, z_, infinity_);
+    AffinePoint const q{ax, ay};
+    jacobian_add_mixed_inplace(p, q);
+    jac4x64_to_fe52(p, x_, y_, z_, infinity_);
+    is_generator_ = false;
+  #else
     if (SECP256K1_UNLIKELY(infinity_)) {
         x_ = FieldElement52::from_fe(ax);
         y_ = FieldElement52::from_fe(ay);
@@ -2570,6 +2687,7 @@ void Point::add_mixed_inplace(const FieldElement& ax, const FieldElement& ay) {
     x_ = p52.x; y_ = p52.y; z_ = p52.z;
     infinity_ = p52.infinity;
     is_generator_ = false;
+  #endif
 #else
     if (SECP256K1_UNLIKELY(infinity_)) {
         // Convert affine to Jacobian: (x, y) -> (x, y, 1, false)
@@ -3805,6 +3923,12 @@ void Point::batch_x_only_bytes(const Point* points, size_t n,
 #if defined(SECP256K1_FAST_52BIT)
 SECP256K1_NOINLINE
 Point Point::dual_scalar_mul_gen_point(const Scalar& a, const Scalar& b, const Point& P) {
+#if defined(SECP256K1_USE_4X64_POINT_OPS)
+    // 4x64 path: use two separate scalar_muls (each already has GLV+Shamir 4x64)
+    auto aG = Point::generator().scalar_mul(a);
+    aG.add_inplace(P.scalar_mul(b));
+    return aG;
+#else
     // -- 128-bit arithmetic split of a --------------------------------
     const auto& a_limbs = a.limbs();
     Scalar const a_lo = Scalar::from_limbs({a_limbs[0], a_limbs[1], 0, 0});
@@ -4085,6 +4209,7 @@ Point Point::dual_scalar_mul_gen_point(const Scalar& a, const Scalar& b, const P
     }
 
     return from_jac52(result52);
+#endif // SECP256K1_USE_4X64_POINT_OPS
 }
 // DISABLED: ESP32/Embedded 4-stream GLV Strauss produces incorrect verify results.
 // Root cause: the 4-stream interleaved Shamir scan with GLV decomposition of BOTH
