@@ -5,12 +5,30 @@ All notable changes to UltrafastSecp256k1 are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [3.20.1] - 2026-03-08
+## [3.21.0] - 2026-03-08
+
+> **Cumulative release: v3.14.0 -> v3.21.0** | 120+ commits | ABI compatible
+> No breaking changes -- drop-in upgrade from v3.14.x
+
+### Added
+
+- **ABI layout guards** -- compile-time `static_assert` checks on struct sizes
+  and constant lengths in `ufsecp.h` to catch ABI breaks. (#118)
+- **docs/CRYPTO_INVARIANTS.md** -- comprehensive crypto invariant reference for
+  integrators and auditors. (#118)
 
 ### Fixed
 
-- **Packaging workflow**: handle immutable GitHub releases by recreating the release
-  with preserved metadata when `gh release upload --clobber` fails (HTTP 422). (#119)
+- **Precompute cache validation** -- 65 bytes/point -> 1 byte/point minimum
+  bound check; path separator fix on Windows. (#118)
+- **Fuzzer edge case** -- `fuzz_point` k=n-1 infinity assertion. (#118)
+- **CI stabilization** -- `SECP256K1_MARCH` option to avoid ccache/`-march=native`
+  mismatch SIGILL; benchmark regression filter `MIN_REGRESSION_NS=50`. (#118)
+- **Packaging workflow** -- handle immutable GitHub releases by recreating with
+  preserved metadata when `gh release upload --clobber` fails (HTTP 422). (#119)
+- **LTO/ASM build fix** -- restrict `-flto=thin` (Clang) and `-flto` (GCC) to
+  C++ sources only via `$<COMPILE_LANGUAGE:CXX>` generator expression, preventing
+  the system assembler from seeing unsupported LTO flags on `.S` files. (#120)
 
 ## [3.20.0] - 2026-03-07
 

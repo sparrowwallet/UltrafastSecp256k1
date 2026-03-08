@@ -257,14 +257,12 @@ if(NOT TARGET ${SECP256K1_LIB_NAME})
 
     if(SECP256K1_USE_LTO)
         if(CMAKE_CXX_COMPILER_ID MATCHES "Clang")
-            # Clang ThinLTO.
-            # PRIVATE: compile library sources with LTO (bitcode objects)
-            # INTERFACE: propagate LTO + arch flags to ALL consumers automatically.
-            # CRITICAL: ARCH_FLAGS (e.g. -mcpu=sifive-u74) must be in link options
-            #   because ThinLTO does final code generation at link time -- without it
-            #   the linker uses generic scheduling, losing pipeline-specific gains.
-            #   ARCH_FLAGS is added to link options later (after it's set).
-            target_compile_options(${SECP256K1_LIB_NAME} PRIVATE -flto=thin)
+            # Clang ThinLTO -- only for C++ sources, NOT assembly (.S).
+            # Use a generator expression to exclude ASM files, because
+            # CMake may invoke the system assembler (GCC cc1) which does
+            # not understand -flto=thin and fails with an error.
+            target_compile_options(${SECP256K1_LIB_NAME} PRIVATE
+                $<$<COMPILE_LANGUAGE:CXX>:-flto=thin>)
 
             # Do not force lld on Apple/Android CI toolchains.
             # - macOS/iOS clang may reject -fuse-ld=lld when ld64 is used.
@@ -277,7 +275,8 @@ if(NOT TARGET ${SECP256K1_LIB_NAME})
                 message(STATUS "Secp256k1: OK LTO ENABLED (ThinLTO with Clang + lld, INTERFACE propagated)")
             endif()
         elseif(CMAKE_CXX_COMPILER_ID MATCHES "GNU")
-            target_compile_options(${SECP256K1_LIB_NAME} PRIVATE -flto)
+            target_compile_options(${SECP256K1_LIB_NAME} PRIVATE
+                $<$<COMPILE_LANGUAGE:CXX>:-flto>)
             target_link_options(${SECP256K1_LIB_NAME} INTERFACE -flto)
             message(STATUS "Secp256k1: OK LTO ENABLED (GCC LTO, INTERFACE propagated)")
         else()
