@@ -415,13 +415,13 @@ inline int scalar_ge_impl(const Scalar* a, const Scalar* b) {
 
 // low-S check (BIP-62)
 inline int scalar_is_low_s_impl(const Scalar* s) {
-    Scalar half;
-    half.limbs[0] = HALF_ORDER_0; half.limbs[1] = HALF_ORDER_1;
-    half.limbs[2] = HALF_ORDER_2; half.limbs[3] = HALF_ORDER_3;
+    Scalar half_n;
+    half_n.limbs[0] = HALF_ORDER_0; half_n.limbs[1] = HALF_ORDER_1;
+    half_n.limbs[2] = HALF_ORDER_2; half_n.limbs[3] = HALF_ORDER_3;
 
     for (int i = 3; i >= 0; i--) {
-        if (s->limbs[i] > half.limbs[i]) return 0;
-        if (s->limbs[i] < half.limbs[i]) return 1;
+        if (s->limbs[i] > half_n.limbs[i]) return 0;
+        if (s->limbs[i] < half_n.limbs[i]) return 1;
     }
     return 1; // equal = low
 }
@@ -866,7 +866,8 @@ inline int schnorr_sign_impl(const Scalar* priv, const uchar msg[32],
 
     // t = d XOR tagged_hash("BIP0340/aux", aux_rand)
     uchar t_hash[32];
-    tagged_hash_impl((const uchar*)"BIP0340/aux", 11, aux_rand, 32, t_hash);
+    { uchar _tag[] = {'B','I','P','0','3','4','0','/','a','u','x'};
+    tagged_hash_impl(_tag, 11, aux_rand, 32, t_hash); }
 
     uchar d_bytes[32];
     scalar_to_bytes_impl(&d, d_bytes);
@@ -881,7 +882,8 @@ inline int schnorr_sign_impl(const Scalar* priv, const uchar msg[32],
     for (int i = 0; i < 32; i++) nonce_input[64+i] = msg[i];
 
     uchar rand_hash[32];
-    tagged_hash_impl((const uchar*)"BIP0340/nonce", 13, nonce_input, 96, rand_hash);
+    { uchar _tag[] = {'B','I','P','0','3','4','0','/','n','o','n','c','e'};
+    tagged_hash_impl(_tag, 13, nonce_input, 96, rand_hash); }
 
     Scalar k_prime;
     scalar_from_bytes_impl(rand_hash, &k_prime);
@@ -913,7 +915,8 @@ inline int schnorr_sign_impl(const Scalar* priv, const uchar msg[32],
     for (int i = 0; i < 32; i++) challenge_input[64+i] = msg[i];
 
     uchar e_hash[32];
-    tagged_hash_impl((const uchar*)"BIP0340/challenge", 17, challenge_input, 96, e_hash);
+    { uchar _tag[] = {'B','I','P','0','3','4','0','/','c','h','a','l','l','e','n','g','e'};
+    tagged_hash_impl(_tag, 17, challenge_input, 96, e_hash); }
 
     Scalar e;
     scalar_from_bytes_impl(e_hash, &e);
@@ -939,7 +942,8 @@ inline int schnorr_verify_impl(const uchar pubkey_x[32], const uchar msg[32],
     for (int i = 0; i < 32; i++) challenge_input[64+i] = msg[i];
 
     uchar e_hash[32];
-    tagged_hash_impl((const uchar*)"BIP0340/challenge", 17, challenge_input, 96, e_hash);
+    { uchar _tag[] = {'B','I','P','0','3','4','0','/','c','h','a','l','l','e','n','g','e'};
+    tagged_hash_impl(_tag, 17, challenge_input, 96, e_hash); }
 
     Scalar e;
     scalar_from_bytes_impl(e_hash, &e);

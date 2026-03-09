@@ -46,6 +46,7 @@ typedef struct {
     FieldElement y;
     FieldElement z;
     uint infinity;  // 1 if point at infinity
+    uint pad[7];    // Match host alignas(128) layout — sizeof = 128 bytes
 } JacobianPoint;
 
 typedef struct {

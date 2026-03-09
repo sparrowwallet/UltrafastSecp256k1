@@ -228,9 +228,43 @@ if(HAVE_CPU_LIB AND TARGET fastsecp256k1)
     target_compile_definitions(opencl_test PRIVATE HAVE_CPU_LIB=1)
 endif()
 
+# =============================================================================
+# Audit Runner Executable
+# =============================================================================
+
+add_executable(opencl_audit_runner
+    src/opencl_audit_runner.cpp
+)
+
+target_link_libraries(opencl_audit_runner PRIVATE
+    secp256k1_opencl
+    ${OpenCL_LIBRARY}
+)
+
+target_include_directories(opencl_audit_runner PRIVATE
+    ${OpenCL_INCLUDE_DIR}
+    ${CMAKE_CURRENT_SOURCE_DIR}/../cpu/include
+    ${CMAKE_CURRENT_SOURCE_DIR}/../include
+)
+
+# Copy kernel files next to the audit runner binary for runtime loading
+add_custom_command(TARGET opencl_audit_runner POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E make_directory $<TARGET_FILE_DIR:opencl_audit_runner>/kernels
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+        ${CMAKE_CURRENT_SOURCE_DIR}/kernels/secp256k1_field.cl
+        ${CMAKE_CURRENT_SOURCE_DIR}/kernels/secp256k1_point.cl
+        ${CMAKE_CURRENT_SOURCE_DIR}/kernels/secp256k1_batch.cl
+        ${CMAKE_CURRENT_SOURCE_DIR}/kernels/secp256k1_affine.cl
+        ${CMAKE_CURRENT_SOURCE_DIR}/kernels/secp256k1_extended.cl
+        ${CMAKE_CURRENT_SOURCE_DIR}/kernels/secp256k1_hash160.cl
+        $<TARGET_FILE_DIR:opencl_audit_runner>/kernels/
+    COMMENT "Copying OpenCL kernel files for audit runner"
+)
+
 # CTest integration
 enable_testing()
 add_test(NAME opencl_selftest COMMAND opencl_test)
+add_test(NAME opencl_audit COMMAND opencl_audit_runner --kernel-dir ${CMAKE_CURRENT_SOURCE_DIR}/kernels)
 
 # =============================================================================
 # Installation
