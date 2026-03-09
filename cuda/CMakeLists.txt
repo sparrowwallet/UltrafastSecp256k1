@@ -94,3 +94,127 @@ target_link_libraries(secp256k1_cuda_bench PRIVATE secp256k1_cuda_lib)
 enable_testing()
 add_test(NAME cuda_selftest COMMAND secp256k1_cuda_test)
 
+# ===== GPU Unified Audit Runner =====
+set(_AUDIT_SOURCES src/gpu_audit_runner.cu)
+if(_GPU_LANG STREQUAL "HIP")
+    set_source_files_properties(${_AUDIT_SOURCES} PROPERTIES LANGUAGE HIP)
+    add_executable(gpu_audit_runner ${_AUDIT_SOURCES})
+    target_compile_options(gpu_audit_runner PRIVATE
+        $<$<COMPILE_LANGUAGE:HIP>:-O3>
+        $<$<COMPILE_LANGUAGE:HIP>:-ffast-math>
+    )
+else()
+    add_executable(gpu_audit_runner ${_AUDIT_SOURCES})
+    target_compile_options(gpu_audit_runner PRIVATE
+        $<$<COMPILE_LANGUAGE:CUDA>:--expt-relaxed-constexpr>
+        $<$<COMPILE_LANGUAGE:CUDA>:-O3>
+        $<$<COMPILE_LANGUAGE:CUDA>:--use_fast_math>
+        $<$<COMPILE_LANGUAGE:CUDA>:-Xptxas=-O3>
+    )
+endif()
+target_link_libraries(gpu_audit_runner PRIVATE secp256k1_cuda_lib)
+add_test(NAME gpu_audit COMMAND gpu_audit_runner --json-only)
+
+# ===== GPU Unified Benchmark =====
+set(_BENCH_UNIFIED_SOURCES src/gpu_bench_unified.cu)
+if(_GPU_LANG STREQUAL "HIP")
+    set_source_files_properties(${_BENCH_UNIFIED_SOURCES} PROPERTIES LANGUAGE HIP)
+    add_executable(gpu_bench_unified ${_BENCH_UNIFIED_SOURCES})
+    target_compile_options(gpu_bench_unified PRIVATE
+        $<$<COMPILE_LANGUAGE:HIP>:-O3>
+        $<$<COMPILE_LANGUAGE:HIP>:-ffast-math>
+    )
+else()
+    add_executable(gpu_bench_unified ${_BENCH_UNIFIED_SOURCES})
+    target_compile_options(gpu_bench_unified PRIVATE
+        $<$<COMPILE_LANGUAGE:CUDA>:--expt-relaxed-constexpr>
+        $<$<COMPILE_LANGUAGE:CUDA>:-O3>
+        $<$<COMPILE_LANGUAGE:CUDA>:--use_fast_math>
+        $<$<COMPILE_LANGUAGE:CUDA>:-Xptxas=-O3>
+    )
+endif()
+target_link_libraries(gpu_bench_unified PRIVATE secp256k1_cuda_lib)
+
+# ===== CPU vs GPU Comparison Benchmark =====
+set(_BENCH_COMPARE_SOURCES src/bench_compare.cu)
+if(_GPU_LANG STREQUAL "HIP")
+    set_source_files_properties(${_BENCH_COMPARE_SOURCES} PROPERTIES LANGUAGE HIP)
+    add_executable(bench_compare ${_BENCH_COMPARE_SOURCES})
+    target_compile_options(bench_compare PRIVATE
+        $<$<COMPILE_LANGUAGE:HIP>:-O3>
+        $<$<COMPILE_LANGUAGE:HIP>:-ffast-math>
+    )
+else()
+    add_executable(bench_compare ${_BENCH_COMPARE_SOURCES})
+    target_compile_options(bench_compare PRIVATE
+        $<$<COMPILE_LANGUAGE:CUDA>:--expt-relaxed-constexpr>
+        $<$<COMPILE_LANGUAGE:CUDA>:-O3>
+        $<$<COMPILE_LANGUAGE:CUDA>:--use_fast_math>
+        $<$<COMPILE_LANGUAGE:CUDA>:-Xptxas=-O3>
+    )
+endif()
+# Link both GPU and CPU libraries for side-by-side comparison.
+# CUDA/LTO gotcha: nvcc bundles GCC 12 as its host linker, but fastsecp256k1.a
+# is compiled with host GCC 14 + LTO (fat objects with LTO v14.0 bytecodes).
+# GCC 12 cannot process v14.0 LTO bytecodes -> fatal error.
+# Solution: link the archive directly (bypassing INTERFACE -flto propagation)
+# AND pass -fno-lto to tell GCC 12 to use regular object code from the fat archive.
+target_link_libraries(bench_compare PRIVATE secp256k1_cuda_lib)
+target_include_directories(bench_compare PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/../cpu/include
+)
+target_link_libraries(bench_compare PRIVATE
+    $<TARGET_FILE:fastsecp256k1>
+)
+set_target_properties(bench_compare PROPERTIES INTERPROCEDURAL_OPTIMIZATION FALSE)
+target_link_options(bench_compare PRIVATE -fno-lto)
+
+# ===== BIP-352 Silent Payments Pipeline Benchmark =====
+set(_BENCH_BIP352_SOURCES src/bench_bip352.cu)
+if(_GPU_LANG STREQUAL "HIP")
+    set_source_files_properties(${_BENCH_BIP352_SOURCES} PROPERTIES LANGUAGE HIP)
+    add_executable(bench_bip352 ${_BENCH_BIP352_SOURCES})
+    target_compile_options(bench_bip352 PRIVATE
+        $<$<COMPILE_LANGUAGE:HIP>:-O3>
+        $<$<COMPILE_LANGUAGE:HIP>:-ffast-math>
+    )
+else()
+    add_executable(bench_bip352 ${_BENCH_BIP352_SOURCES})
+    target_compile_options(bench_bip352 PRIVATE
+        $<$<COMPILE_LANGUAGE:CUDA>:--expt-relaxed-constexpr>
+        $<$<COMPILE_LANGUAGE:CUDA>:-O3>
+        $<$<COMPILE_LANGUAGE:CUDA>:--use_fast_math>
+        $<$<COMPILE_LANGUAGE:CUDA>:-Xptxas=-O3>
+    )
+endif()
+target_link_libraries(bench_bip352 PRIVATE secp256k1_cuda_lib)
+target_include_directories(bench_bip352 PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/../cpu/include
+)
+target_link_libraries(bench_bip352 PRIVATE
+    $<TARGET_FILE:fastsecp256k1>
+)
+set_target_properties(bench_bip352 PROPERTIES INTERPROCEDURAL_OPTIMIZATION FALSE)
+target_link_options(bench_bip352 PRIVATE -fno-lto)
+
+# ===== GPU CT Layer Smoke Test =====
+set(_CT_TEST_SOURCES src/test_ct_smoke.cu)
+if(_GPU_LANG STREQUAL "HIP")
+    set_source_files_properties(${_CT_TEST_SOURCES} PROPERTIES LANGUAGE HIP)
+    add_executable(test_ct_smoke ${_CT_TEST_SOURCES})
+    target_compile_options(test_ct_smoke PRIVATE
+        $<$<COMPILE_LANGUAGE:HIP>:-O3>
+        $<$<COMPILE_LANGUAGE:HIP>:-ffast-math>
+    )
+else()
+    add_executable(test_ct_smoke ${_CT_TEST_SOURCES})
+    target_compile_options(test_ct_smoke PRIVATE
+        $<$<COMPILE_LANGUAGE:CUDA>:--expt-relaxed-constexpr>
+        $<$<COMPILE_LANGUAGE:CUDA>:-O3>
+        $<$<COMPILE_LANGUAGE:CUDA>:--use_fast_math>
+        $<$<COMPILE_LANGUAGE:CUDA>:-Xptxas=-O3>
+    )
+endif()
+target_link_libraries(test_ct_smoke PRIVATE secp256k1_cuda_lib)
+add_test(NAME gpu_ct_smoke COMMAND test_ct_smoke)
+

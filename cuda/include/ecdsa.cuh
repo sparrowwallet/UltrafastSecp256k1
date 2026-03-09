@@ -18,77 +18,7 @@
 namespace secp256k1 {
 namespace cuda {
 
-// -- Byte <-> Scalar conversion (big-endian bytes <-> LE uint64_t limbs) ---------
-
-// Convert 32 big-endian bytes to a Scalar (reduced mod n).
-__device__ inline void scalar_from_bytes(const uint8_t bytes[32], Scalar* r) {
-    // BE bytes -> LE uint64_t limbs
-    for (int i = 0; i < 4; i++) {
-        uint64_t limb = 0;
-        int base = (3 - i) * 8;
-        for (int j = 0; j < 8; j++) {
-            limb = (limb << 8) | bytes[base + j];
-        }
-        r->limbs[i] = limb;
-    }
-    // Branchless reduction: compute r - ORDER, keep if r >= n
-    uint64_t borrow = 0;
-    uint64_t tmp[4];
-    for (int i = 0; i < 4; i++) {
-        unsigned __int128 diff = (unsigned __int128)r->limbs[i] - ORDER[i] - borrow;
-        tmp[i] = (uint64_t)diff;
-        borrow = (uint64_t)(-(int64_t)(diff >> 64));  // 1 if borrow, 0 otherwise
-    }
-    // mask = all-ones if r >= n (no borrow), all-zeros otherwise
-    uint64_t mask = ~borrow + 1;   // borrow==0 -> ~0+1=0 -> wrong
-    // Actually: borrow=0 means no underflow -> r >= n -> use tmp
-    //           borrow=1 means underflow -> r < n -> keep r
-    mask = -(uint64_t)(borrow == 0);
-    for (int i = 0; i < 4; i++) {
-        r->limbs[i] = (tmp[i] & mask) | (r->limbs[i] & ~mask);
-    }
-}
-
-// Convert Scalar to 32 big-endian bytes.
-__device__ inline void scalar_to_bytes(const Scalar* s, uint8_t bytes[32]) {
-    for (int i = 0; i < 4; i++) {
-        uint64_t limb = s->limbs[3 - i];
-        for (int j = 0; j < 8; j++) {
-            bytes[i * 8 + j] = (uint8_t)(limb >> (56 - j * 8));
-        }
-    }
-}
-
-// Convert FieldElement to 32 big-endian bytes.
-// Normalizes (fully reduces mod p) before serialization so byte comparisons
-// are always consistent, regardless of internal carry state.
-__device__ inline void field_to_bytes(const FieldElement* fe, uint8_t bytes[32]) {
-    // p = 0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEFFFFFC2F
-    constexpr uint64_t P[4] = {
-        0xFFFFFFFEFFFFFC2FULL, 0xFFFFFFFFFFFFFFFFULL,
-        0xFFFFFFFFFFFFFFFFULL, 0xFFFFFFFFFFFFFFFFULL
-    };
-    // Branchless: try subtracting p; keep result only if no borrow
-    uint64_t tmp[4];
-    uint64_t borrow = 0;
-    for (int i = 0; i < 4; i++) {
-        unsigned __int128 diff = (unsigned __int128)fe->limbs[i] - P[i] - borrow;
-        tmp[i] = (uint64_t)diff;
-        borrow = (uint64_t)(-(int64_t)(diff >> 64));  // 1 if borrow, 0 otherwise
-    }
-    // If borrow==0: fe >= p -> use tmp (reduced). If borrow==1: fe < p -> use fe.
-    uint64_t mask = -(uint64_t)(borrow == 0);  // all-1s if no borrow, all-0s if borrow
-    uint64_t norm[4];
-    for (int i = 0; i < 4; i++)
-        norm[i] = (tmp[i] & mask) | (fe->limbs[i] & ~mask);
-
-    for (int i = 0; i < 4; i++) {
-        uint64_t limb = norm[3 - i];
-        for (int j = 0; j < 8; j++) {
-            bytes[i * 8 + j] = (uint8_t)(limb >> (56 - j * 8));
-        }
-    }
-}
+// scalar_from_bytes, scalar_to_bytes, field_to_bytes moved to secp256k1.cuh
 
 // -- SHA-256 Streaming Context ------------------------------------------------
 
@@ -485,6 +415,186 @@ __device__ inline bool ecdsa_verify(
 
     // Check v == r
     return scalar_eq(&v, &sig->r);
+}
+
+// ============================================================================
+// ECDSA extensions (CPU parity)
+// ============================================================================
+
+// -- ECDSA: normalize to low-S (BIP-62) -------------------------------------
+__device__ __forceinline__ void ecdsa_normalize_low_s(ECDSASignatureGPU* sig) {
+    if (!scalar_is_low_s(&sig->s)) {
+        scalar_negate(&sig->s, &sig->s);
+    }
+}
+
+// -- ECDSA: is_low_s check ---------------------------------------------------
+__device__ __forceinline__ bool ecdsa_is_low_s(const ECDSASignatureGPU* sig) {
+    return scalar_is_low_s(&sig->s);
+}
+
+// -- ECDSA: signature to 64-byte compact format (r || s, BE) ----------------
+__device__ inline void ecdsa_sig_to_compact(const ECDSASignatureGPU* sig, uint8_t out[64]) {
+    scalar_to_bytes(&sig->r, out);
+    scalar_to_bytes(&sig->s, out + 32);
+}
+
+// -- ECDSA: signature from 64-byte compact format ----------------------------
+__device__ inline void ecdsa_sig_from_compact(const uint8_t data[64], ECDSASignatureGPU* sig) {
+    scalar_from_bytes(data, &sig->r);
+    scalar_from_bytes(data + 32, &sig->s);
+}
+
+// -- ECDSA: parse compact strict (reject r,s >= n or == 0) ------------------
+__device__ inline bool ecdsa_sig_parse_compact_strict(const uint8_t data[64],
+                                                       ECDSASignatureGPU* sig) {
+    if (!scalar_from_bytes_strict_nonzero(data, &sig->r)) return false;
+    if (!scalar_from_bytes_strict_nonzero(data + 32, &sig->s)) return false;
+    return true;
+}
+
+// -- ECDSA: sign with verification (fault countermeasure) --------------------
+// Signs and immediately verifies the result. Returns false if sign or verify fail.
+__device__ inline bool ecdsa_sign_verified(
+    const uint8_t msg_hash[32],
+    const Scalar* private_key,
+    ECDSASignatureGPU* sig)
+{
+    if (!ecdsa_sign(msg_hash, private_key, sig)) return false;
+
+    // Compute public key for verification
+    JacobianPoint pubkey;
+    scalar_mul_generator_const(private_key, &pubkey);
+
+    return ecdsa_verify(msg_hash, &pubkey, sig);
+}
+
+// -- RFC 6979 hedged nonce (with auxiliary entropy) --------------------------
+__device__ inline void rfc6979_nonce_hedged(
+    const Scalar* private_key,
+    const uint8_t msg_hash[32],
+    const uint8_t aux_rand[32],
+    Scalar* k_out)
+{
+    uint8_t x_bytes[32];
+    scalar_to_bytes(private_key, x_bytes);
+
+    // XOR auxiliary randomness into the private key bytes for personalization
+    uint8_t x_pers[32];
+    for (int i = 0; i < 32; i++) x_pers[i] = x_bytes[i] ^ aux_rand[i];
+
+    uint8_t V[32], K[32];
+    for (int i = 0; i < 32; i++) { V[i] = 0x01; K[i] = 0x00; }
+
+    // Step d: K = HMAC(K, V || 0x00 || x_pers || h1)
+    {
+        uint8_t buf[97];
+        for (int i = 0; i < 32; i++) buf[i] = V[i];
+        buf[32] = 0x00;
+        for (int i = 0; i < 32; i++) buf[33 + i] = x_pers[i];
+        for (int i = 0; i < 32; i++) buf[65 + i] = msg_hash[i];
+        hmac_sha256(K, 32, buf, 97, K);
+    }
+    hmac_sha256(K, 32, V, 32, V);
+    {
+        uint8_t buf[97];
+        for (int i = 0; i < 32; i++) buf[i] = V[i];
+        buf[32] = 0x01;
+        for (int i = 0; i < 32; i++) buf[33 + i] = x_pers[i];
+        for (int i = 0; i < 32; i++) buf[65 + i] = msg_hash[i];
+        hmac_sha256(K, 32, buf, 97, K);
+    }
+    hmac_sha256(K, 32, V, 32, V);
+
+    for (int attempt = 0; attempt < 100; attempt++) {
+        hmac_sha256(K, 32, V, 32, V);
+        scalar_from_bytes(V, k_out);
+        if (!scalar_is_zero(k_out)) return;
+        uint8_t buf[33];
+        for (int i = 0; i < 32; i++) buf[i] = V[i];
+        buf[32] = 0x00;
+        hmac_sha256(K, 32, buf, 33, K);
+        hmac_sha256(K, 32, V, 32, V);
+    }
+    for (int i = 0; i < 4; i++) k_out->limbs[i] = 0;
+}
+
+// -- ECDSA: sign hedged (RFC 6979 + aux_rand) --------------------------------
+__device__ inline bool ecdsa_sign_hedged(
+    const uint8_t msg_hash[32],
+    const Scalar* private_key,
+    const uint8_t aux_rand[32],
+    ECDSASignatureGPU* sig)
+{
+    if (scalar_is_zero(private_key)) return false;
+
+    Scalar z;
+    scalar_from_bytes(msg_hash, &z);
+
+    Scalar k;
+    rfc6979_nonce_hedged(private_key, msg_hash, aux_rand, &k);
+    if (scalar_is_zero(&k)) return false;
+
+    JacobianPoint R;
+    scalar_mul_generator_const(&k, &R);
+    if (R.infinity) return false;
+
+    FieldElement z_inv, z_inv2, x_affine;
+    field_inv(&R.z, &z_inv);
+    field_sqr(&z_inv, &z_inv2);
+    field_mul(&R.x, &z_inv2, &x_affine);
+
+    uint8_t x_bytes[32];
+    field_to_bytes(&x_affine, x_bytes);
+    scalar_from_bytes(x_bytes, &sig->r);
+    if (scalar_is_zero(&sig->r)) return false;
+
+    Scalar k_inv;
+    scalar_inverse(&k, &k_inv);
+
+    Scalar rd;
+    scalar_mul_mod_n(&sig->r, private_key, &rd);
+
+    Scalar z_plus_rd;
+    {
+        uint64_t carry = 0;
+        for (int i = 0; i < 4; i++) {
+            unsigned __int128 sum = (unsigned __int128)z.limbs[i] + rd.limbs[i] + carry;
+            z_plus_rd.limbs[i] = (uint64_t)sum;
+            carry = (uint64_t)(sum >> 64);
+        }
+        uint64_t borrow = 0;
+        uint64_t tmp[4];
+        for (int i = 0; i < 4; i++) {
+            unsigned __int128 diff = (unsigned __int128)z_plus_rd.limbs[i] - ORDER[i] - borrow;
+            tmp[i] = (uint64_t)diff;
+            borrow = (uint64_t)(-(int64_t)(diff >> 64));
+        }
+        uint64_t mask = -(uint64_t)(borrow == 0 || carry);
+        for (int i = 0; i < 4; i++)
+            z_plus_rd.limbs[i] = (tmp[i] & mask) | (z_plus_rd.limbs[i] & ~mask);
+    }
+
+    scalar_mul_mod_n(&k_inv, &z_plus_rd, &sig->s);
+    if (scalar_is_zero(&sig->s)) return false;
+
+    if (!scalar_is_low_s(&sig->s))
+        scalar_negate(&sig->s, &sig->s);
+
+    return true;
+}
+
+// -- ECDSA: sign hedged + verified -------------------------------------------
+__device__ inline bool ecdsa_sign_hedged_verified(
+    const uint8_t msg_hash[32],
+    const Scalar* private_key,
+    const uint8_t aux_rand[32],
+    ECDSASignatureGPU* sig)
+{
+    if (!ecdsa_sign_hedged(msg_hash, private_key, aux_rand, sig)) return false;
+    JacobianPoint pubkey;
+    scalar_mul_generator_const(private_key, &pubkey);
+    return ecdsa_verify(msg_hash, &pubkey, sig);
 }
 
 } // namespace cuda

@@ -2222,79 +2222,15 @@ __device__ inline void scalar_mul(const JacobianPoint* p, const Scalar* k, Jacob
 }
 
 #if !SECP256K1_CUDA_LIMBS_32
+// Forward declaration: wNAF-optimized GLV scalar mul (defined below)
+__device__ inline void scalar_mul_glv_wnaf(const JacobianPoint* p, const Scalar* k, JacobianPoint* r);
+
 // GLV-accelerated scalar multiplication: r = k * P
 // Splits k into k1 + k2*lambda and computes k1*P + k2*phi(P) with Shamir's trick
 // Only available in 64-bit limb mode (glv_decompose requires 64-bit scalar ops)
 __device__ inline void scalar_mul_glv(const JacobianPoint* p, const Scalar* k, JacobianPoint* r) {
-    GLVDecomposition decomp = glv_decompose(k);
-
-    // Compute phi(P) = (beta*P.x, P.y, P.z)
-    JacobianPoint phi_p;
-    apply_endomorphism(p, &phi_p);
-
-    // If k1_neg, negate P (negate y coordinate: y = -y mod p)
-    JacobianPoint p1 = *p;
-    if (decomp.k1_neg) {
-        FieldElement zero_fe;
-        field_set_zero(&zero_fe);
-        field_sub(&zero_fe, &p1.y, &p1.y);
-    }
-    // If k2_neg, negate phi(P)
-    JacobianPoint p2 = phi_p;
-    if (decomp.k2_neg) {
-        FieldElement zero_fe;
-        field_set_zero(&zero_fe);
-        field_sub(&zero_fe, &p2.y, &p2.y);
-    }
-
-    // Shamir's trick: interleaved double-and-add with both k1 and k2
-    r->infinity = true;
-    field_set_zero(&r->x);
-    field_set_one(&r->y);
-    field_set_zero(&r->z);
-
-    int len1 = scalar_bitlen(&decomp.k1);
-    int len2 = scalar_bitlen(&decomp.k2);
-    int max_len = (len1 > len2) ? len1 : len2;
-
-    for (int i = max_len - 1; i >= 0; --i) {
-        if (!r->infinity) {
-            JacobianPoint tmp;
-            jacobian_double(r, &tmp);
-            *r = tmp;
-        }
-
-        int b1 = scalar_bit(&decomp.k1, i);
-        int b2 = scalar_bit(&decomp.k2, i);
-
-        if (b1 && b2) {
-            JacobianPoint sum12;
-            jacobian_add(&p1, &p2, &sum12);
-            if (r->infinity) {
-                *r = sum12;
-            } else {
-                JacobianPoint tmp;
-                jacobian_add(r, &sum12, &tmp);
-                *r = tmp;
-            }
-        } else if (b1) {
-            if (r->infinity) {
-                *r = p1;
-            } else {
-                JacobianPoint tmp;
-                jacobian_add(r, &p1, &tmp);
-                *r = tmp;
-            }
-        } else if (b2) {
-            if (r->infinity) {
-                *r = p2;
-            } else {
-                JacobianPoint tmp;
-                jacobian_add(r, &p2, &tmp);
-                *r = tmp;
-            }
-        }
-    }
+    // Delegate to wNAF-optimized GLV implementation (w=5, z-ratio precomp table)
+    scalar_mul_glv_wnaf(p, k, r);
 }
 #endif // !SECP256K1_CUDA_LIMBS_32
 
@@ -2778,10 +2714,158 @@ __device__ inline void scalar_mul_wnaf(const JacobianPoint* p, const Scalar* k, 
 // ============================================================================
 // GLV + wNAF Scalar Multiplication
 // ============================================================================
-// Combines GLV endomorphism decomposition with wNAF for arbitrary point:
+// wNAF Helpers for GLV Scalar Multiplication
+// ============================================================================
+
+// Extract `count` bits starting at bit position `pos` from 4x64 LE scalar limbs.
+// count must be in [1, 31]. Positions beyond 255 return 0.
+__device__ inline uint32_t scalar_get_bits(const Scalar* s, int pos, int count) {
+    int limb_idx = pos >> 6;
+    int bit_off  = pos & 63;
+    uint64_t val = 0;
+    if (limb_idx < 4) {
+        val = s->limbs[limb_idx] >> bit_off;
+        if (bit_off + count > 64 && limb_idx + 1 < 4) {
+            val |= s->limbs[limb_idx + 1] << (64 - bit_off);
+        }
+    }
+    return static_cast<uint32_t>(val) & ((1u << count) - 1);
+}
+
+// Encode scalar into windowed Non-Adjacent Form (wNAF).
+// Digits are odd values in [-(2^(w-1)-1), ..., -1, 0, 1, ..., 2^(w-1)-1].
+// Returns length of wNAF (position of last non-zero digit + 1).
+__device__ inline int wnaf_encode(const Scalar* s, int w, int8_t* out, int max_len) {
+    // Zero-fill
+    for (int i = 0; i < max_len; i++) out[i] = 0;
+
+    int carry = 0;
+    int last_set = -1;
+    int bit = 0;
+
+    while (bit < max_len) {
+        uint32_t b = scalar_get_bits(s, bit, 1);
+        if (static_cast<int>(b) == carry) {
+            bit++;
+            continue;
+        }
+
+        int now = w;
+        if (now > max_len - bit) now = max_len - bit;
+
+        int word = static_cast<int>(scalar_get_bits(s, bit, now)) + carry;
+        carry = word >> (w - 1);
+        word -= carry << w;
+
+        out[bit] = static_cast<int8_t>(word);
+        last_set = bit;
+        bit += now;
+    }
+
+    return (last_set >= 0) ? (last_set + 1) : 0;
+}
+
+// Build odd-multiple table [1P, 3P, 5P, ..., (2*table_size-1)*P] using the
+// z-ratio technique from libsecp256k1 (ZERO field inversions).
+// All table entries share an implied Z = globalz.
+// base must be in affine coordinates.
+__device__ inline void build_wnaf_table_zr(
+    const AffinePoint* base,
+    AffinePoint* tbl,
+    int table_size,
+    FieldElement* globalz)
+{
+    // D = 2*base (Jacobian double, base has Z=1)
+    JacobianPoint P_jac;
+    P_jac.x = base->x; P_jac.y = base->y;
+    field_set_one(&P_jac.z); P_jac.infinity = false;
+
+    JacobianPoint D;
+    jacobian_double(&P_jac, &D);
+
+    // C = D.z, C2 = C^2, C3 = C^3
+    FieldElement C = D.z;
+    FieldElement C2, C3;
+    field_sqr(&C, &C2);
+    field_mul(&C2, &C, &C3);
+
+    // d_aff = D.(x,y) on the isomorphic curve (Z cancels in isomorphism)
+    AffinePoint d_aff;
+    d_aff.x = D.x; d_aff.y = D.y;
+
+    // Transform base onto iso curve: (base.x * C^2, base.y * C^3) with Z=1
+    JacobianPoint ai;
+    field_mul(&base->x, &C2, &ai.x);
+    field_mul(&base->y, &C3, &ai.y);
+    field_set_one(&ai.z);
+    ai.infinity = false;
+
+    tbl[0].x = ai.x;
+    tbl[0].y = ai.y;
+
+    // z-ratios: zr[i] = H_i from jacobian_add_mixed_h (Z_{i+1} = Z_i * H_i)
+    FieldElement zr[8]; // max 8 for w=5
+    zr[0] = C; // iso mapping z-ratio
+
+    // Build rest: (2i+1)*P on iso curve via mixed adds
+    for (int i = 1; i < table_size; i++) {
+        FieldElement h;
+        jacobian_add_mixed_h(&ai, &d_aff, &ai, h);
+        tbl[i].x = ai.x;
+        tbl[i].y = ai.y;
+        zr[i] = h;
+    }
+
+    // globalz = ai.z * C (maps from iso curve back to secp256k1)
+    field_mul(&ai.z, &C, globalz);
+
+    // Backward sweep: rescale entries so all share Z = Z_last
+    FieldElement zs = zr[table_size - 1];
+    for (int idx = table_size - 2; idx >= 0; --idx) {
+        if (idx != table_size - 2) {
+            FieldElement tmp;
+            field_mul(&zs, &zr[idx + 1], &tmp);
+            zs = tmp;
+        }
+        FieldElement zs2, zs3;
+        field_sqr(&zs, &zs2);
+        field_mul(&zs2, &zs, &zs3);
+        FieldElement tx, ty;
+        field_mul(&tbl[idx].x, &zs2, &tx);
+        field_mul(&tbl[idx].y, &zs3, &ty);
+        tbl[idx].x = tx;
+        tbl[idx].y = ty;
+    }
+}
+
+// Derive endomorphism table: phi(P) = (beta*x, +-y)
+__device__ inline void derive_endo_table(
+    const AffinePoint* tbl_P,
+    AffinePoint* tbl_endoP,
+    int table_size,
+    bool negate_y)
+{
+    FieldElement beta_fe;
+    beta_fe.limbs[0] = BETA[0]; beta_fe.limbs[1] = BETA[1];
+    beta_fe.limbs[2] = BETA[2]; beta_fe.limbs[3] = BETA[3];
+
+    for (int i = 0; i < table_size; i++) {
+        field_mul(&tbl_P[i].x, &beta_fe, &tbl_endoP[i].x);
+        if (negate_y) {
+            field_negate(&tbl_P[i].y, &tbl_endoP[i].y);
+        } else {
+            tbl_endoP[i].y = tbl_P[i].y;
+        }
+    }
+}
+
+// ============================================================================
+// GLV + wNAF scalar multiplication for arbitrary point: k*P
 // k*P = k1*P + k2*lambda*P where k1,k2 are ~128 bits each.
-// Uses Shamir's interleaved wNAF with both half-scalars for single doubling chain.
-// Cost: ~128 doublings + ~64 mixed additions (vs ~256+128 for plain D&A).
+// Uses Shamir's interleaved wNAF (w=5) with precomputed odd-multiple tables
+// built via z-ratio technique (zero additional field inversions).
+// Cost: ~128 doublings + ~42 mixed additions (vs ~128+96 for old bit-by-bit).
+// ============================================================================
 
 __device__ inline void scalar_mul_glv_wnaf(const JacobianPoint* p, const Scalar* k, JacobianPoint* r) {
     if (scalar_is_zero(k)) {
@@ -2794,7 +2878,7 @@ __device__ inline void scalar_mul_glv_wnaf(const JacobianPoint* p, const Scalar*
 
     GLVDecomposition decomp = glv_decompose(k);
 
-    // Convert base to affine
+    // Convert base to affine (1 field inversion if Z != 1)
     AffinePoint base;
     if (p->z.limbs[0] == 1 && p->z.limbs[1] == 0 && p->z.limbs[2] == 0 && p->z.limbs[3] == 0) {
         base.x = p->x;
@@ -2808,53 +2892,32 @@ __device__ inline void scalar_mul_glv_wnaf(const JacobianPoint* p, const Scalar*
         field_mul(&p->y, &z_inv3, &base.y);
     }
 
-    // P1 = P or -P depending on k1_neg
-    AffinePoint p1 = base;
+    // Negate base if k1 was negated in GLV decomposition
     if (decomp.k1_neg) {
-        FieldElement zero_fe;
-        field_set_zero(&zero_fe);
-        field_sub(&zero_fe, &p1.y, &p1.y);
+        field_negate(&base.y, &base.y);
     }
 
-    // P2 = endomorphism(P) = (beta*x, y) or negated if k2_neg
-    AffinePoint p2;
-    {
-        FieldElement beta_fe;
-        beta_fe.limbs[0] = BETA[0]; beta_fe.limbs[1] = BETA[1];
-        beta_fe.limbs[2] = BETA[2]; beta_fe.limbs[3] = BETA[3];
-        field_mul(&base.x, &beta_fe, &p2.x);
-    }
-    p2.y = base.y;
-    if (decomp.k2_neg) {
-        FieldElement zero_fe;
-        field_set_zero(&zero_fe);
-        field_sub(&zero_fe, &p2.y, &p2.y);
-    }
+    // Build precomputed table [1P, 3P, 5P, ..., 15P] using z-ratio (0 inversions)
+    constexpr int WNAF_W = 5;
+    constexpr int TABLE_SIZE = (1 << (WNAF_W - 2)); // 8
 
-    // P1+P2 precomputed for Shamir (when both bits are 1)
-    AffinePoint p1_plus_p2;
-    {
-        JacobianPoint j1, jp;
-        j1.x = p1.x; j1.y = p1.y; field_set_one(&j1.z); j1.infinity = false;
-        jacobian_add_mixed(&j1, &p2, &jp);
-        if (jp.infinity) {
-            p1_plus_p2.x = p1.x; // degenerate -- won't happen in practice
-            p1_plus_p2.y = p1.y;
-        } else {
-            FieldElement zi, zi2, zi3;
-            field_inv(&jp.z, &zi);
-            field_sqr(&zi, &zi2);
-            field_mul(&zi2, &zi, &zi3);
-            field_mul(&jp.x, &zi2, &p1_plus_p2.x);
-            field_mul(&jp.y, &zi3, &p1_plus_p2.y);
-        }
-    }
+    AffinePoint tbl_P[TABLE_SIZE];
+    FieldElement globalz;
+    build_wnaf_table_zr(&base, tbl_P, TABLE_SIZE, &globalz);
 
-    // Shamir's trick with bit-by-bit interleaving of k1 and k2
-    int len1 = scalar_bitlen(&decomp.k1);
-    int len2 = scalar_bitlen(&decomp.k2);
+    // Derive endomorphism table: phi(P) = (beta*x, +-y)
+    AffinePoint tbl_phiP[TABLE_SIZE];
+    bool flip_phi = (decomp.k1_neg != decomp.k2_neg);
+    derive_endo_table(tbl_P, tbl_phiP, TABLE_SIZE, flip_phi);
+
+    // wNAF encode both ~128-bit half-scalars
+    constexpr int WNAF_MAXLEN = 130;
+    int8_t wnaf1[WNAF_MAXLEN], wnaf2[WNAF_MAXLEN];
+    int len1 = wnaf_encode(&decomp.k1, WNAF_W, wnaf1, WNAF_MAXLEN);
+    int len2 = wnaf_encode(&decomp.k2, WNAF_W, wnaf2, WNAF_MAXLEN);
     int max_len = (len1 > len2) ? len1 : len2;
 
+    // Shamir's 2-stream wNAF loop: single doubling chain, dual table lookups
     r->infinity = true;
     field_set_zero(&r->x);
     field_set_one(&r->y);
@@ -2866,37 +2929,44 @@ __device__ inline void scalar_mul_glv_wnaf(const JacobianPoint* p, const Scalar*
             jacobian_double(r, r);
         }
 
-        int b1 = scalar_bit(&decomp.k1, i);
-        int b2 = scalar_bit(&decomp.k2, i);
+        // Apply k1 wNAF digit
+        int8_t d1 = wnaf1[i];
+        if (d1 != 0) {
+            int idx = ((d1 > 0) ? d1 : -d1);
+            idx = (idx - 1) >> 1;
+            AffinePoint pt = tbl_P[idx];
+            if (d1 < 0) field_negate(&pt.y, &pt.y);
 
-        if (b1 & b2) {
             if (r->infinity) {
-                r->x = p1_plus_p2.x;
-                r->y = p1_plus_p2.y;
-                field_set_one(&r->z);
-                r->infinity = false;
+                r->x = pt.x; r->y = pt.y;
+                field_set_one(&r->z); r->infinity = false;
             } else {
-                jacobian_add_mixed(r, &p1_plus_p2, r);
-            }
-        } else if (b1) {
-            if (r->infinity) {
-                r->x = p1.x;
-                r->y = p1.y;
-                field_set_one(&r->z);
-                r->infinity = false;
-            } else {
-                jacobian_add_mixed(r, &p1, r);
-            }
-        } else if (b2) {
-            if (r->infinity) {
-                r->x = p2.x;
-                r->y = p2.y;
-                field_set_one(&r->z);
-                r->infinity = false;
-            } else {
-                jacobian_add_mixed(r, &p2, r);
+                jacobian_add_mixed(r, &pt, r);
             }
         }
+
+        // Apply k2 wNAF digit
+        int8_t d2 = wnaf2[i];
+        if (d2 != 0) {
+            int idx = ((d2 > 0) ? d2 : -d2);
+            idx = (idx - 1) >> 1;
+            AffinePoint pt = tbl_phiP[idx];
+            if (d2 < 0) field_negate(&pt.y, &pt.y);
+
+            if (r->infinity) {
+                r->x = pt.x; r->y = pt.y;
+                field_set_one(&r->z); r->infinity = false;
+            } else {
+                jacobian_add_mixed(r, &pt, r);
+            }
+        }
+    }
+
+    // Apply globalz correction (z-ratio table has implied Z=globalz)
+    if (!r->infinity) {
+        FieldElement tmp;
+        field_mul(&r->z, &globalz, &tmp);
+        r->z = tmp;
     }
 }
 
@@ -3020,7 +3090,9 @@ __device__ inline void shamir_double_mul(
 // ============================================================================
 // Decomposes both scalars via GLV: a = a1 + a2*lambda, b = b1 + b2*lambda
 // Then computes a1*P + a2*endo(P) + b1*Q + b2*endo(Q) in a single pass.
-// ~128 doublings + ~128 mixed additions max.
+// All 15 non-identity combos of the 4 base points are precomputed into a
+// 16-entry lookup table (batch inversion via Montgomery's trick: 1 field_inv).
+// Main loop: ~128 doublings + ~120 mixed additions (single lookup per position).
 // This is the optimal path for ECDSA verify (u1*G + u2*Q) and Schnorr verify.
 
 __device__ inline void shamir_double_mul_glv(
@@ -3075,45 +3147,140 @@ __device__ inline void shamir_double_mul_glv(
         field_mul(&Q->y, &zi3, &aff_Q.y);
     }
 
-    // Build 4 base points: P, endo(P), Q, endo(Q) -- with sign adjustments
-    AffinePoint pts[4]; // pts[0]=P1, pts[1]=P2(endo), pts[2]=Q1, pts[3]=Q2(endo)
-    FieldElement zero_fe;
-    field_set_zero(&zero_fe);
+    // Build 4 base points: P1, P2=endo(P), Q1, Q2=endo(Q) with sign adjustments
+    AffinePoint pts[4];
 
-    // Load beta into FieldElement
     FieldElement beta_fe;
     beta_fe.limbs[0] = BETA[0]; beta_fe.limbs[1] = BETA[1];
     beta_fe.limbs[2] = BETA[2]; beta_fe.limbs[3] = BETA[3];
 
-    // P1 = P or -P
     pts[0] = aff_P;
-    if (da.k1_neg) field_sub(&zero_fe, &pts[0].y, &pts[0].y);
+    if (da.k1_neg) field_negate(&pts[0].y, &pts[0].y);
 
-    // P2 = endo(P) or -endo(P)
     field_mul(&aff_P.x, &beta_fe, &pts[1].x);
     pts[1].y = aff_P.y;
-    if (da.k2_neg) field_sub(&zero_fe, &pts[1].y, &pts[1].y);
+    if (da.k2_neg) field_negate(&pts[1].y, &pts[1].y);
 
-    // Q1 = Q or -Q
     pts[2] = aff_Q;
-    if (db.k1_neg) field_sub(&zero_fe, &pts[2].y, &pts[2].y);
+    if (db.k1_neg) field_negate(&pts[2].y, &pts[2].y);
 
-    // Q2 = endo(Q) or -endo(Q)
     field_mul(&aff_Q.x, &beta_fe, &pts[3].x);
     pts[3].y = aff_Q.y;
-    if (db.k2_neg) field_sub(&zero_fe, &pts[3].y, &pts[3].y);
+    if (db.k2_neg) field_negate(&pts[3].y, &pts[3].y);
 
-    // Build table of 16 combos for 4-bit index: bit3=P1, bit2=P2, bit1=Q1, bit0=Q2
-    // table[0] = identity (skip), table[1..15] = sums of subsets
-    // To keep register pressure manageable, we only precompute single points
-    // and the most common combos, then accumulate in the loop.
-    // Precompute all 15 non-identity combos would need 15 affine points = 30 FEs.
-    // Instead, use a compact approach: precompute 4 singles + 6 pairs = 10 affine pts.
+    // Precompute all 15 non-identity combos into table[1..15]
+    // Index encoding: bit0=P1(da.k1), bit1=P2(da.k2), bit2=Q1(db.k1), bit3=Q2(db.k2)
+    AffinePoint table[16];
 
-    // Actually for GPU, the compact approach with 4 affine points + dynamic add is better
-    // for register pressure. We do at most 4 adds per iteration but save on precompuatation.
+    // Singles (already affine)
+    table[1] = pts[0];   // P1
+    table[2] = pts[1];   // P2
+    table[4] = pts[2];   // Q1
+    table[8] = pts[3];   // Q2
 
-    // Determine iteration length
+    // Build 11 multi-point combos in Jacobian, then batch-convert to affine
+    JacobianPoint jc[11];
+
+    // Helper: create Jacobian from affine with Z=1
+    #define MADD_PAIR(dst, a_idx, b_idx) { \
+        JacobianPoint _j; _j.x = pts[a_idx].x; _j.y = pts[a_idx].y; \
+        field_set_one(&_j.z); _j.infinity = false; \
+        jacobian_add_mixed(&_j, &pts[b_idx], &dst); }
+
+    // 6 pairs
+    MADD_PAIR(jc[0], 0, 1)   // P1+P2       -> table[3]
+    MADD_PAIR(jc[1], 0, 2)   // P1+Q1       -> table[5]
+    MADD_PAIR(jc[2], 1, 2)   // P2+Q1       -> table[6]
+    MADD_PAIR(jc[3], 0, 3)   // P1+Q2       -> table[9]
+    MADD_PAIR(jc[4], 1, 3)   // P2+Q2       -> table[10]
+    MADD_PAIR(jc[5], 2, 3)   // Q1+Q2       -> table[12]
+
+    #undef MADD_PAIR
+
+    // 4 triples (Jacobian pair + affine single)
+    jacobian_add_mixed(&jc[0], &pts[2], &jc[6]);   // P1+P2+Q1    -> table[7]
+    jacobian_add_mixed(&jc[0], &pts[3], &jc[7]);   // P1+P2+Q2    -> table[11]
+    jacobian_add_mixed(&jc[1], &pts[3], &jc[8]);   // P1+Q1+Q2    -> table[13]
+    jacobian_add_mixed(&jc[2], &pts[3], &jc[9]);   // P2+Q1+Q2    -> table[14]
+
+    // 1 quad (Jacobian triple + affine single)
+    jacobian_add_mixed(&jc[6], &pts[3], &jc[10]);  // P1+P2+Q1+Q2 -> table[15]
+
+    // Check for degenerate combos (e.g., P=Q makes some pairs infinity).
+    // Extremely rare in practice (would need pubkey == generator).
+    {
+        bool has_degen = false;
+        for (int i = 0; i < 11; i++) {
+            if (jc[i].infinity) { has_degen = true; break; }
+        }
+        if (has_degen) {
+            // Fallback: 4-point bit-by-bit accumulation (original approach)
+            int len1 = scalar_bitlen(&da.k1);
+            int len2 = scalar_bitlen(&da.k2);
+            int len3 = scalar_bitlen(&db.k1);
+            int len4 = scalar_bitlen(&db.k2);
+            int max_len = len1;
+            if (len2 > max_len) max_len = len2;
+            if (len3 > max_len) max_len = len3;
+            if (len4 > max_len) max_len = len4;
+
+            r->infinity = true;
+            field_set_zero(&r->x);
+            field_set_one(&r->y);
+            field_set_zero(&r->z);
+
+            const Scalar* scalars[4] = { &da.k1, &da.k2, &db.k1, &db.k2 };
+            #pragma unroll 1
+            for (int i = max_len - 1; i >= 0; --i) {
+                if (!r->infinity) jacobian_double(r, r);
+                for (int j = 0; j < 4; j++) {
+                    if (scalar_bit(scalars[j], i)) {
+                        if (r->infinity) {
+                            r->x = pts[j].x; r->y = pts[j].y;
+                            field_set_one(&r->z); r->infinity = false;
+                        } else {
+                            jacobian_add_mixed(r, &pts[j], r);
+                        }
+                    }
+                }
+            }
+            return;
+        }
+    }
+
+    // Batch inversion: Montgomery's trick for 11 Z values -> 1 field_inv
+    {
+        FieldElement prefix[11];
+        prefix[0] = jc[0].z;
+        for (int i = 1; i < 11; i++) {
+            field_mul(&prefix[i - 1], &jc[i].z, &prefix[i]);
+        }
+
+        FieldElement inv_prod;
+        field_inv(&prefix[10], &inv_prod);
+
+        // Backward sweep: recover individual Z^-1
+        FieldElement z_inv[11];
+        for (int i = 10; i > 0; --i) {
+            field_mul(&inv_prod, &prefix[i - 1], &z_inv[i]);
+            FieldElement tmp;
+            field_mul(&inv_prod, &jc[i].z, &tmp);
+            inv_prod = tmp;
+        }
+        z_inv[0] = inv_prod;
+
+        // Convert each Jacobian -> affine and store in table
+        constexpr int tbl_map[11] = {3, 5, 6, 9, 10, 12, 7, 11, 13, 14, 15};
+        for (int i = 0; i < 11; i++) {
+            FieldElement zi2, zi3;
+            field_sqr(&z_inv[i], &zi2);
+            field_mul(&zi2, &z_inv[i], &zi3);
+            field_mul(&jc[i].x, &zi2, &table[tbl_map[i]].x);
+            field_mul(&jc[i].y, &zi3, &table[tbl_map[i]].y);
+        }
+    }
+
+    // Main loop: single doubling chain with 16-entry table lookup
     int len1 = scalar_bitlen(&da.k1);
     int len2 = scalar_bitlen(&da.k2);
     int len3 = scalar_bitlen(&db.k1);
@@ -3128,34 +3295,39 @@ __device__ inline void shamir_double_mul_glv(
     field_set_one(&r->y);
     field_set_zero(&r->z);
 
-    const Scalar* scalars[4] = { &da.k1, &da.k2, &db.k1, &db.k2 };
-
     #pragma unroll 1
     for (int i = max_len - 1; i >= 0; --i) {
         if (!r->infinity) {
             jacobian_double(r, r);
         }
 
-        // Accumulate all set bits for this position
-        #pragma unroll 4
-        for (int j = 0; j < 4; j++) {
-            if (scalar_bit(scalars[j], i)) {
-                if (r->infinity) {
-                    r->x = pts[j].x;
-                    r->y = pts[j].y;
-                    field_set_one(&r->z);
-                    r->infinity = false;
-                } else {
-                    jacobian_add_mixed(r, &pts[j], r);
-                }
+        int idx = scalar_bit(&da.k1, i)
+                | (scalar_bit(&da.k2, i) << 1)
+                | (scalar_bit(&db.k1, i) << 2)
+                | (scalar_bit(&db.k2, i) << 3);
+
+        if (idx != 0) {
+            if (r->infinity) {
+                r->x = table[idx].x;
+                r->y = table[idx].y;
+                field_set_one(&r->z);
+                r->infinity = false;
+            } else {
+                jacobian_add_mixed(r, &table[idx], r);
             }
         }
     }
 }
 
 // ============================================================================
-// Precomputed Generator Affine Table in __constant__ Memory
+// Precomputed Generator Tables in __constant__ Memory
 // ============================================================================
+
+// -- w=8 table: 256 affine points [0..255]*G, 16 KB constant memory ----------
+// Used by scalar_mul_generator_w8 (32 doublings + <=32 additions).
+#include "gen_table_w8.cuh"
+
+// -- w=4 table: 16 affine points [0..15]*G (legacy, kept for compatibility) ---
 // 16 affine points: table[i] = i*G for i=0..15 (table[0] is unused/identity)
 // Precomputed offline and stored as constants.
 // These are the standard secp256k1 generator multiples.
@@ -3251,7 +3423,447 @@ __device__ inline void scalar_mul_generator_const(const Scalar* k, JacobianPoint
     }
 }
 
+// -- Optimized Generator Scalar Multiplication with w=8 constant table --------
+// Uses GENERATOR_TABLE_W8 in __constant__ memory (256 entries, 16 KB).
+// Fixed-window w=8: 248 doublings + <=32 mixed additions.
+// ~1.8x fewer additions than w=4 (32 vs 64 windows).
+__device__ inline void scalar_mul_generator_w8(const Scalar* k, JacobianPoint* r) {
+    r->infinity = true;
+    field_set_zero(&r->x);
+    field_set_one(&r->y);
+    field_set_zero(&r->z);
+
+    bool started = false;
+
+    // Process scalar 8 bits at a time (32 windows of 8 bits)
+    #pragma unroll 1
+    for (int limb = 3; limb >= 0; limb--) {
+        uint64_t w = k->limbs[limb];
+        #pragma unroll 1
+        for (int byte_idx = 7; byte_idx >= 0; byte_idx--) {
+            uint32_t idx = (uint32_t)((w >> (byte_idx * 8)) & 0xFFULL);
+
+            if (started) {
+                jacobian_double(r, r);
+                jacobian_double(r, r);
+                jacobian_double(r, r);
+                jacobian_double(r, r);
+                jacobian_double(r, r);
+                jacobian_double(r, r);
+                jacobian_double(r, r);
+                jacobian_double(r, r);
+            }
+
+            if (idx != 0) {
+                if (!started) {
+                    r->x = GENERATOR_TABLE_W8[idx].x;
+                    r->y = GENERATOR_TABLE_W8[idx].y;
+                    field_set_one(&r->z);
+                    r->infinity = false;
+                    started = true;
+                } else {
+                    jacobian_add_mixed(r, &GENERATOR_TABLE_W8[idx], r);
+                }
+            }
+        }
+    }
+}
+
+// -- Ultra-fast Generator Multiplication via 16x65536 LUT --------------------
+// Precomputed table: 16 windows x 65536 affine points in global memory (64 MB).
+// For window i: table[i][j] = j * 2^(16*i) * G  (j = 0..65535)
+// k*G = sum of 16 table lookups = 15 mixed additions, ZERO doublings.
+// Table must be built once at init via build_generator_lut kernels.
+// Reference: https://bitcointalk.org/index.php?topic=5396293.0
+#define GEN_LUT_WINDOWS    16
+#define GEN_LUT_WINDOW_BITS 16
+#define GEN_LUT_ENTRIES    65536
+
+__device__ inline void scalar_mul_generator_lut(
+    const Scalar* k,
+    const AffinePoint* __restrict__ lut,
+    JacobianPoint* r)
+{
+    r->infinity = true;
+
+    #pragma unroll 1
+    for (int win = 0; win < GEN_LUT_WINDOWS; win++) {
+        uint32_t idx = (uint32_t)((k->limbs[win >> 2] >> ((win & 3) << 4)) & 0xFFFF);
+
+        if (idx != 0) {
+            const AffinePoint* pt = &lut[(uint32_t)win * GEN_LUT_ENTRIES + idx];
+            if (r->infinity) {
+                r->x = pt->x;
+                r->y = pt->y;
+                field_set_one(&r->z);
+                r->infinity = false;
+            } else {
+                jacobian_add_mixed(r, pt, r);
+            }
+        }
+    }
+
+    if (r->infinity) {
+        field_set_zero(&r->x);
+        field_set_one(&r->y);
+        field_set_zero(&r->z);
+    }
+}
+
+// ============================================================================
+// Byte <-> Scalar/Field conversion (big-endian bytes <-> LE uint64_t limbs)
+// ============================================================================
+
+// Convert 32 big-endian bytes to a Scalar (reduced mod n).
+__device__ inline void scalar_from_bytes(const uint8_t bytes[32], Scalar* r) {
+    for (int i = 0; i < 4; i++) {
+        uint64_t limb = 0;
+        int base = (3 - i) * 8;
+        for (int j = 0; j < 8; j++) {
+            limb = (limb << 8) | bytes[base + j];
+        }
+        r->limbs[i] = limb;
+    }
+    uint64_t borrow = 0;
+    uint64_t tmp[4];
+    for (int i = 0; i < 4; i++) {
+        unsigned __int128 diff = (unsigned __int128)r->limbs[i] - ORDER[i] - borrow;
+        tmp[i] = (uint64_t)diff;
+        borrow = (uint64_t)(-(int64_t)(diff >> 64));
+    }
+    uint64_t mask = -(uint64_t)(borrow == 0);
+    for (int i = 0; i < 4; i++) {
+        r->limbs[i] = (tmp[i] & mask) | (r->limbs[i] & ~mask);
+    }
+}
+
+// Convert Scalar to 32 big-endian bytes.
+__device__ inline void scalar_to_bytes(const Scalar* s, uint8_t bytes[32]) {
+    for (int i = 0; i < 4; i++) {
+        uint64_t limb = s->limbs[3 - i];
+        for (int j = 0; j < 8; j++) {
+            bytes[i * 8 + j] = (uint8_t)(limb >> (56 - j * 8));
+        }
+    }
+}
+
+// Convert FieldElement to 32 big-endian bytes (normalizes mod p first).
+__device__ inline void field_to_bytes(const FieldElement* fe, uint8_t bytes[32]) {
+    constexpr uint64_t P[4] = {
+        0xFFFFFFFEFFFFFC2FULL, 0xFFFFFFFFFFFFFFFFULL,
+        0xFFFFFFFFFFFFFFFFULL, 0xFFFFFFFFFFFFFFFFULL
+    };
+    uint64_t tmp[4];
+    uint64_t borrow = 0;
+    for (int i = 0; i < 4; i++) {
+        unsigned __int128 diff = (unsigned __int128)fe->limbs[i] - P[i] - borrow;
+        tmp[i] = (uint64_t)diff;
+        borrow = (uint64_t)(-(int64_t)(diff >> 64));
+    }
+    uint64_t mask = -(uint64_t)(borrow == 0);
+    uint64_t norm[4];
+    for (int i = 0; i < 4; i++)
+        norm[i] = (tmp[i] & mask) | (fe->limbs[i] & ~mask);
+
+    for (int i = 0; i < 4; i++) {
+        uint64_t limb = norm[3 - i];
+        for (int j = 0; j < 8; j++) {
+            bytes[i * 8 + j] = (uint8_t)(limb >> (56 - j * 8));
+        }
+    }
+}
+
 #endif
+
+// ============================================================================
+// Missing operations parity with CPU library
+// ============================================================================
+
+// -- Field: from_bytes (32 BE bytes -> FieldElement) -------------------------
+// Inverse of field_to_bytes. Does NOT reduce mod p (caller ensures valid).
+__device__ inline void field_from_bytes(const uint8_t bytes[32], FieldElement* r) {
+    for (int i = 0; i < 4; i++) {
+        uint64_t limb = 0;
+        int base = (3 - i) * 8;
+        for (int j = 0; j < 8; j++)
+            limb = (limb << 8) | bytes[base + j];
+        r->limbs[i] = limb;
+    }
+}
+
+// -- Field: from_bytes strict (reject >= p) ----------------------------------
+__device__ inline bool field_from_bytes_strict(const uint8_t bytes[32], FieldElement* r) {
+    field_from_bytes(bytes, r);
+    // Check r < p by trying r - p; if no borrow, r >= p => invalid
+    uint64_t borrow = 0;
+    for (int i = 0; i < 4; i++) {
+        unsigned __int128 diff = (unsigned __int128)r->limbs[i] - MODULUS[i] - borrow;
+        borrow = (uint64_t)(-(int64_t)(diff >> 64));
+    }
+    return borrow != 0;  // valid iff r < p (borrow occurred)
+}
+
+// -- Field: from_uint64 ------------------------------------------------------
+__device__ __forceinline__ void field_from_uint64(uint64_t v, FieldElement* r) {
+    r->limbs[0] = v;
+    r->limbs[1] = 0;
+    r->limbs[2] = 0;
+    r->limbs[3] = 0;
+}
+
+// -- Field: half (a/2 mod p) -------------------------------------------------
+// If a is even: r = a/2. If odd: r = (a + p) / 2.
+__device__ inline void field_half(const FieldElement* a, FieldElement* r) {
+    uint64_t odd = a->limbs[0] & 1;
+    // Conditionally add p
+    uint64_t carry = 0;
+    uint64_t tmp[4];
+    uint64_t mask = -(uint64_t)odd;  // all-1s if odd, all-0s if even
+    for (int i = 0; i < 4; i++) {
+        unsigned __int128 sum = (unsigned __int128)a->limbs[i] + (MODULUS[i] & mask) + carry;
+        tmp[i] = (uint64_t)sum;
+        carry = (uint64_t)(sum >> 64);
+    }
+    // Right-shift by 1
+    r->limbs[0] = (tmp[0] >> 1) | (tmp[1] << 63);
+    r->limbs[1] = (tmp[1] >> 1) | (tmp[2] << 63);
+    r->limbs[2] = (tmp[2] >> 1) | (tmp[3] << 63);
+    r->limbs[3] = (tmp[3] >> 1) | ((uint64_t)carry << 63);
+}
+
+// -- Scalar: from_uint64 -----------------------------------------------------
+__device__ __forceinline__ void scalar_from_uint64(uint64_t v, Scalar* r) {
+    r->limbs[0] = v;
+    r->limbs[1] = 0;
+    r->limbs[2] = 0;
+    r->limbs[3] = 0;
+}
+
+// -- Scalar: is_high (s > n/2) -----------------------------------------------
+// Requires HALF_ORDER from ecdsa.cuh; use scalar_ge if standalone.
+// Re-implemented inline to avoid header dependency.
+__device__ __forceinline__ bool scalar_is_high(const Scalar* s) {
+    // n/2 = 0x7FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF5D576E7357A4501DDFE92F46681B20A0
+    static const uint64_t HALF_N[4] = {
+        0xDFE92F46681B20A0ULL, 0x5D576E7357A4501DULL,
+        0xFFFFFFFFFFFFFFFFULL, 0x7FFFFFFFFFFFFFFFULL
+    };
+    for (int i = 3; i >= 0; i--) {
+        if (s->limbs[i] > HALF_N[i]) return true;
+        if (s->limbs[i] < HALF_N[i]) return false;
+    }
+    return false; // equal to n/2 is not high
+}
+
+// -- Scalar: parse_bytes_strict (reject >= n) --------------------------------
+__device__ inline bool scalar_from_bytes_strict(const uint8_t bytes[32], Scalar* r) {
+    scalar_from_bytes(bytes, r);
+    // Check original value was < n by reparsing without reduction
+    Scalar raw;
+    for (int i = 0; i < 4; i++) {
+        uint64_t limb = 0;
+        int base = (3 - i) * 8;
+        for (int j = 0; j < 8; j++)
+            limb = (limb << 8) | bytes[base + j];
+        raw.limbs[i] = limb;
+    }
+    // If raw != r, then reduction happened => original >= n
+    return scalar_eq(&raw, r);
+}
+
+// -- Scalar: parse_bytes_strict_nonzero (reject >= n or == 0) ----------------
+__device__ inline bool scalar_from_bytes_strict_nonzero(const uint8_t bytes[32], Scalar* r) {
+    if (!scalar_from_bytes_strict(bytes, r)) return false;
+    return !scalar_is_zero(r);
+}
+
+// -- Scalar: half (a/2 mod n) ------------------------------------------------
+__device__ inline void scalar_half(const Scalar* a, Scalar* r) {
+    uint64_t odd = a->limbs[0] & 1;
+    uint64_t carry = 0;
+    uint64_t tmp[4];
+    uint64_t mask = -(uint64_t)odd;
+    for (int i = 0; i < 4; i++) {
+        unsigned __int128 sum = (unsigned __int128)a->limbs[i] + (ORDER[i] & mask) + carry;
+        tmp[i] = (uint64_t)sum;
+        carry = (uint64_t)(sum >> 64);
+    }
+    r->limbs[0] = (tmp[0] >> 1) | (tmp[1] << 63);
+    r->limbs[1] = (tmp[1] >> 1) | (tmp[2] << 63);
+    r->limbs[2] = (tmp[2] >> 1) | (tmp[3] << 63);
+    r->limbs[3] = (tmp[3] >> 1) | ((uint64_t)carry << 63);
+}
+
+// -- Point: jacobian_to_affine -----------------------------------------------
+// Convert Jacobian (X, Y, Z) to affine (x, y) where x=X/Z^2, y=Y/Z^3.
+// If p is infinity, sets out to (0,0) and returns false.
+__device__ inline bool jacobian_to_affine(const JacobianPoint* p,
+                                          FieldElement* out_x, FieldElement* out_y) {
+    if (p->infinity) {
+        field_set_zero(out_x);
+        field_set_zero(out_y);
+        return false;
+    }
+    FieldElement z_inv, z_inv2, z_inv3;
+    field_inv(&p->z, &z_inv);
+    field_sqr(&z_inv, &z_inv2);
+    field_mul(&z_inv, &z_inv2, &z_inv3);
+    field_mul(&p->x, &z_inv2, out_x);
+    field_mul(&p->y, &z_inv3, out_y);
+    return true;
+}
+
+// -- Point: negate -----------------------------------------------------------
+__device__ inline void point_negate(const JacobianPoint* p, JacobianPoint* r) {
+    r->x = p->x;
+    field_negate(&p->y, &r->y);
+    r->z = p->z;
+    r->infinity = p->infinity;
+}
+
+// -- Point: subtract (P - Q = P + (-Q)) -------------------------------------
+__device__ inline void point_sub(const JacobianPoint* p, const JacobianPoint* q,
+                                 JacobianPoint* r) {
+    JacobianPoint neg_q;
+    point_negate(q, &neg_q);
+    jacobian_add(p, &neg_q, r);
+}
+
+// -- Point: has_even_y -------------------------------------------------------
+// Returns true if the affine Y coordinate is even.
+// Requires a field inversion to convert from Jacobian.
+__device__ inline bool point_has_even_y(const JacobianPoint* p) {
+    if (p->infinity) return false;
+    FieldElement ax, ay;
+    jacobian_to_affine(p, &ax, &ay);
+    uint8_t y_bytes[32];
+    field_to_bytes(&ay, y_bytes);
+    return (y_bytes[31] & 1) == 0;
+}
+
+// -- Point: to_compressed (33 bytes: 0x02/0x03 || x) ------------------------
+__device__ inline bool point_to_compressed(const JacobianPoint* p, uint8_t out[33]) {
+    if (p->infinity) return false;
+    FieldElement ax, ay;
+    jacobian_to_affine(p, &ax, &ay);
+    uint8_t y_bytes[32];
+    field_to_bytes(&ay, y_bytes);
+    out[0] = (y_bytes[31] & 1) ? 0x03 : 0x02;
+    field_to_bytes(&ax, out + 1);
+    return true;
+}
+
+// -- Point: from_compressed (33 bytes -> JacobianPoint) ----------------------
+// Uses lift_x + parity selection. Returns false if x not on curve.
+__device__ inline bool point_from_compressed(const uint8_t data[33], JacobianPoint* p) {
+    uint8_t prefix = data[0];
+    if (prefix != 0x02 && prefix != 0x03) return false;
+    bool want_odd_y = (prefix == 0x03);
+
+    // Parse x
+    FieldElement x;
+    field_from_bytes(data + 1, &x);
+
+    // y^2 = x^3 + 7
+    FieldElement x2, x3, y2, y;
+    field_sqr(&x, &x2);
+    field_mul(&x2, &x, &x3);
+    FieldElement seven;
+    field_from_uint64(7, &seven);
+    field_add(&x3, &seven, &y2);
+
+    field_sqrt(&y2, &y);
+
+    // Verify sqrt is correct
+    FieldElement y_check;
+    field_sqr(&y, &y_check);
+    uint8_t yc_bytes[32], y2_bytes[32];
+    field_to_bytes(&y_check, yc_bytes);
+    field_to_bytes(&y2, y2_bytes);
+    for (int i = 0; i < 32; i++) {
+        if (yc_bytes[i] != y2_bytes[i]) return false;
+    }
+
+    // Adjust parity
+    uint8_t y_bytes[32];
+    field_to_bytes(&y, y_bytes);
+    bool y_is_odd = (y_bytes[31] & 1) != 0;
+    if (y_is_odd != want_odd_y) {
+        FieldElement zero;
+        field_set_zero(&zero);
+        field_sub(&zero, &y, &y);
+    }
+
+    p->x = x;
+    p->y = y;
+    field_set_one(&p->z);
+    p->infinity = false;
+    return true;
+}
+
+// -- Point: to_uncompressed (65 bytes: 0x04 || x || y) ----------------------
+__device__ inline bool point_to_uncompressed(const JacobianPoint* p, uint8_t out[65]) {
+    if (p->infinity) return false;
+    FieldElement ax, ay;
+    jacobian_to_affine(p, &ax, &ay);
+    out[0] = 0x04;
+    field_to_bytes(&ax, out + 1);
+    field_to_bytes(&ay, out + 33);
+    return true;
+}
+
+// -- Point: from_uncompressed (65 bytes -> JacobianPoint) --------------------
+__device__ inline bool point_from_uncompressed(const uint8_t data[65], JacobianPoint* p) {
+    if (data[0] != 0x04) return false;
+
+    FieldElement x, y;
+    field_from_bytes(data + 1, &x);
+    field_from_bytes(data + 33, &y);
+
+    // Verify on curve: y^2 == x^3 + 7
+    FieldElement y2, x2, x3, rhs, seven;
+    field_sqr(&y, &y2);
+    field_sqr(&x, &x2);
+    field_mul(&x2, &x, &x3);
+    field_from_uint64(7, &seven);
+    field_add(&x3, &seven, &rhs);
+
+    uint8_t y2_bytes[32], rhs_bytes[32];
+    field_to_bytes(&y2, y2_bytes);
+    field_to_bytes(&rhs, rhs_bytes);
+    for (int i = 0; i < 32; i++) {
+        if (y2_bytes[i] != rhs_bytes[i]) return false;
+    }
+
+    p->x = x;
+    p->y = y;
+    field_set_one(&p->z);
+    p->infinity = false;
+    return true;
+}
+
+// -- Point: x_only_bytes (32 bytes, BIP-340 format) --------------------------
+__device__ inline bool point_x_only_bytes(const JacobianPoint* p, uint8_t out[32]) {
+    if (p->infinity) return false;
+    FieldElement ax, ay;
+    jacobian_to_affine(p, &ax, &ay);
+    field_to_bytes(&ax, out);
+    return true;
+}
+
+// -- Point: x_bytes_and_parity -----------------------------------------------
+// Returns x as 32 bytes and whether y is odd.
+__device__ inline bool point_x_bytes_and_parity(const JacobianPoint* p,
+                                                 uint8_t x_out[32], bool* y_is_odd) {
+    if (p->infinity) return false;
+    FieldElement ax, ay;
+    jacobian_to_affine(p, &ax, &ay);
+    field_to_bytes(&ax, x_out);
+    uint8_t y_bytes[32];
+    field_to_bytes(&ay, y_bytes);
+    *y_is_odd = (y_bytes[31] & 1) != 0;
+    return true;
+}
 
 } // namespace cuda
 } // namespace secp256k1

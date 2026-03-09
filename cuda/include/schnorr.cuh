@@ -339,6 +339,254 @@ __device__ inline bool schnorr_verify(
     return true;
 }
 
+// ============================================================================
+// Schnorr/BIP-340 extensions (CPU parity)
+// ============================================================================
+
+// -- Schnorr keypair struct --------------------------------------------------
+struct SchnorrKeypairGPU {
+    Scalar d;                   // signing key (adjusted for even Y)
+    uint8_t px[32];             // x-coordinate bytes of pubkey
+};
+
+// -- Schnorr: keypair_create -------------------------------------------------
+// Creates a BIP-340 keypair: adjusts private key so pubkey has even Y.
+__device__ inline bool schnorr_keypair_create(
+    const Scalar* private_key,
+    SchnorrKeypairGPU* kp)
+{
+    if (scalar_is_zero(private_key)) return false;
+
+    JacobianPoint P;
+    scalar_mul_generator_const(private_key, &P);
+    if (P.infinity) return false;
+
+    FieldElement ax, ay;
+    jacobian_to_affine(&P, &ax, &ay);
+
+    // Get pubkey x-bytes
+    field_to_bytes(&ax, kp->px);
+
+    // If Y is odd, negate the signing key
+    uint8_t y_bytes[32];
+    field_to_bytes(&ay, y_bytes);
+    if (y_bytes[31] & 1) {
+        scalar_negate(private_key, &kp->d);
+    } else {
+        kp->d = *private_key;
+    }
+
+    return true;
+}
+
+// -- Schnorr: pubkey (X-only from private key) -------------------------------
+// Returns the 32-byte x-only public key for a private key.
+__device__ inline bool schnorr_pubkey(const Scalar* private_key, uint8_t pubkey_x[32]) {
+    if (scalar_is_zero(private_key)) return false;
+
+    JacobianPoint P;
+    scalar_mul_generator_const(private_key, &P);
+    if (P.infinity) return false;
+
+    FieldElement ax, ay;
+    jacobian_to_affine(&P, &ax, &ay);
+    field_to_bytes(&ax, pubkey_x);
+    return true;
+}
+
+// -- Schnorr: sign with keypair (faster, avoids recomputing pubkey) ----------
+__device__ inline bool schnorr_sign_with_keypair(
+    const SchnorrKeypairGPU* kp,
+    const uint8_t msg[32],
+    const uint8_t aux_rand[32],
+    SchnorrSignatureGPU* sig)
+{
+    // t = d XOR tagged_hash("BIP0340/aux", aux_rand)
+    uint8_t t_hash[32];
+    tagged_hash_fast(BIP340_TAG_AUX, aux_rand, 32, t_hash);
+
+    uint8_t d_bytes[32];
+    scalar_to_bytes(&kp->d, d_bytes);
+
+    uint8_t t[32];
+    for (int i = 0; i < 32; i++) t[i] = d_bytes[i] ^ t_hash[i];
+
+    // rand = tagged_hash("BIP0340/nonce", t || px || msg)
+    uint8_t nonce_input[96];
+    for (int i = 0; i < 32; i++) nonce_input[i] = t[i];
+    for (int i = 0; i < 32; i++) nonce_input[32 + i] = kp->px[i];
+    for (int i = 0; i < 32; i++) nonce_input[64 + i] = msg[i];
+
+    uint8_t rand_hash[32];
+    tagged_hash_fast(BIP340_TAG_NONCE, nonce_input, 96, rand_hash);
+
+    Scalar k_prime;
+    scalar_from_bytes(rand_hash, &k_prime);
+    if (scalar_is_zero(&k_prime)) return false;
+
+    JacobianPoint R;
+    scalar_mul_generator_const(&k_prime, &R);
+
+    FieldElement rz_inv, rz_inv2, rz_inv3, rx, ry;
+    field_inv(&R.z, &rz_inv);
+    field_sqr(&rz_inv, &rz_inv2);
+    field_mul(&rz_inv, &rz_inv2, &rz_inv3);
+    field_mul(&R.x, &rz_inv2, &rx);
+    field_mul(&R.y, &rz_inv3, &ry);
+
+    uint8_t ry_bytes[32];
+    field_to_bytes(&ry, ry_bytes);
+    Scalar k;
+    if (ry_bytes[31] & 1) {
+        scalar_negate(&k_prime, &k);
+    } else {
+        k = k_prime;
+    }
+
+    field_to_bytes(&rx, sig->r);
+
+    // e = tagged_hash("BIP0340/challenge", R.x || px || msg) mod n
+    uint8_t challenge_input[96];
+    for (int i = 0; i < 32; i++) challenge_input[i] = sig->r[i];
+    for (int i = 0; i < 32; i++) challenge_input[32 + i] = kp->px[i];
+    for (int i = 0; i < 32; i++) challenge_input[64 + i] = msg[i];
+
+    uint8_t e_hash[32];
+    tagged_hash_fast(BIP340_TAG_CHALLENGE, challenge_input, 96, e_hash);
+
+    Scalar e;
+    scalar_from_bytes(e_hash, &e);
+
+    // s = k + e * d mod n
+    Scalar ed;
+    scalar_mul_mod_n(&e, &kp->d, &ed);
+
+    uint64_t carry = 0;
+    for (int i = 0; i < 4; i++) {
+        unsigned __int128 sum = (unsigned __int128)k.limbs[i] + ed.limbs[i] + carry;
+        sig->s.limbs[i] = (uint64_t)sum;
+        carry = (uint64_t)(sum >> 64);
+    }
+    uint64_t borrow = 0;
+    uint64_t tmp[4];
+    for (int i = 0; i < 4; i++) {
+        unsigned __int128 diff = (unsigned __int128)sig->s.limbs[i] - ORDER[i] - borrow;
+        tmp[i] = (uint64_t)diff;
+        borrow = (uint64_t)(-(int64_t)(diff >> 64));
+    }
+    uint64_t mask = -(uint64_t)(borrow == 0 || carry);
+    for (int i = 0; i < 4; i++)
+        sig->s.limbs[i] = (tmp[i] & mask) | (sig->s.limbs[i] & ~mask);
+
+    return true;
+}
+
+// -- Schnorr: sign verified (fault countermeasure) ---------------------------
+__device__ inline bool schnorr_sign_verified(
+    const Scalar* private_key,
+    const uint8_t msg[32],
+    const uint8_t aux_rand[32],
+    SchnorrSignatureGPU* sig)
+{
+    if (!schnorr_sign(private_key, msg, aux_rand, sig)) return false;
+
+    // Compute pubkey for verification
+    uint8_t pubkey_x[32];
+    schnorr_pubkey(private_key, pubkey_x);
+
+    return schnorr_verify(pubkey_x, msg, sig);
+}
+
+// -- Schnorr: sign with keypair + verified -----------------------------------
+__device__ inline bool schnorr_sign_with_keypair_verified(
+    const SchnorrKeypairGPU* kp,
+    const uint8_t msg[32],
+    const uint8_t aux_rand[32],
+    SchnorrSignatureGPU* sig)
+{
+    if (!schnorr_sign_with_keypair(kp, msg, aux_rand, sig)) return false;
+    return schnorr_verify(kp->px, msg, sig);
+}
+
+// -- Schnorr: parse_strict (reject >= n for s, check r < p) -----------------
+__device__ inline bool schnorr_sig_parse_strict(
+    const uint8_t data[64],
+    SchnorrSignatureGPU* sig)
+{
+    // r = first 32 bytes (field element, must be < p)
+    for (int i = 0; i < 32; i++) sig->r[i] = data[i];
+
+    // Validate r < p
+    FieldElement r_fe;
+    if (!field_from_bytes_strict(data, &r_fe)) return false;
+
+    // s = last 32 bytes (scalar, must be < n)
+    if (!scalar_from_bytes_strict(data + 32, &sig->s)) return false;
+
+    return true;
+}
+
+// -- X-only pubkey parse (lift_x wrapper) ------------------------------------
+struct SchnorrXonlyPubkeyGPU {
+    JacobianPoint point;
+    uint8_t x_bytes[32];
+};
+
+__device__ inline bool schnorr_xonly_pubkey_parse(
+    const uint8_t pubkey_x[32],
+    SchnorrXonlyPubkeyGPU* out)
+{
+    for (int i = 0; i < 32; i++) out->x_bytes[i] = pubkey_x[i];
+    return lift_x(pubkey_x, &out->point);
+}
+
+// -- Schnorr verify with cached pubkey (avoids re-lifting x) ----------------
+__device__ inline bool schnorr_verify_xonly(
+    const SchnorrXonlyPubkeyGPU* pubkey,
+    const uint8_t msg[32],
+    const SchnorrSignatureGPU* sig)
+{
+    if (scalar_is_zero(&sig->s)) return false;
+
+    uint8_t challenge_input[96];
+    for (int i = 0; i < 32; i++) challenge_input[i] = sig->r[i];
+    for (int i = 0; i < 32; i++) challenge_input[32 + i] = pubkey->x_bytes[i];
+    for (int i = 0; i < 32; i++) challenge_input[64 + i] = msg[i];
+
+    uint8_t e_hash[32];
+    tagged_hash_fast(BIP340_TAG_CHALLENGE, challenge_input, 96, e_hash);
+
+    Scalar e;
+    scalar_from_bytes(e_hash, &e);
+
+    Scalar neg_e;
+    scalar_negate(&e, &neg_e);
+
+    JacobianPoint R;
+    shamir_double_mul_glv(&GENERATOR_JACOBIAN, &sig->s, &pubkey->point, &neg_e, &R);
+
+    if (R.infinity) return false;
+
+    FieldElement rz_inv, rz_inv2, rz_inv3, rx_aff, ry_aff;
+    field_inv(&R.z, &rz_inv);
+    field_sqr(&rz_inv, &rz_inv2);
+    field_mul(&rz_inv, &rz_inv2, &rz_inv3);
+    field_mul(&R.x, &rz_inv2, &rx_aff);
+    field_mul(&R.y, &rz_inv3, &ry_aff);
+
+    uint8_t ry_bytes[32];
+    field_to_bytes(&ry_aff, ry_bytes);
+    if (ry_bytes[31] & 1) return false;
+
+    uint8_t rx_bytes[32];
+    field_to_bytes(&rx_aff, rx_bytes);
+    for (int i = 0; i < 32; i++) {
+        if (rx_bytes[i] != sig->r[i]) return false;
+    }
+
+    return true;
+}
+
 } // namespace cuda
 } // namespace secp256k1
 
