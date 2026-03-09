@@ -31,7 +31,6 @@ using secp256k1::ECDSASignature;
 using secp256k1::schnorr_sign;
 using secp256k1::schnorr_verify;
 using secp256k1::bip32_master_key;
-using secp256k1::SchnorrSignature;
 
 static int g_tests_run = 0;
 static int g_tests_passed = 0;
@@ -79,7 +78,7 @@ static void test_scalar_zero_rejection() {
     CHECK(from0.is_zero(), "Scalar::from_uint64(0) is zero");
 
     // parse_bytes_strict_nonzero must reject zero
-    std::array<uint8_t, 32> zero_bytes{};
+    const std::array<uint8_t, 32> zero_bytes{};
     Scalar out{};
     bool ok = Scalar::parse_bytes_strict_nonzero(zero_bytes, out);
     CHECK(!ok, "parse_bytes_strict_nonzero rejects zero");
@@ -293,8 +292,8 @@ static void test_precompute_cache_corrupt() {
     CHECK(!ok, "load_precompute_cache rejects truncated file");
 
     // Cleanup temp files
-    std::remove("/tmp/secp256k1_test_corrupt_cache.bin");
-    std::remove("/tmp/secp256k1_test_trunc_cache.bin");
+    (void)std::remove("/tmp/secp256k1_test_corrupt_cache.bin");
+    (void)std::remove("/tmp/secp256k1_test_trunc_cache.bin");
 }
 
 // ============================================================================
@@ -370,8 +369,9 @@ static void test_field_edge_cases() {
     const auto sum10 = one + zero;
     CHECK(sum10 == one, "FE: 1 + 0 = 1");
 
-    // a - a = 0
-    const auto sub_aa = one - one;
+    // a - a = 0  (intentionally same operand on both sides)
+    const auto other_one = FieldElement::from_uint64(1);
+    const auto sub_aa = one - other_one;
     CHECK(sub_aa == zero, "FE: 1 - 1 = 0");
 
     // negate(0) = 0
@@ -394,7 +394,7 @@ static void test_ecdsa_sig_parse_boundaries() {
     std::printf("\n=== ECDSA signature parse boundaries ===\n");
 
     // Zero signature must be rejected (r=0)
-    std::array<uint8_t, 64> zero_sig{};
+    const std::array<uint8_t, 64> zero_sig{};
     ECDSASignature out{};
     bool ok = ECDSASignature::parse_compact_strict(zero_sig, out);
     CHECK(!ok, "parse_compact_strict rejects zero sig (r=0,s=0)");
