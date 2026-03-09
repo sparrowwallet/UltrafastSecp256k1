@@ -1165,7 +1165,7 @@ bool Context::Impl::create_kernels() {
     kernel_scalar_mul = clCreateKernel(program, "scalar_mul", &err);
     if (err != CL_SUCCESS) { last_error = "Failed to create scalar_mul kernel"; return false; }
 
-    kernel_batch_jacobian_to_affine = clCreateKernel(program, "batch_jacobian_to_affine", &err);
+    kernel_batch_jacobian_to_affine = clCreateKernel(program, "batch_jacobian_to_affine_kernel", &err);
     if (err != CL_SUCCESS) {
         // Non-fatal -- kernel may not exist in older builds
         kernel_batch_jacobian_to_affine = nullptr;

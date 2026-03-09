@@ -452,9 +452,36 @@ static bool ocl_schnorr_verify(const uint8_t pubkey_x[32], const uint8_t msg[32]
     return result != 0;
 }
 
+// Helper: compute pubkey via extended kernel (generator_mul_windowed)
+// This ensures field arithmetic consistency: pubkey and verify use the same
+// cl_program (secp256k1_extended.cl) with identical field_mul_impl.
+static JacobianPoint ext_generator_mul(const Scalar& priv) {
+    cl_int err;
+    cl_mem d_scalar = clCreateBuffer(g_ext.context, CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR,
+                                      sizeof(Scalar), (void*)&priv, &err);
+    JacobianPoint result{};
+    cl_mem d_result = clCreateBuffer(g_ext.context, CL_MEM_WRITE_ONLY,
+                                      sizeof(JacobianPoint), nullptr, &err);
+    cl_uint count = 1;
+    clSetKernelArg(g_ext.k_gen_mul_win, 0, sizeof(cl_mem), &d_scalar);
+    clSetKernelArg(g_ext.k_gen_mul_win, 1, sizeof(cl_mem), &d_result);
+    clSetKernelArg(g_ext.k_gen_mul_win, 2, sizeof(cl_uint), &count);
+
+    size_t global = 1;
+    clEnqueueNDRangeKernel(g_ext.queue, g_ext.k_gen_mul_win, 1, nullptr,
+                           &global, nullptr, 0, nullptr, nullptr);
+    clFinish(g_ext.queue);
+    clEnqueueReadBuffer(g_ext.queue, d_result, CL_TRUE, 0,
+                        sizeof(JacobianPoint), &result, 0, nullptr, nullptr);
+    clReleaseMemObject(d_scalar);
+    clReleaseMemObject(d_result);
+    return result;
+}
+
 // Helper: get pubkey X bytes from scalar (for Schnorr)
+// Uses ext_generator_mul to ensure consistency with schnorr_verify kernel.
 static void get_schnorr_pubkey_x(const Scalar& priv, uint8_t out[32]) {
-    auto P = g_ctx->scalar_mul_generator(priv);
+    auto P = ext_generator_mul(priv);
     auto aff = jacobian_to_affine(P);
     // Big-endian serialize field element
     for (int i = 0; i < 4; i++) {
@@ -467,7 +494,7 @@ static void get_schnorr_pubkey_x(const Scalar& priv, uint8_t out[32]) {
 
 // ECDSA roundtrip: sign + verify
 static int audit_ecdsa_roundtrip() {
-    if (!g_ext.valid) return -1;  // skip
+    if (!g_ext.valid) return -1;
     auto priv = sc_from_u64(42);
     uint8_t msg[32] = {};
     msg[0] = 0xAA; msg[31] = 0xBB;
@@ -475,7 +502,8 @@ static int audit_ecdsa_roundtrip() {
     ExtendedCL::ECDSASig sig;
     if (!ocl_ecdsa_sign(priv, msg, sig)) return 1;
 
-    auto pub = g_ctx->scalar_mul_generator(priv);
+    // Use pubkey from extended kernel (same field arithmetic as sign/verify)
+    auto pub = ext_generator_mul(priv);
     if (!ocl_ecdsa_verify(pub, msg, sig)) return 2;
     return 0;
 }
@@ -507,7 +535,7 @@ static int audit_ecdsa_wrong_key() {
     ExtendedCL::ECDSASig sig;
     if (!ocl_ecdsa_sign(priv1, msg, sig)) return 1;
 
-    auto pub2 = g_ctx->scalar_mul_generator(priv2);
+    auto pub2 = ext_generator_mul(priv2);
     // Verify with wrong key must FAIL
     if (ocl_ecdsa_verify(pub2, msg, sig)) return 2;
     return 0;
@@ -630,7 +658,7 @@ static int audit_ecdsa_multi_key() {
         auto priv = sc_from_u64(keys[ki]);
         ExtendedCL::ECDSASig sig;
         if (!ocl_ecdsa_sign(priv, msg, sig)) return 10 + ki;
-        auto pub = g_ctx->scalar_mul_generator(priv);
+        auto pub = ext_generator_mul(priv);
         if (!ocl_ecdsa_verify(pub, msg, sig)) return 20 + ki;
     }
     return 0;
@@ -711,7 +739,7 @@ static int audit_fuzz_schnorr_zero_key() {
 static int audit_perf_ecdsa_stress() {
     if (!g_ext.valid) return -1;
     auto priv = sc_from_u64(0xDEADCAFE);
-    auto pub = g_ctx->scalar_mul_generator(priv);
+    auto pub = ext_generator_mul(priv);
     uint8_t msg[32] = {};
 
     for (int i = 0; i < 50; i++) {

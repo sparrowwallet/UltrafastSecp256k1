@@ -1581,6 +1581,10 @@ jobs:
             dist/**/*.whl
             dist/**/*.nupkg
             dist/**/*.tgz
+            dist/**/*.gem
+            dist/**/*.jar
+            dist/**/*.deb
+            dist/**/*.rpm
 
       # -- Cosign keyless signing (Sigstore) --
       - name: Install cosign
@@ -1594,12 +1598,12 @@ jobs:
           # SHA256SUMS signature is the root of trust for the entire release.
           echo "Signing: SHA256SUMS"
           cosign sign-blob --yes SHA256SUMS \
-            --bundle SHA256SUMS.bundle
+            --bundle SHA256SUMS.sigstore
           echo "  [OK] SHA256SUMS signed"
 
           # Verify the signature immediately (fail-fast integrity check)
           cosign verify-blob SHA256SUMS \
-            --bundle SHA256SUMS.bundle \
+            --bundle SHA256SUMS.sigstore \
             --certificate-identity-regexp='.*' \
             --certificate-oidc-issuer-regexp='.*'
           echo "  [OK] SHA256SUMS signature verified"
@@ -1614,7 +1618,7 @@ jobs:
           while IFS= read -r -d '' f; do
             echo "Signing: $f"
             if cosign sign-blob --yes "$f" \
-                --bundle "${f}.bundle"; then
+                --bundle "${f}.sigstore"; then
               SIGNED=$((SIGNED + 1))
             else
               echo "::error::Failed to sign artifact: $f"
@@ -1634,7 +1638,7 @@ jobs:
             exit 1
           fi
           echo "=== Cosign: all $SIGNED artifacts signed successfully ==="
-          ls -la SHA256SUMS.bundle
+          ls -la SHA256SUMS.sigstore
 
       # -- Verification Artifacts --
       - name: Generate verification artifacts
@@ -1718,8 +1722,8 @@ jobs:
           files: |
             dist/**/*
             SHA256SUMS
-            SHA256SUMS.bundle
-            dist/**/*.bundle
+            SHA256SUMS.sigstore
+            dist/**/*.sigstore
             sbom.cdx.json
             selftest_report.json
             traceability_report.json

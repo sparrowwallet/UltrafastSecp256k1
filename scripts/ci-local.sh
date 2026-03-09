@@ -149,4 +149,10 @@ if [ "$build_first" -eq 1 ]; then
     (cd "$repo_root" && $compose_cmd -f docker-compose.ci.yml build ci-base)
 fi
 
-(cd "$repo_root" && $compose_cmd -f docker-compose.ci.yml run --rm "$target")
+# Pass -T when stdin is not a terminal (e.g. git pre-push hook)
+tty_flag=""
+if [ ! -t 0 ]; then
+    tty_flag="-T"
+fi
+
+(cd "$repo_root" && $compose_cmd -f docker-compose.ci.yml run --rm $tty_flag "$target")

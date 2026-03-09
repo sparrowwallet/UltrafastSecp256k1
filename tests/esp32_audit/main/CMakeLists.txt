@@ -16,7 +16,7 @@ idf_component_register(
          "${CPU_SRC}/field_26.cpp"
          "${CPU_SRC}/field_52.cpp"
          "${CPU_SRC}/field_asm.cpp"
-         "${CPU_SRC}/field_simd.cpp"
+
          "${CPU_SRC}/scalar.cpp"
          "${CPU_SRC}/point.cpp"
          "${CPU_SRC}/glv.cpp"

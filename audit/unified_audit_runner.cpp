@@ -73,7 +73,7 @@ int test_bip32_run();
 int test_bip32_vectors_run();
 int test_musig2_run();
 int test_ecdh_recovery_taproot_run();
-int test_simd_batch_run();
+int test_edge_cases_run();
 int test_v4_features_run();
 int test_coins_run();
 int test_batch_add_affine_run();
@@ -286,7 +286,7 @@ static const AuditModule ALL_MODULES[] = {
     // Section 8: Performance Validation & Regression
     // ===================================================================
     { "hash_accel",        "Accelerated hashing",                          "performance",    test_hash_accel_run, false },
-    { "simd_batch",        "SIMD batch operations",                        "performance",    test_simd_batch_run, false },
+    { "edge_cases",         "Edge cases & coverage gaps",                  "correctness",   test_edge_cases_run, false },
     { "multiscalar",       "Multi-scalar & batch verify",                  "performance",    test_multiscalar_batch_run, false },
     { "audit_perf",        "Performance smoke (sign/verify roundtrip)",    "performance",    audit_perf_run, false },
 };

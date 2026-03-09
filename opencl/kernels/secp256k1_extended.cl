@@ -99,13 +99,10 @@ inline void scalar_from_bytes_impl(const uchar bytes[32], Scalar* out) {
         out->limbs[i] = limb;
     }
     // Branchless reduction: if scalar >= n, subtract n
-    ulong borrow = 0, tmp[4], diff;
+    ulong borrow = 0, tmp[4];
     ulong n[4] = { ORDER_N0, ORDER_N1, ORDER_N2, ORDER_N3 };
-    for (int i = 0; i < 4; i++) {
-        diff = out->limbs[i] - n[i] - borrow;
-        borrow = (out->limbs[i] < n[i] + borrow) ? 1UL : 0UL;
-        tmp[i] = diff;
-    }
+    for (int i = 0; i < 4; i++)
+        tmp[i] = sub_with_borrow(out->limbs[i], n[i], borrow, &borrow);
     ulong mask = -(ulong)(borrow == 0); // if no borrow, scalar >= n
     for (int i = 0; i < 4; i++)
         out->limbs[i] = (tmp[i] & mask) | (out->limbs[i] & ~mask);
@@ -241,123 +238,138 @@ inline void scalar_negate_impl(const Scalar* a, Scalar* r) {
     int is_zero_flag = scalar_is_zero(a);
 
     ulong borrow = 0;
-    for (int i = 0; i < 4; i++) {
-        ulong diff = n[i] - a->limbs[i] - borrow;
-        borrow = (n[i] < a->limbs[i] + borrow) ? 1UL : 0UL;
-        r->limbs[i] = diff;
-    }
+    for (int i = 0; i < 4; i++)
+        r->limbs[i] = sub_with_borrow(n[i], a->limbs[i], borrow, &borrow);
     // If a was zero, result should be zero too
     ulong mask = -(ulong)(!is_zero_flag);
     for (int i = 0; i < 4; i++) r->limbs[i] &= mask;
 }
 
+// Helper: branchless conditional subtract n (r -= n if r >= n)
+inline void scalar_cond_sub_n(Scalar* r) {
+    ulong n[4] = { ORDER_N0, ORDER_N1, ORDER_N2, ORDER_N3 };
+    ulong borrow = 0;
+    ulong tmp[4];
+    for (int i = 0; i < 4; i++)
+        tmp[i] = sub_with_borrow(r->limbs[i], n[i], borrow, &borrow);
+    // borrow==0 means r >= n, use subtracted result
+    ulong mask = -(ulong)(borrow == 0);
+    for (int i = 0; i < 4; i++)
+        r->limbs[i] = (tmp[i] & mask) | (r->limbs[i] & ~mask);
+}
+
 // Scalar add mod n: r = (a + b) mod n
 inline void scalar_add_mod_n_impl(const Scalar* a, const Scalar* b, Scalar* r) {
     ulong carry = 0;
-    for (int i = 0; i < 4; i++) {
-        ulong sum = a->limbs[i] + b->limbs[i] + carry;
-        carry = (sum < a->limbs[i] || (carry && sum == a->limbs[i])) ? 1UL : 0UL;
-        r->limbs[i] = sum;
-    }
-    // Reduce: if r >= n, subtract n
-    ulong n[4] = { ORDER_N0, ORDER_N1, ORDER_N2, ORDER_N3 };
-    ulong borrow = 0, tmp[4];
-    for (int i = 0; i < 4; i++) {
-        ulong diff = r->limbs[i] - n[i] - borrow;
-        borrow = (r->limbs[i] < n[i] + borrow) ? 1UL : 0UL;
-        tmp[i] = diff;
-    }
-    ulong mask = -(ulong)(borrow == 0 || carry);
     for (int i = 0; i < 4; i++)
-        r->limbs[i] = (tmp[i] & mask) | (r->limbs[i] & ~mask);
+        r->limbs[i] = add_with_carry(a->limbs[i], b->limbs[i], carry, &carry);
+    // If carry, definitely >= n; otherwise check and conditionally subtract
+    if (carry) {
+        // r + 2^256 - n: since carry=1, effectively subtract (n - 2^256) = subtract n, add 2^256
+        // which is same as: result = r - n (the carry absorbed the 2^256)
+        ulong n[4] = { ORDER_N0, ORDER_N1, ORDER_N2, ORDER_N3 };
+        ulong borrow = 0;
+        for (int i = 0; i < 4; i++)
+            r->limbs[i] = sub_with_borrow(r->limbs[i], n[i], borrow, &borrow);
+    } else {
+        scalar_cond_sub_n(r);
+    }
 }
 
 // Scalar sub mod n: r = (a - b) mod n
 inline void scalar_sub_mod_n_impl(const Scalar* a, const Scalar* b, Scalar* r) {
     ulong borrow = 0;
-    for (int i = 0; i < 4; i++) {
-        ulong diff = a->limbs[i] - b->limbs[i] - borrow;
-        borrow = (a->limbs[i] < b->limbs[i] + borrow) ? 1UL : 0UL;
-        r->limbs[i] = diff;
-    }
+    for (int i = 0; i < 4; i++)
+        r->limbs[i] = sub_with_borrow(a->limbs[i], b->limbs[i], borrow, &borrow);
     // If borrow, add n back
     if (borrow) {
         ulong n[4] = { ORDER_N0, ORDER_N1, ORDER_N2, ORDER_N3 };
         ulong carry2 = 0;
-        for (int i = 0; i < 4; i++) {
-            ulong sum = r->limbs[i] + n[i] + carry2;
-            carry2 = (sum < r->limbs[i] || (carry2 && sum == r->limbs[i])) ? 1UL : 0UL;
-            r->limbs[i] = sum;
-        }
+        for (int i = 0; i < 4; i++)
+            r->limbs[i] = add_with_carry(r->limbs[i], n[i], carry2, &carry2);
     }
 }
 
-// Scalar multiply mod n (256×256→512 with Barrett reduction)
+// Scalar multiply mod n: r = (a * b) mod n
+// Uses 2^256 ≡ NC (mod n) reduction where NC = 2^256 - n
 inline void scalar_mul_mod_n_impl(const Scalar* a, const Scalar* b, Scalar* r) {
-    // Full 512-bit product
+    // NC = 2^256 - n = {0x402DA1732FC9BEBF, 0x4551231950B75FC4, 1, 0}
+    ulong NC[3] = { 0x402DA1732FC9BEBFUL, 0x4551231950B75FC4UL, 0x1UL };
+
+    // Step 1: Full 512-bit schoolbook multiplication
     ulong prod[8] = {0,0,0,0,0,0,0,0};
     for (int i = 0; i < 4; i++) {
         ulong carry = 0;
         for (int j = 0; j < 4; j++) {
             ulong2 full = mul64_full(a->limbs[i], b->limbs[j]);
-            ulong lo = full.x + prod[i+j] + carry;
-            carry = full.y + ((lo < prod[i+j]) ? 1UL : 0UL);
-            prod[i+j] = lo;
+            ulong c1, c2;
+            ulong s = add_with_carry(full.x, prod[i+j], 0, &c1);
+            s = add_with_carry(s, carry, 0, &c2);
+            prod[i+j] = s;
+            carry = full.y + c1 + c2;
         }
         prod[i+4] = carry;
     }
 
-    // Barrett reduction: q = floor(prod * mu / 2^512), then prod - q*n
-    ulong mu[5] = { BARRETT_MU0, BARRETT_MU1, BARRETT_MU2, BARRETT_MU3, BARRETT_MU4 };
-    ulong n_arr[4] = { ORDER_N0, ORDER_N1, ORDER_N2, ORDER_N3 };
-
-    // Approximate quotient q ≈ prod[4..7] (top 256 bits)
-    // For Barrett, we compute q1 = prod >> 252 (approx), q2 = q1 * mu >> 260
-    // Simplified: use top 4 limbs and mu to get candidate quotient
-    ulong q[4];
-    {
-        // q = (prod[4..7] * mu4) + ...
-        // Simplified Barrett: q = prod[4..7] since mu ≈ 2^256 + small
-        // Then subtract n at most twice
-        q[0] = prod[4]; q[1] = prod[5]; q[2] = prod[6]; q[3] = prod[7];
-    }
-
-    // r = prod mod 2^256
-    r->limbs[0] = prod[0]; r->limbs[1] = prod[1];
-    r->limbs[2] = prod[2]; r->limbs[3] = prod[3];
-
-    // Subtract q*n from r
-    ulong qn[4] = {0,0,0,0};
+    // Step 2: Reduce high 256 bits. acc = prod[0..3] + prod[4..7] * NC
+    // prod[4..7] * NC has at most 256+129 = 385 bits
+    ulong acc[7] = {prod[0], prod[1], prod[2], prod[3], 0, 0, 0};
     for (int i = 0; i < 4; i++) {
+        if (prod[4+i] == 0) continue;
         ulong carry = 0;
-        for (int j = 0; j < 4 && (i+j) < 4; j++) {
-            ulong2 full = mul64_full(q[i], n_arr[j]);
-            ulong lo = full.x + qn[i+j] + carry;
-            carry = full.y + ((lo < qn[i+j]) ? 1UL : 0UL);
-            qn[i+j] = lo;
+        for (int j = 0; j < 3; j++) {
+            ulong2 full = mul64_full(prod[4+i], NC[j]);
+            ulong c1, c2;
+            ulong s = add_with_carry(full.x, acc[i+j], 0, &c1);
+            s = add_with_carry(s, carry, 0, &c2);
+            acc[i+j] = s;
+            carry = full.y + c1 + c2;
+        }
+        // Propagate remaining carry
+        for (int k = i+3; k < 7 && carry; k++) {
+            acc[k] = add_with_carry(acc[k], carry, 0, &carry);
         }
     }
 
-    ulong borrow = 0;
-    for (int i = 0; i < 4; i++) {
-        ulong diff = r->limbs[i] - qn[i] - borrow;
-        borrow = (r->limbs[i] < qn[i] + borrow) ? 1UL : 0UL;
-        r->limbs[i] = diff;
+    // Step 3: Reduce again. res = acc[0..3] + acc[4..6] * NC
+    ulong res[5] = {acc[0], acc[1], acc[2], acc[3], 0};
+    for (int i = 0; i < 3; i++) {
+        if (acc[4+i] == 0) continue;
+        ulong carry = 0;
+        for (int j = 0; j < 3; j++) {
+            if (i+j >= 5) break;
+            ulong2 full = mul64_full(acc[4+i], NC[j]);
+            ulong c1, c2;
+            ulong s = add_with_carry(full.x, res[i+j], 0, &c1);
+            s = add_with_carry(s, carry, 0, &c2);
+            res[i+j] = s;
+            carry = full.y + c1 + c2;
+        }
+        for (int k = i+3; k < 5 && carry; k++) {
+            res[k] = add_with_carry(res[k], carry, 0, &carry);
+        }
     }
 
-    // Conditional subtract n (at most twice)
-    for (int pass = 0; pass < 2; pass++) {
-        borrow = 0;
-        ulong tmp[4];
-        for (int i = 0; i < 4; i++) {
-            ulong diff = r->limbs[i] - n_arr[i] - borrow;
-            borrow = (r->limbs[i] < n_arr[i] + borrow) ? 1UL : 0UL;
-            tmp[i] = diff;
+    // Step 4: Handle res[4] overflow
+    r->limbs[0] = res[0]; r->limbs[1] = res[1];
+    r->limbs[2] = res[2]; r->limbs[3] = res[3];
+    if (res[4] != 0) {
+        ulong carry = 0;
+        for (int j = 0; j < 3; j++) {
+            ulong2 full = mul64_full(res[4], NC[j]);
+            ulong c1, c2;
+            ulong s = add_with_carry(full.x, r->limbs[j], 0, &c1);
+            s = add_with_carry(s, carry, 0, &c2);
+            r->limbs[j] = s;
+            carry = full.y + c1 + c2;
         }
-        ulong mask = -(ulong)(borrow == 0);
-        for (int i = 0; i < 4; i++)
-            r->limbs[i] = (tmp[i] & mask) | (r->limbs[i] & ~mask);
+        r->limbs[3] += carry;
     }
+
+    // Step 5: Conditional subtract n (at most 3 times to ensure < n)
+    scalar_cond_sub_n(r);
+    scalar_cond_sub_n(r);
+    scalar_cond_sub_n(r);
 }
 
 // Scalar inverse mod n via binary exponentiation: a^(n-2) mod n

@@ -213,96 +213,65 @@ inline void field_sub_impl(FieldElement* r, const FieldElement* a, const FieldEl
 // Field Multiplication: r = (a * b) mod p
 // =============================================================================
 
+// Helper: add 128-bit product (hi:lo) into 3-register accumulator (c2:c1:c0)
+inline void muladd(ulong lo, ulong hi, ulong* c0, ulong* c1, ulong* c2) {
+    ulong carry;
+    *c0 = add_with_carry(*c0, lo, 0, &carry);
+    *c1 = add_with_carry(*c1, hi, carry, &carry);
+    *c2 += carry;
+}
+
+// Helper: add 128-bit product (hi:lo) doubled into accumulator
+inline void muladd2(ulong lo, ulong hi, ulong* c0, ulong* c1, ulong* c2) {
+    muladd(lo, hi, c0, c1, c2);
+    muladd(lo, hi, c0, c1, c2);
+}
+
 inline void field_mul_impl(FieldElement* r, const FieldElement* a, const FieldElement* b) {
-    // Fully unrolled 4x4 schoolbook multiplication
     ulong a0 = a->limbs[0], a1 = a->limbs[1], a2 = a->limbs[2], a3 = a->limbs[3];
     ulong b0 = b->limbs[0], b1 = b->limbs[1], b2 = b->limbs[2], b3 = b->limbs[3];
     ulong product[8];
-    ulong carry;
-
-    // Row 0: a0 * b[0..3]
+    ulong c0, c1, c2;
     ulong2 m;
-    m = mul64_full(a0, b0);
-    product[0] = m.x; carry = m.y;
 
-    m = mul64_full(a0, b1);
-    product[1] = m.x + carry;
-    carry = m.y + (product[1] < m.x ? 1UL : 0UL);
+    // Column 0: a0*b0
+    c0 = 0; c1 = 0; c2 = 0;
+    m = mul64_full(a0, b0); muladd(m.x, m.y, &c0, &c1, &c2);
+    product[0] = c0; c0 = c1; c1 = c2; c2 = 0;
 
-    m = mul64_full(a0, b2);
-    product[2] = m.x + carry;
-    carry = m.y + (product[2] < m.x ? 1UL : 0UL);
+    // Column 1: a0*b1 + a1*b0
+    m = mul64_full(a0, b1); muladd(m.x, m.y, &c0, &c1, &c2);
+    m = mul64_full(a1, b0); muladd(m.x, m.y, &c0, &c1, &c2);
+    product[1] = c0; c0 = c1; c1 = c2; c2 = 0;
 
-    m = mul64_full(a0, b3);
-    product[3] = m.x + carry;
-    carry = m.y + (product[3] < m.x ? 1UL : 0UL);
-    product[4] = carry;
+    // Column 2: a0*b2 + a1*b1 + a2*b0
+    m = mul64_full(a0, b2); muladd(m.x, m.y, &c0, &c1, &c2);
+    m = mul64_full(a1, b1); muladd(m.x, m.y, &c0, &c1, &c2);
+    m = mul64_full(a2, b0); muladd(m.x, m.y, &c0, &c1, &c2);
+    product[2] = c0; c0 = c1; c1 = c2; c2 = 0;
 
-    // Row 1: a1 * b[0..3]
-    m = mul64_full(a1, b0);
-    ulong t = product[1] + m.x;
-    carry = m.y + (t < product[1] ? 1UL : 0UL);
-    product[1] = t;
+    // Column 3: a0*b3 + a1*b2 + a2*b1 + a3*b0
+    m = mul64_full(a0, b3); muladd(m.x, m.y, &c0, &c1, &c2);
+    m = mul64_full(a1, b2); muladd(m.x, m.y, &c0, &c1, &c2);
+    m = mul64_full(a2, b1); muladd(m.x, m.y, &c0, &c1, &c2);
+    m = mul64_full(a3, b0); muladd(m.x, m.y, &c0, &c1, &c2);
+    product[3] = c0; c0 = c1; c1 = c2; c2 = 0;
 
-    m = mul64_full(a1, b1);
-    t = product[2] + m.x + carry;
-    carry = m.y + (t < product[2] ? 1UL : 0UL) + (t < carry ? 1UL : 0UL);
-    product[2] = t;
+    // Column 4: a1*b3 + a2*b2 + a3*b1
+    m = mul64_full(a1, b3); muladd(m.x, m.y, &c0, &c1, &c2);
+    m = mul64_full(a2, b2); muladd(m.x, m.y, &c0, &c1, &c2);
+    m = mul64_full(a3, b1); muladd(m.x, m.y, &c0, &c1, &c2);
+    product[4] = c0; c0 = c1; c1 = c2; c2 = 0;
 
-    m = mul64_full(a1, b2);
-    t = product[3] + m.x + carry;
-    carry = m.y + (t < product[3] ? 1UL : 0UL) + (t < carry ? 1UL : 0UL);
-    product[3] = t;
+    // Column 5: a2*b3 + a3*b2
+    m = mul64_full(a2, b3); muladd(m.x, m.y, &c0, &c1, &c2);
+    m = mul64_full(a3, b2); muladd(m.x, m.y, &c0, &c1, &c2);
+    product[5] = c0; c0 = c1; c1 = c2; c2 = 0;
 
-    m = mul64_full(a1, b3);
-    t = product[4] + m.x + carry;
-    carry = m.y + (t < product[4] ? 1UL : 0UL) + (t < carry ? 1UL : 0UL);
-    product[4] = t;
-    product[5] = carry;
-
-    // Row 2: a2 * b[0..3]
-    m = mul64_full(a2, b0);
-    t = product[2] + m.x;
-    carry = m.y + (t < product[2] ? 1UL : 0UL);
-    product[2] = t;
-
-    m = mul64_full(a2, b1);
-    t = product[3] + m.x + carry;
-    carry = m.y + (t < product[3] ? 1UL : 0UL) + (t < carry ? 1UL : 0UL);
-    product[3] = t;
-
-    m = mul64_full(a2, b2);
-    t = product[4] + m.x + carry;
-    carry = m.y + (t < product[4] ? 1UL : 0UL) + (t < carry ? 1UL : 0UL);
-    product[4] = t;
-
-    m = mul64_full(a2, b3);
-    t = product[5] + m.x + carry;
-    carry = m.y + (t < product[5] ? 1UL : 0UL) + (t < carry ? 1UL : 0UL);
-    product[5] = t;
-    product[6] = carry;
-
-    // Row 3: a3 * b[0..3]
-    m = mul64_full(a3, b0);
-    t = product[3] + m.x;
-    carry = m.y + (t < product[3] ? 1UL : 0UL);
-    product[3] = t;
-
-    m = mul64_full(a3, b1);
-    t = product[4] + m.x + carry;
-    carry = m.y + (t < product[4] ? 1UL : 0UL) + (t < carry ? 1UL : 0UL);
-    product[4] = t;
-
-    m = mul64_full(a3, b2);
-    t = product[5] + m.x + carry;
-    carry = m.y + (t < product[5] ? 1UL : 0UL) + (t < carry ? 1UL : 0UL);
-    product[5] = t;
-
-    m = mul64_full(a3, b3);
-    t = product[6] + m.x + carry;
-    carry = m.y + (t < product[6] ? 1UL : 0UL) + (t < carry ? 1UL : 0UL);
-    product[6] = t;
-    product[7] = carry;
+    // Column 6: a3*b3
+    m = mul64_full(a3, b3); muladd(m.x, m.y, &c0, &c1, &c2);
+    product[6] = c0;
+    product[7] = c1;
 
     field_reduce(r, product);
 }
@@ -324,98 +293,43 @@ inline void field_sqr_n_impl(FieldElement* r, int n) {
 }
 
 inline void field_sqr_impl(FieldElement* r, const FieldElement* a) {
-    // Fully unrolled squaring: exploits a[i]*a[j] == a[j]*a[i]
     ulong a0 = a->limbs[0], a1 = a->limbs[1], a2 = a->limbs[2], a3 = a->limbs[3];
     ulong product[8];
-    ulong carry;
+    ulong c0, c1, c2;
     ulong2 m;
-    ulong t, c1, c2, c3;
 
-    // -- Off-diagonal products (each appears twice) --
-    m = mul64_full(a0, a1);
-    ulong od01_lo = m.x, od01_hi = m.y;
-    m = mul64_full(a0, a2);
-    ulong od02_lo = m.x, od02_hi = m.y;
-    m = mul64_full(a0, a3);
-    ulong od03_lo = m.x, od03_hi = m.y;
-    m = mul64_full(a1, a2);
-    ulong od12_lo = m.x, od12_hi = m.y;
-    m = mul64_full(a1, a3);
-    ulong od13_lo = m.x, od13_hi = m.y;
-    m = mul64_full(a2, a3);
-    ulong od23_lo = m.x, od23_hi = m.y;
+    // Column 0: a0*a0
+    c0 = 0; c1 = 0; c2 = 0;
+    m = mul64_full(a0, a0); muladd(m.x, m.y, &c0, &c1, &c2);
+    product[0] = c0; c0 = c1; c1 = c2; c2 = 0;
 
-    // Accumulate off-diagonal into product[1..6]
-    product[1] = od01_lo;
+    // Column 1: 2*a0*a1
+    m = mul64_full(a0, a1); muladd2(m.x, m.y, &c0, &c1, &c2);
+    product[1] = c0; c0 = c1; c1 = c2; c2 = 0;
 
-    product[2] = od02_lo + od01_hi;
-    carry = (product[2] < od02_lo) ? 1UL : 0UL;
+    // Column 2: 2*a0*a2 + a1*a1
+    m = mul64_full(a0, a2); muladd2(m.x, m.y, &c0, &c1, &c2);
+    m = mul64_full(a1, a1); muladd(m.x, m.y, &c0, &c1, &c2);
+    product[2] = c0; c0 = c1; c1 = c2; c2 = 0;
 
-    t = od03_lo + od02_hi;
-    c1 = (t < od03_lo) ? 1UL : 0UL;
-    t += od12_lo;
-    c2 = (t < od12_lo) ? 1UL : 0UL;
-    t += carry;
-    c3 = (t < carry) ? 1UL : 0UL;
-    product[3] = t;
-    carry = c1 + c2 + c3;
+    // Column 3: 2*a0*a3 + 2*a1*a2
+    m = mul64_full(a0, a3); muladd2(m.x, m.y, &c0, &c1, &c2);
+    m = mul64_full(a1, a2); muladd2(m.x, m.y, &c0, &c1, &c2);
+    product[3] = c0; c0 = c1; c1 = c2; c2 = 0;
 
-    t = od03_hi + od12_hi;
-    c1 = (t < od03_hi) ? 1UL : 0UL;
-    t += od13_lo;
-    c2 = (t < od13_lo) ? 1UL : 0UL;
-    t += carry;
-    c3 = (t < carry) ? 1UL : 0UL;
-    product[4] = t;
-    carry = c1 + c2 + c3;
+    // Column 4: 2*a1*a3 + a2*a2
+    m = mul64_full(a1, a3); muladd2(m.x, m.y, &c0, &c1, &c2);
+    m = mul64_full(a2, a2); muladd(m.x, m.y, &c0, &c1, &c2);
+    product[4] = c0; c0 = c1; c1 = c2; c2 = 0;
 
-    t = od13_hi + od23_lo;
-    c1 = (t < od13_hi) ? 1UL : 0UL;
-    t += carry;
-    c2 = (t < carry) ? 1UL : 0UL;
-    product[5] = t;
-    carry = c1 + c2;
+    // Column 5: 2*a2*a3
+    m = mul64_full(a2, a3); muladd2(m.x, m.y, &c0, &c1, &c2);
+    product[5] = c0; c0 = c1; c1 = c2; c2 = 0;
 
-    product[6] = od23_hi + carry;
-
-    // Double off-diagonal terms
-    product[7] = product[6] >> 63;
-    product[6] = (product[6] << 1) | (product[5] >> 63);
-    product[5] = (product[5] << 1) | (product[4] >> 63);
-    product[4] = (product[4] << 1) | (product[3] >> 63);
-    product[3] = (product[3] << 1) | (product[2] >> 63);
-    product[2] = (product[2] << 1) | (product[1] >> 63);
-    product[1] = (product[1] << 1);
-    product[0] = 0;
-
-    // Add diagonal terms (a[i]^2)
-    m = mul64_full(a0, a0);
-    product[0] = m.x;
-    t = product[1] + m.y;
-    carry = (t < product[1]) ? 1UL : 0UL;
-    product[1] = t;
-
-    m = mul64_full(a1, a1);
-    t = product[2] + m.x + carry;
-    carry = (t < product[2]) ? 1UL : 0UL;
-    product[2] = t;
-    t = product[3] + m.y + carry;
-    carry = (t < product[3]) ? 1UL : 0UL;
-    product[3] = t;
-
-    m = mul64_full(a2, a2);
-    t = product[4] + m.x + carry;
-    carry = (t < product[4]) ? 1UL : 0UL;
-    product[4] = t;
-    t = product[5] + m.y + carry;
-    carry = (t < product[5]) ? 1UL : 0UL;
-    product[5] = t;
-
-    m = mul64_full(a3, a3);
-    t = product[6] + m.x + carry;
-    carry = (t < product[6]) ? 1UL : 0UL;
-    product[6] = t;
-    product[7] += m.y + carry;
+    // Column 6: a3*a3
+    m = mul64_full(a3, a3); muladd(m.x, m.y, &c0, &c1, &c2);
+    product[6] = c0;
+    product[7] = c1;
 
     field_reduce(r, product);
 }
