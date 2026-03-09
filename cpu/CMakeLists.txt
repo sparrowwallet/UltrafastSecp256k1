@@ -35,7 +35,6 @@ set(SECP256K1_SOURCES
     src/ecdh.cpp         # ECDH key exchange
     src/recovery.cpp     # ECDSA public key recovery
     src/taproot.cpp      # Taproot (BIP-341/342) key tweaking
-    src/field_simd.cpp   # SIMD batch field operations + Montgomery batch inverse
     src/batch_add_affine.cpp  # Affine batch addition for sequential ECC search
     src/hash_accel.cpp    # Accelerated SHA-256 (SHA-NI) + RIPEMD-160 + Hash160
     src/pedersen.cpp      # Pedersen commitments (homomorphic)
@@ -219,12 +218,9 @@ if(SECP256K1_USE_ASM)
         
         list(APPEND SECP256K1_SOURCES
             src/field_asm_arm64.cpp
-            src/field_asm52_arm64.cpp
         )
         
         add_compile_definitions(SECP256K1_HAS_ARM64_ASM=1)
-        add_compile_definitions(SECP256K1_HAS_ARM64_FE52_ASM=1)
-        message(STATUS "Secp256k1: 5x52 MUL/UMULH assembly enabled (ARM64)")
         set(SECP256K1_HAS_ASM TRUE CACHE INTERNAL "Assembly support enabled")
         
         if(SECP256K1_USE_FAST_REDUCTION)
@@ -733,7 +729,7 @@ if(BUILD_TESTING)
         tests/test_bip32_vectors.cpp
         tests/test_musig2.cpp
         tests/test_ecdh_recovery_taproot.cpp
-        tests/test_simd_batch.cpp
+        tests/test_edge_cases.cpp
         tests/test_v4_features.cpp
         tests/test_coins.cpp
         tests/test_batch_add_affine.cpp
@@ -863,6 +859,14 @@ if(BUILD_TESTING)
     endif()
     add_test(NAME point_edge_cases COMMAND test_point_edge_cases_standalone)
 
+    # Edge case & coverage gap tests (scalar zero, infinity arithmetic, BIP-32 IL>=n, cache corruption)
+    add_executable(test_edge_cases_standalone
+        tests/test_edge_cases.cpp
+    )
+    target_link_libraries(test_edge_cases_standalone PRIVATE ${SECP256K1_LIB_NAME})
+    target_compile_definitions(test_edge_cases_standalone PRIVATE STANDALONE_TEST)
+    add_test(NAME edge_cases COMMAND test_edge_cases_standalone)
+
     # -- CTest labels for core library tests --------------------------------
     # Label all core tests so they can be run as a group:
     #   ctest --test-dir <build> -L core
@@ -870,7 +874,7 @@ if(BUILD_TESTING)
         selftest batch_add_affine hash_accel
         field_26 exhaustive comprehensive
         bip340_vectors bip340_strict bip32_vectors
-        rfc6979_vectors ecc_properties point_edge_cases
+        rfc6979_vectors ecc_properties point_edge_cases edge_cases
     )
     # field_52 only exists when __uint128_t is available (not plain MSVC)
     if(NOT (MSVC AND NOT CMAKE_CXX_COMPILER_ID MATCHES "Clang"))

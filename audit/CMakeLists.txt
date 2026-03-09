@@ -313,7 +313,7 @@ add_executable(unified_audit_runner
     ${CPU_TESTS_DIR}/test_bip32_vectors.cpp
     ${CPU_TESTS_DIR}/test_musig2.cpp
     ${CPU_TESTS_DIR}/test_ecdh_recovery_taproot.cpp
-    ${CPU_TESTS_DIR}/test_simd_batch.cpp
+    ${CPU_TESTS_DIR}/test_edge_cases.cpp
     ${CPU_TESTS_DIR}/test_v4_features.cpp
     ${CPU_TESTS_DIR}/test_coins.cpp
     ${CPU_TESTS_DIR}/test_batch_add_affine.cpp
