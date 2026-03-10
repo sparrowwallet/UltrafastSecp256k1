@@ -1,0 +1,4 @@
+[FAIL] lag: inv (var-time) ratio=0.90x (min=1.00x)
+[FAIL] lag: Schnorr Verify (cached) ratio=0.95x (min=1.00x)
+[FAIL] lag: Schnorr Verify (raw) ratio=0.92x (min=1.00x)
+[FAIL] lag: Schnorr Verify ratio=0.92x (min=1.00x)
