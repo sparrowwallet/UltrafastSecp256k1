@@ -168,6 +168,7 @@ Features are organized into **maturity tiers** (see [SUPPORTED_GUARANTEES.md](in
 | **2 -- Protocol** | FROST | Threshold signatures, t-of-n | [OK] |
 | **2 -- Protocol** | Adaptor | Schnorr + ECDSA adaptor signatures | [OK] |
 | **2 -- Protocol** | Pedersen | Commitments, homomorphic, switch commitments | [OK] |
+| **2 -- Protocol** | ZK Proofs | Schnorr sigma, DLEQ, Bulletproof range proofs (64-bit) | [OK] |
 | **3 -- Convenience** | Address | P2PKH, P2WPKH, P2TR, Base58, Bech32/m, EIP-55 | [OK] |
 | **3 -- Convenience** | Coins | 27 blockchains, auto-dispatch | [OK] |
 | -- | GPU | CUDA, Metal, OpenCL, ROCm kernels | [OK] |
@@ -448,6 +449,42 @@ See [THREAT_MODEL.md](THREAT_MODEL.md) for a full layer-by-layer risk assessment
 | **Formal CT verification** | Fiat-Crypto style | 🔜 Planned |
 
 **Assumptions:** CT guarantees depend on compiler not introducing secret-dependent branches during optimization. Builds use `-O2` with Clang; MSVC may require additional flags. Micro-architectural side channels (Spectre, power analysis) are outside current scope -- see [THREAT_MODEL.md](THREAT_MODEL.md).
+
+---
+
+## Zero-Knowledge Proofs (Schnorr Sigma, DLEQ, Bulletproofs)
+
+UltrafastSecp256k1 provides ZK proof primitives over the secp256k1 curve:
+
+| Proof Type | Prove | Verify | Proof Size | Use Cases |
+|------------|-------|--------|------------|-----------|
+| **Knowledge Proof** | 20.3 us | 21.8 us | 64 bytes | Prove knowledge of discrete log (x: P = x*G) |
+| **DLEQ Proof** | 40.0 us | 56.4 us | 64 bytes | Prove log_G(P) == log_H(Q) -- VRFs, adaptor sigs, atomic swaps |
+| **Bulletproof Range** | 13,467 us | 2,634 us | ~620 bytes | Prove committed value in [0, 2^64) -- Confidential Transactions |
+
+**Security model:**
+- All proving operations use the **CT layer** (constant-time, side-channel resistant)
+- All verification uses the **FAST layer** (variable-time, public data only)
+- Non-interactive via **Fiat-Shamir** (tagged SHA-256)
+- Nothing-up-my-sleeve generators for Bulletproofs (no trusted setup)
+
+**API:** `#include <secp256k1/zk.hpp>` -- namespace `secp256k1::zk`
+
+```cpp
+// Knowledge proof: prove you know x such that P = x*G
+auto proof = zk::knowledge_prove(secret, pubkey, msg, aux_rand);
+bool ok = zk::knowledge_verify(proof, pubkey, msg);
+
+// DLEQ: prove log_G(P) == log_H(Q)
+auto dleq = zk::dleq_prove(secret, G, H, P, Q, aux_rand);
+bool ok = zk::dleq_verify(dleq, G, H, P, Q);
+
+// Bulletproof range proof: prove committed value in [0, 2^64)
+auto rp = zk::range_prove(value, blinding, commitment, aux_rand);
+bool ok = zk::range_verify(commitment, rp);
+```
+
+*Benchmarks: i7-14400F, 11 passes, pinned core, median. See [docs/BENCHMARKS.md](docs/BENCHMARKS.md).*
 
 ---
 

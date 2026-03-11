@@ -24,6 +24,7 @@ cryptographic correctness, constant-time behavior, cross-platform KATs
 | 6. Safety & Robustness | 8 | CT equivalence, fault injection, debug invariants, ABI gate, differential |
 | 7. Cross-Platform | 4 | Fiat-crypto vectors, cross-platform KAT, exhaustive small-group, comprehensive |
 | 8. Side-Channel | 2 | CT mode verification, dudect smoke test |
+| 9. Zero-Knowledge | 3 | Knowledge proof, DLEQ proof, Bulletproof (prove + verify) |
 
 ### Platform Support Matrix
 

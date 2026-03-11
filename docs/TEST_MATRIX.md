@@ -57,6 +57,7 @@
 | `test_large_scalar_multiplication.cpp` | Large scalar multiplication | [OK] |
 | `test_field_52.cpp` | 52-bit limb representation | [OK] |
 | `test_field_26.cpp` | 26-bit limb representation | [OK] |
+| `test_zk.cpp` | ZK proofs: knowledge, DLEQ, Bulletproof, batch (24 tests) | [OK] |
 | `test_hash_accel.cpp` | SHA-256 acceleration tests | [OK] |
 | `test_exhaustive.cpp` | Exhaustive tests (small curves) | [OK] |
 | `test_v4_features.cpp` | v4 feature tests | [OK] |
@@ -170,6 +171,10 @@
 | FROST t-of-n | -- | [!] **Not tested** | Multi-party simulation needed |
 | Adaptor signatures | `test_v4_features.cpp` | [OK] Basic | Limited vectors |
 | Pedersen commitments | `test_v4_features.cpp` | [OK] Basic | Limited vectors |
+| ZK Knowledge proof | `test_zk.cpp` | [OK] | Prove/verify, arbitrary base, serialization |
+| ZK DLEQ proof | `test_zk.cpp` | [OK] | Prove/verify, cross-basis equality |
+| ZK Bulletproof range | `test_zk.cpp` | [OK] | Prove/verify, boundary values, inner product |
+| ZK batch range verify | `test_zk.cpp` | [OK] | Multi-proof batch verification |
 | Taproot (BIP-341) | `test_ecdh_recovery_taproot.cpp` | [OK] Basic | -- |
 | BIP-32 HD derivation | `test_bip32.cpp` | [OK] | Standard vectors |
 | 28-coin dispatch | `test_coins.cpp` | [OK] | Per-coin address format (P2PKH, P2WPKH, P2TR, P2SH-P2WPKH, CashAddr, EIP-55, TRON_BASE58) |

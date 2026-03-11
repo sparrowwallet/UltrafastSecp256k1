@@ -11,6 +11,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Zero-Knowledge Proof Layer** (`zk.hpp`/`zk.cpp`) -- non-interactive Schnorr knowledge proofs,
+  DLEQ (discrete log equality) proofs, and Bulletproof range proofs (64-bit). All proving
+  operations use CT layer (constant-time); verification uses FAST layer (public data).
+  Fiat-Shamir via tagged SHA-256. Nothing-up-my-sleeve generators (no trusted setup).
+- **ZK Batch Operations** -- `batch_range_verify()` for efficient multi-proof verification,
+  `batch_commit()` for Pedersen commitment generation.
+- **MSM-optimized Bulletproof verifier** -- multi-scalar multiplication (Pippenger) merges
+  144 points into a single MSM; Montgomery batch inversion for s_coeff (1 inv + 126 muls vs
+  64 inversions). 1.93x speedup (5,079 -> 2,634 us).
+- **GPU ZK kernels** -- Pedersen commitment (`pedersen.cuh`) and ZK proof primitives (`zk.cuh`)
+  for CUDA backend.
+- **ZK Benchmarks** in `bench_unified` Section 8.5: Pedersen commit, Knowledge prove/verify,
+  DLEQ prove/verify, Bulletproof range prove/verify with throughput numbers.
+- **24 ZK tests** in `test_zk.cpp`: knowledge proof, DLEQ, Bulletproof range proof correctness,
+  soundness, serialization, batch verification, edge cases.
 - **Unified Wallet API** (`wallet.hpp`/`wallet.cpp`) -- chain-agnostic key management, address
   generation, message signing, and public key recovery. Single `wallet::` namespace works
   identically across Bitcoin, Ethereum, Tron, and all 28 supported coins.

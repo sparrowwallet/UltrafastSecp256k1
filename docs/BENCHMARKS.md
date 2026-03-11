@@ -455,6 +455,40 @@ CT layer provides side-channel resistance at the cost of performance.
 
 ---
 
+## Zero-Knowledge Proof Benchmarks (CPU)
+
+**Hardware:** Intel Core i7-14400F (P-core, Raptor Lake)
+**Compiler:** GCC 14.2.0, `-O3 -march=native`
+**Methodology:** 11 passes, IQR outlier removal, median, 64-key pool, pinned core
+
+### ZK Proof Operations
+
+| Operation | Time/Op | Throughput | Notes |
+|-----------|---------|------------|-------|
+| Pedersen Commit | 33.0 us | 30,303 op/s | v*H + r*G (two scalar muls) |
+| Knowledge Prove | 20.3 us | 49,261 op/s | Non-interactive Schnorr sigma, CT path |
+| Knowledge Verify | 21.8 us | 45,872 op/s | s*G == R + e*P, FAST path |
+| DLEQ Prove | 40.0 us | 24,969 op/s | Discrete log equality, CT path |
+| DLEQ Verify | 56.4 us | 17,730 op/s | Two-base verification, FAST path |
+| Range Prove (64-bit) | 13,467 us | 74 op/s | Bulletproof prover, CT path |
+| Range Verify (64-bit) | 2,634 us | 380 op/s | MSM-optimized verifier, FAST path |
+
+### Range Verify Optimization (v3.22+)
+
+The Bulletproof verifier was optimized with multi-scalar multiplication (MSM):
+
+| Optimization | Technique | Speedup |
+|--------------|-----------|---------|
+| Polynomial check | 5-point MSM (delta, t_hat*G, tau_x*H, -T1, -T2) | Reduced from 3 scalar muls |
+| P_check + expected merge | 144-point MSM (64 G_i, 64 H_i, 12 L_j, 12 R_j, A, S, ...) | Single MSM vs 128+ individual muls |
+| s_coeff computation | Montgomery batch inversion (1 inv + 126 muls vs 64 inversions) | ~64x fewer inversions |
+| **Total** | **Combined MSM + batch inversion** | **1.93x (5,079 -> 2,634 us)** |
+
+Pippenger MSM is used when point count > 64. For the prover, individual GLV-optimized
+scalar multiplications remain faster than MSM for the 129-point workload.
+
+---
+
 ## Available Benchmark Targets
 
 All targets registered in CMake. Build with `cmake --build build -j` then run from `build/cpu/`.

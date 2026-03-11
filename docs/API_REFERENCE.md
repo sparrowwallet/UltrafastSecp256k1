@@ -30,15 +30,20 @@ Complete API documentation for CPU, CUDA, and WASM implementations.
    - [Wallet Signing](#wallet-signing)
    - [Wallet Recovery](#wallet-recovery)
 5. [Message Signing API](#message-signing-api)
-6. [CUDA API](#cuda-api)
+6. [Zero-Knowledge Proof API](#zero-knowledge-proof-api)
+   - [Knowledge Proof (Schnorr Sigma)](#knowledge-proof-schnorr-sigma)
+   - [DLEQ Proof (Discrete Log Equality)](#dleq-proof-discrete-log-equality)
+   - [Bulletproof Range Proof](#bulletproof-range-proof)
+   - [Batch Operations](#zk-batch-operations)
+7. [CUDA API](#cuda-api)
    - [Data Structures](#cuda-data-structures)
    - [Field Operations](#cuda-field-operations)
    - [Point Operations](#cuda-point-operations)
    - [Batch Operations](#cuda-batch-operations)
    - [Signature Operations](#cuda-signature-operations)
-7. [WASM API](#wasm-api)
-8. [Performance Tips](#performance-tips)
-9. [Examples](#examples)
+8. [WASM API](#wasm-api)
+9. [Performance Tips](#performance-tips)
+10. [Examples](#examples)
 
 ---
 
@@ -984,6 +989,217 @@ struct BitcoinSigDecodeResult {
 };
 BitcoinSigDecodeResult bitcoin_sig_from_base64(const std::string& base64);
 ```
+
+---
+
+## Zero-Knowledge Proof API
+
+**Namespace:** `secp256k1::zk`
+
+**Header:**
+```cpp
+#include <secp256k1/zk.hpp>
+```
+
+---
+
+### Knowledge Proof (Schnorr Sigma)
+
+Non-interactive proof of knowledge of discrete log via Fiat-Shamir transform.
+
+#### KnowledgeProof
+
+```cpp
+struct KnowledgeProof {
+    std::array<uint8_t, 32> rx;  // R.x (nonce point x-coordinate)
+    fast::Scalar s;               // response scalar
+
+    std::array<uint8_t, 64> serialize() const;
+    static bool deserialize(const uint8_t* data64, KnowledgeProof& out);
+};
+```
+
+#### knowledge_prove
+
+```cpp
+// Prove: "I know x such that pubkey = x*G"
+// Uses CT layer (constant-time). Nonce hedged with aux_rand.
+KnowledgeProof knowledge_prove(
+    const fast::Scalar& secret,
+    const fast::Point& pubkey,
+    const std::array<uint8_t, 32>& msg,
+    const std::array<uint8_t, 32>& aux_rand);
+```
+
+#### knowledge_verify
+
+```cpp
+// Verify: s*G == R + e*P (FAST path)
+bool knowledge_verify(
+    const KnowledgeProof& proof,
+    const fast::Point& pubkey,
+    const std::array<uint8_t, 32>& msg);
+```
+
+#### knowledge_prove_base / knowledge_verify_base
+
+Same as above but with an arbitrary base point (not just G):
+
+```cpp
+KnowledgeProof knowledge_prove_base(
+    const fast::Scalar& secret,
+    const fast::Point& point,     // point = secret * base
+    const fast::Point& base,
+    const std::array<uint8_t, 32>& msg,
+    const std::array<uint8_t, 32>& aux_rand);
+
+bool knowledge_verify_base(
+    const KnowledgeProof& proof,
+    const fast::Point& point,
+    const fast::Point& base,
+    const std::array<uint8_t, 32>& msg);
+```
+
+---
+
+### DLEQ Proof (Discrete Log Equality)
+
+Proves log_G(P) == log_H(Q) without revealing the secret.
+
+#### DLEQProof
+
+```cpp
+struct DLEQProof {
+    fast::Scalar e;  // challenge
+    fast::Scalar s;  // response
+
+    std::array<uint8_t, 64> serialize() const;
+    static bool deserialize(const uint8_t* data64, DLEQProof& out);
+};
+```
+
+#### dleq_prove
+
+```cpp
+// Prove: P = secret*G AND Q = secret*H (same secret)
+// Uses CT layer. Nonce hedged with aux_rand.
+DLEQProof dleq_prove(
+    const fast::Scalar& secret,
+    const fast::Point& G,
+    const fast::Point& H,
+    const fast::Point& P,
+    const fast::Point& Q,
+    const std::array<uint8_t, 32>& aux_rand);
+```
+
+#### dleq_verify
+
+```cpp
+// Verify: s*G == R1 + e*P AND s*H == R2 + e*Q (FAST path)
+bool dleq_verify(
+    const DLEQProof& proof,
+    const fast::Point& G,
+    const fast::Point& H,
+    const fast::Point& P,
+    const fast::Point& Q);
+```
+
+---
+
+### Bulletproof Range Proof
+
+Proves committed value is in [0, 2^64) without revealing the value. Based on
+Bulletproofs (Bunz et al., 2018). Logarithmic proof size.
+
+#### RangeProof
+
+```cpp
+static constexpr size_t RANGE_PROOF_BITS = 64;
+static constexpr size_t RANGE_PROOF_LOG2 = 6;
+
+struct RangeProof {
+    fast::Point A, S;              // vector commitments
+    fast::Point T1, T2;            // polynomial commitments
+    fast::Scalar tau_x, mu, t_hat; // scalar responses
+    std::array<fast::Point, 6> L;  // inner product argument (log2(64) rounds)
+    std::array<fast::Point, 6> R;
+    fast::Scalar a, b;             // final inner product scalars
+};
+```
+
+#### range_prove
+
+```cpp
+// Generate Bulletproof range proof for Pedersen commitment C = value*H + blinding*G
+// value must be in [0, 2^64). Uses CT layer.
+RangeProof range_prove(
+    uint64_t value,
+    const fast::Scalar& blinding,
+    const PedersenCommitment& commitment,
+    const std::array<uint8_t, 32>& aux_rand);
+```
+
+#### range_verify
+
+```cpp
+// Verify range proof (MSM-optimized, FAST path)
+// Returns true if committed value is in [0, 2^64)
+bool range_verify(
+    const PedersenCommitment& commitment,
+    const RangeProof& proof);
+```
+
+---
+
+### ZK Batch Operations
+
+#### batch_range_verify
+
+```cpp
+// Batch-verify multiple range proofs (more efficient than individual verification)
+// Returns true only if ALL proofs are valid.
+bool batch_range_verify(
+    const PedersenCommitment* commitments,
+    const RangeProof* proofs,
+    size_t count);
+```
+
+#### batch_commit
+
+```cpp
+// Batch-create Pedersen commitments
+void batch_commit(
+    const fast::Scalar* values,
+    const fast::Scalar* blindings,
+    PedersenCommitment* commitments_out,
+    size_t count);
+```
+
+#### GeneratorVectors
+
+```cpp
+struct GeneratorVectors {
+    std::array<fast::Point, 64> G;  // nothing-up-my-sleeve generators
+    std::array<fast::Point, 64> H;
+};
+
+// Retrieve cached generator vectors (computed once on first call)
+const GeneratorVectors& get_generator_vectors();
+```
+
+#### ZK Performance Summary
+
+| Operation | Time | Throughput | Layer |
+|-----------|------|------------|-------|
+| Pedersen Commit | 33.0 us | 30.3K op/s | FAST |
+| Knowledge Prove | 20.3 us | 49.3K op/s | CT |
+| Knowledge Verify | 21.8 us | 46.0K op/s | FAST |
+| DLEQ Prove | 40.0 us | 25.0K op/s | CT |
+| DLEQ Verify | 56.4 us | 17.7K op/s | FAST |
+| Range Prove (64b) | 13,467 us | 74 op/s | CT |
+| Range Verify (64b) | 2,634 us | 380 op/s | FAST |
+
+*Measured on i7-14400F, 11 passes, pinned core, median.*
 
 ---
 

@@ -203,6 +203,12 @@ cryptographic implementations, including libsecp256k1.
 | Schnorr sign | `secp256k1::schnorr_sign(...)` | `ct::schnorr_sign(...)` |
 | Schnorr pubkey | `secp256k1::schnorr_pubkey(k)` | `ct::schnorr_pubkey(k)` |
 | Keypair create | `schnorr_keypair_create(k)` | `ct::schnorr_keypair_create(k)` |
+| Knowledge prove | N/A | `zk::knowledge_prove()` (uses CT internally) |
+| DLEQ prove | N/A | `zk::dleq_prove()` (uses CT internally) |
+| Range prove | N/A | `zk::range_prove()` (uses CT internally) |
+| Knowledge verify | `zk::knowledge_verify()` | N/A (public data) |
+| DLEQ verify | `zk::dleq_verify()` | N/A (public data) |
+| Range verify | `zk::range_verify()` | N/A (public data) |
 | Scalar cond. move | N/A (use if/else) | `ct::scalar_cmov(r, a, mask)` |
 | Scalar cond. swap | N/A (use std::swap) | `ct::scalar_cswap(a, b, mask)` |
 | Scalar cond. negate | `s.negate()` with if | `ct::scalar_cneg(a, mask)` |
@@ -275,7 +281,35 @@ is limited by the SIMT execution model.
 
 ---
 
-## 8. Release CT Scope Tracking
+## 8. ZK Proof Security Properties
+
+### Schnorr Knowledge Proof
+
+- **Soundness**: Prover cannot forge proof without knowing discrete log (Fiat-Shamir in ROM)
+- **Zero-Knowledge**: Proof reveals no information about secret beyond the public key
+- **Binding**: Challenge derived via tagged SHA-256 ("ZK/knowledge"), bound to R, P, and msg
+- **CT**: Proving uses `ct::generator_mul` for nonce commitment; nonce erased after use
+
+### DLEQ Proof (Discrete Log Equality)
+
+- **Soundness**: Both discrete logs must be identical or attack succeeds with negligible probability
+- **Binding**: Challenge bound to full tuple (G, H, P, Q, R1, R2) via tagged SHA-256
+- **Zero-Knowledge**: Proof reveals no information about the shared secret
+- **CT**: Proving uses CT scalar multiplications for both bases
+
+### Bulletproof Range Proof
+
+- **Completeness**: Valid proofs always verify
+- **Soundness**: Prover cannot create proof for value outside [0, 2^64) except with negligible probability
+- **Zero-Knowledge**: Proof leaks no information about value or blinding factor
+- **Logarithmic Size**: O(log n) group elements for n-bit range (12 group elements for 64-bit)
+- **No Trusted Setup**: Nothing-up-my-sleeve generators derived from tagged hashes
+- **CT**: Prover uses CT layer for all secret-dependent operations (blinding, nonce generation)
+- **Verification**: Uses FAST layer with MSM optimization (public data only)
+
+---
+
+## 9. Release CT Scope Tracking
 
 Every release must answer: **"Did the CT scope change?"**
 
