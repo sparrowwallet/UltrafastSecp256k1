@@ -228,6 +228,10 @@ Headers: `cuda/include/ct/{ct_ops.cuh, ct_field.cuh, ct_scalar.cuh, ct_point.cuh
 | ECDSA sign | `ecdsa_sign(msg, key, &sig)` | `ct_ecdsa_sign(msg, key, &sig)` |
 | Schnorr sign | `schnorr_sign(key, msg, aux, &sig)` | `ct_schnorr_sign(key, msg, aux, &sig)` |
 | Keypair create | N/A | `ct_schnorr_keypair_create(key, &kp)` |
+| Knowledge prove | N/A | `ct_knowledge_prove_device(sec, pk, base, msg, aux, &pf)` |
+| DLEQ prove | N/A | `ct_dleq_prove_device(sec, G, H, P, Q, aux, &pf)` |
+| Knowledge verify | `knowledge_verify_device(...)` | N/A (public data) |
+| DLEQ verify | `dleq_verify_device(...)` | N/A (public data) |
 | Field cmov | N/A | `field_cmov(&r, &a, mask)` |
 | Scalar cmov | N/A | `scalar_cmov(&r, &a, mask)` |
 | Scalar inverse | `scalar_inverse(a, &r)` | `scalar_inverse(a, &r)` (CT Fermat) |

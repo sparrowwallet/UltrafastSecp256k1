@@ -80,6 +80,7 @@
 | `opencl/src/opencl_audit_runner.cpp` | OpenCL | Unified GPU audit (27 modules, 8 sections) |
 | `metal/tests/test_metal_host.cpp` | Metal | Metal shader correctness |
 | `metal/src/metal_audit_runner.mm` | Metal | Unified GPU audit (27 modules, 8 sections) |
+| `cuda/src/test_ct_smoke.cu` | CUDA | CT smoke tests incl. ZK knowledge + DLEQ prove/verify (9 tests) |
 
 ---
 
@@ -175,6 +176,8 @@
 | ZK DLEQ proof | `test_zk.cpp` | [OK] | Prove/verify, cross-basis equality |
 | ZK Bulletproof range | `test_zk.cpp` | [OK] | Prove/verify, boundary values, inner product |
 | ZK batch range verify | `test_zk.cpp` | [OK] | Multi-proof batch verification |
+| GPU ZK Knowledge proof | `test_ct_smoke.cu` | [OK] | CT prove + fast-path verify on CUDA |
+| GPU ZK DLEQ proof | `test_ct_smoke.cu` | [OK] | CT prove + fast-path verify on CUDA |
 | Taproot (BIP-341) | `test_ecdh_recovery_taproot.cpp` | [OK] Basic | -- |
 | BIP-32 HD derivation | `test_bip32.cpp` | [OK] | Standard vectors |
 | 28-coin dispatch | `test_coins.cpp` | [OK] | Per-coin address format (P2PKH, P2WPKH, P2TR, P2SH-P2WPKH, CashAddr, EIP-55, TRON_BASE58) |

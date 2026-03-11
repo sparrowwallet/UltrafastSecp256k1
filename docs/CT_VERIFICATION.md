@@ -82,6 +82,31 @@ __global__ void schnorr_kernel(const Scalar* privkey, const uint8_t* msg,
 
 GPU CT throughput: **2.30M ECDSA sign/sec**, **1.40M Schnorr sign/sec**.
 
+#### GPU CT ZK Layer
+
+```
+secp256k1::cuda::ct::
++-- ct_zk.cuh        -- CT ZK proving: knowledge proof (Schnorr sigma), DLEQ proof
+                        Uses ct_scalar_mul for secret nonce operations, ct_jacobian_to_affine,
+                        scalar_cneg for BIP-340 Y-parity normalization.
+                        Deterministic nonce: SHA-256 tagged hash with XOR hedging.
+```
+
+The GPU CT ZK layer ensures that all proving operations (which handle secret keys
+and nonces) use constant-time scalar multiplication and arithmetic. Verification
+operations use the fast path since all inputs are public.
+
+| CT ZK Operation | Approach | Secret Data Protected |
+|-----------------|----------|----------------------|
+| `ct_knowledge_prove_device` | CT `ct_scalar_mul` for k*B | Nonce k, secret key |
+| `ct_knowledge_prove_generator_device` | CT `ct_scalar_mul` for k*G | Nonce k, secret key |
+| `ct_dleq_prove_device` | 2x CT `ct_scalar_mul` for k*G, k*H | Nonce k, secret key |
+| `knowledge_verify_device` | Fast-path `scalar_mul` | N/A (public data) |
+| `dleq_verify_device` | Fast-path `scalar_mul` | N/A (public data) |
+
+**Test coverage:** `test_ct_smoke.cu` tests 8-9 verify CT knowledge prove + verify and
+CT DLEQ prove + verify round-trips on GPU. All 9/9 tests pass.
+
 ---
 
 ## CT Guarantees

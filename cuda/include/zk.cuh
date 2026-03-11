@@ -124,19 +124,19 @@ __device__ inline bool knowledge_verify_device(
     for (int i = 0; i < 32; ++i) rx_bytes[i] = proof->rx[i];
 
     // Parse big-endian rx to field element
-    rx_fe.d[3] = ((uint64_t)rx_bytes[0] << 56) | ((uint64_t)rx_bytes[1] << 48) |
+    rx_fe.limbs[3] = ((uint64_t)rx_bytes[0] << 56) | ((uint64_t)rx_bytes[1] << 48) |
                  ((uint64_t)rx_bytes[2] << 40) | ((uint64_t)rx_bytes[3] << 32) |
                  ((uint64_t)rx_bytes[4] << 24) | ((uint64_t)rx_bytes[5] << 16) |
                  ((uint64_t)rx_bytes[6] << 8)  | (uint64_t)rx_bytes[7];
-    rx_fe.d[2] = ((uint64_t)rx_bytes[8] << 56) | ((uint64_t)rx_bytes[9] << 48) |
+    rx_fe.limbs[2] = ((uint64_t)rx_bytes[8] << 56) | ((uint64_t)rx_bytes[9] << 48) |
                  ((uint64_t)rx_bytes[10] << 40) | ((uint64_t)rx_bytes[11] << 32) |
                  ((uint64_t)rx_bytes[12] << 24) | ((uint64_t)rx_bytes[13] << 16) |
                  ((uint64_t)rx_bytes[14] << 8)  | (uint64_t)rx_bytes[15];
-    rx_fe.d[1] = ((uint64_t)rx_bytes[16] << 56) | ((uint64_t)rx_bytes[17] << 48) |
+    rx_fe.limbs[1] = ((uint64_t)rx_bytes[16] << 56) | ((uint64_t)rx_bytes[17] << 48) |
                  ((uint64_t)rx_bytes[18] << 40) | ((uint64_t)rx_bytes[19] << 32) |
                  ((uint64_t)rx_bytes[20] << 24) | ((uint64_t)rx_bytes[21] << 16) |
                  ((uint64_t)rx_bytes[22] << 8)  | (uint64_t)rx_bytes[23];
-    rx_fe.d[0] = ((uint64_t)rx_bytes[24] << 56) | ((uint64_t)rx_bytes[25] << 48) |
+    rx_fe.limbs[0] = ((uint64_t)rx_bytes[24] << 56) | ((uint64_t)rx_bytes[25] << 48) |
                  ((uint64_t)rx_bytes[26] << 40) | ((uint64_t)rx_bytes[27] << 32) |
                  ((uint64_t)rx_bytes[28] << 24) | ((uint64_t)rx_bytes[29] << 16) |
                  ((uint64_t)rx_bytes[30] << 8)  | (uint64_t)rx_bytes[31];
@@ -237,10 +237,10 @@ __device__ inline bool dleq_verify_device(
     scalar_from_bytes(e_hash, &e_check);
 
     // Compare e == e_check
-    return (proof->e.d[0] == e_check.d[0] &&
-            proof->e.d[1] == e_check.d[1] &&
-            proof->e.d[2] == e_check.d[2] &&
-            proof->e.d[3] == e_check.d[3]);
+    return (proof->e.limbs[0] == e_check.limbs[0] &&
+            proof->e.limbs[1] == e_check.limbs[1] &&
+            proof->e.limbs[2] == e_check.limbs[2] &&
+            proof->e.limbs[3] == e_check.limbs[3]);
 }
 
 __global__ void dleq_verify_batch_kernel(
@@ -336,7 +336,8 @@ __device__ inline bool range_proof_poly_check_device(
     scalar_mul_mod_n(&z2, &z, &z3);
 
     // sum(y^i) for i in [0, 64)
-    Scalar sum_y = SCALAR_ONE;
+    Scalar sum_y;
+    sum_y.limbs[0] = 1; sum_y.limbs[1] = 0; sum_y.limbs[2] = 0; sum_y.limbs[3] = 0;
     Scalar y_pow = y;
     for (int i = 1; i < 64; ++i) {
         scalar_add(&sum_y, &y_pow, &sum_y);
@@ -345,8 +346,8 @@ __device__ inline bool range_proof_poly_check_device(
 
     // sum(2^i) for i in [0, 64) = 2^64 - 1
     Scalar sum_2;
-    sum_2.d[0] = 0xFFFFFFFFFFFFFFFFULL;
-    sum_2.d[1] = 0; sum_2.d[2] = 0; sum_2.d[3] = 0;
+    sum_2.limbs[0] = 0xFFFFFFFFFFFFFFFFULL;
+    sum_2.limbs[1] = 0; sum_2.limbs[2] = 0; sum_2.limbs[3] = 0;
 
     Scalar z_minus_z2;
     scalar_sub(&z, &z2, &z_minus_z2);

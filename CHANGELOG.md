@@ -22,6 +22,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   64 inversions). 1.93x speedup (5,079 -> 2,634 us).
 - **GPU ZK kernels** -- Pedersen commitment (`pedersen.cuh`) and ZK proof primitives (`zk.cuh`)
   for CUDA backend.
+- **GPU CT ZK proving** (`ct_zk.cuh`) -- constant-time knowledge proof and DLEQ proof
+  on CUDA, using the full CT scalar multiplication layer. Deterministic nonce derivation
+  with SHA-256 tagged hash and XOR hedging. Batch kernels for both operations.
+- **OpenCL ZK proving/verification** (`secp256k1_zk.cl`) -- knowledge proof, DLEQ proof,
+  batch prove/verify kernels. Uses fast-path wNAF-5 scalar multiplication.
+- **Metal ZK proving/verification** (`secp256k1_zk.h`, kernels 19-22) -- knowledge proof,
+  DLEQ proof with batch kernels. Uses branchless `affine_select` scalar multiplication.
+- **GPU ZK test coverage** -- `test_ct_smoke.cu` expanded to 9 tests: CT knowledge prove+verify
+  and CT DLEQ prove+verify round-trips verified on GPU (RTX 5060 Ti, Blackwell SM 12.0).
 - **ZK Benchmarks** in `bench_unified` Section 8.5: Pedersen commit, Knowledge prove/verify,
   DLEQ prove/verify, Bulletproof range prove/verify with throughput numbers.
 - **24 ZK tests** in `test_zk.cpp`: knowledge proof, DLEQ, Bulletproof range proof correctness,
@@ -48,6 +57,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`chain_id` field** in `CoinParams` for EIP-155 signing (Ethereum=1, BSC=56, Polygon=137, etc.).
 - **19 new tests** -- 12 in `test_coins.cpp` (P2SH-P2WPKH, CashAddr, P2SH, Tron), 7 in
   `test_wallet.cpp` (key management, signing, address formats, recovery).
+
+### Fixed
+
+- **CUDA `pedersen.cuh`** -- fixed `.d[]` -> `.limbs[]` member access on `ScalarData`/`FieldElementData`
+  (7+ occurrences), removed calls to non-existent `field_normalize()`, removed duplicate
+  `field_sqrt()` definition (already in `secp256k1.cuh`). These bugs existed since file creation
+  but were never triggered because no test included `pedersen.cuh` before.
+- **CUDA `zk.cuh`** -- fixed `.d[]` -> `.limbs[]` on `Scalar` and `FieldElement` in
+  `knowledge_verify_device`, `dleq_verify_device`, and `range_verify_inner`. Fixed undefined
+  `SCALAR_ONE` constant with inline initializer.
 
 ### Changed
 

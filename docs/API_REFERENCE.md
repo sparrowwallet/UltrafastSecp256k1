@@ -1458,6 +1458,194 @@ void schnorr_verify_batch_kernel<<<blocks, 128>>>(
 
 ---
 
+### CUDA CT (Constant-Time) Operations
+
+**Namespace:** `secp256k1::cuda::ct`
+
+**Header:**
+```cpp
+#include <ct/ct_sign.cuh>  // CT ECDSA/Schnorr sign
+#include <ct/ct_zk.cuh>    // CT ZK knowledge/DLEQ prove
+```
+
+All CT functions use constant-time scalar multiplication and arithmetic to prevent
+side-channel leakage. Proving operations are CT; verification uses the fast path
+(public data only -- see `zk.cuh`).
+
+#### CT Signing
+
+```cpp
+// CT ECDSA sign (constant-time k*G, k^-1, scalar ops)
+__device__ bool ct_ecdsa_sign(
+    const uint8_t msg_hash[32],
+    const Scalar* privkey,
+    ECDSASignatureGPU* sig
+);
+
+// CT Schnorr sign (constant-time nonce generation + signing)
+__device__ bool ct_schnorr_sign(
+    const Scalar* privkey,
+    const uint8_t msg[32],
+    const uint8_t aux_rand[32],
+    SchnorrSignatureGPU* sig
+);
+
+// CT Schnorr keypair (x-only pubkey extraction)
+__device__ void ct_schnorr_keypair_create(
+    const Scalar* privkey,
+    SchnorrKeypairGPU* keypair
+);
+```
+
+#### CT Zero-Knowledge Proofs
+
+##### Data Structures
+
+```cpp
+#include <zk.cuh>       // KnowledgeProofGPU, DLEQProofGPU
+#include <ct/ct_zk.cuh>  // CT proving functions
+
+// Knowledge proof (Schnorr sigma protocol)
+struct KnowledgeProofGPU {
+    uint8_t rx[32];  // R point x-coordinate
+    Scalar s;        // Response scalar
+};
+
+// DLEQ proof (discrete log equality)
+struct DLEQProofGPU {
+    Scalar e;  // Challenge
+    Scalar s;  // Response
+};
+```
+
+##### Device Functions
+
+```cpp
+// CT Knowledge Proof: proves knowledge of secret s such that P = s * B
+// Uses CT scalar_mul for k*B (k is secret), CT scalar arithmetic
+__device__ bool ct_knowledge_prove_device(
+    const Scalar* secret,
+    const JacobianPoint* pubkey,   // P = secret * base
+    const JacobianPoint* base,     // Arbitrary base point B
+    const uint8_t msg[32],
+    const uint8_t aux[32],         // Auxiliary randomness (XOR hedging)
+    KnowledgeProofGPU* proof
+);
+
+// Convenience: prove for generator G
+__device__ bool ct_knowledge_prove_generator_device(
+    const Scalar* secret,
+    const JacobianPoint* pubkey,   // P = secret * G
+    const uint8_t msg[32],
+    const uint8_t aux[32],
+    KnowledgeProofGPU* proof
+);
+
+// CT DLEQ Proof: proves log_G(P) == log_H(Q) without revealing the log
+// Two CT scalar_mul operations (k*G, k*H), 6-point challenge hash
+__device__ bool ct_dleq_prove_device(
+    const Scalar* secret,
+    const JacobianPoint* G,        // First base
+    const JacobianPoint* H,        // Second base
+    const JacobianPoint* P,        // P = secret * G
+    const JacobianPoint* Q,        // Q = secret * H
+    const uint8_t aux[32],
+    DLEQProofGPU* proof
+);
+```
+
+##### Batch Kernels
+
+```cpp
+// Batch CT knowledge prove (one thread per proof)
+__global__ void ct_knowledge_prove_batch_kernel(
+    const Scalar* secrets,
+    const JacobianPoint* pubkeys,
+    const JacobianPoint* bases,
+    const uint8_t* messages,    // N * 32 bytes
+    const uint8_t* aux_rands,   // N * 32 bytes
+    KnowledgeProofGPU* proofs,
+    bool* results,
+    uint32_t count
+);
+
+// Batch CT knowledge prove with generator G
+__global__ void ct_knowledge_prove_generator_batch_kernel(
+    const Scalar* secrets,
+    const JacobianPoint* pubkeys,
+    const uint8_t* messages,
+    const uint8_t* aux_rands,
+    KnowledgeProofGPU* proofs,
+    bool* results,
+    uint32_t count
+);
+
+// Batch CT DLEQ prove
+__global__ void ct_dleq_prove_batch_kernel(
+    const Scalar* secrets,
+    const JacobianPoint* G_pts,
+    const JacobianPoint* H_pts,
+    const JacobianPoint* P_pts,
+    const JacobianPoint* Q_pts,
+    const uint8_t* aux_rands,
+    DLEQProofGPU* proofs,
+    bool* results,
+    uint32_t count
+);
+```
+
+> **Design note:** Verification functions (`knowledge_verify_device`, `dleq_verify_device`)
+> live in `zk.cuh` and use the fast (variable-time) path -- verification inputs are public.
+
+---
+
+### OpenCL ZK Operations
+
+**Kernel file:** `opencl/kernels/secp256k1_zk.cl`
+
+OpenCL ZK operations use the fast-path scalar multiplication (wNAF-5). OpenCL has no
+separate CT layer -- all operations are uniform across work-items by design.
+
+```c
+// Device functions (called from kernels)
+void zk_knowledge_prove_impl(...);
+void zk_knowledge_verify_impl(...);
+void zk_dleq_prove_impl(...);
+void zk_dleq_verify_impl(...);
+
+// Batch kernels
+__kernel void zk_knowledge_prove_batch(...);
+__kernel void zk_knowledge_verify_batch(...);
+__kernel void zk_dleq_prove_batch(...);
+__kernel void zk_dleq_verify_batch(...);
+```
+
+---
+
+### Metal ZK Operations
+
+**Shader file:** `metal/shaders/secp256k1_zk.h`
+**Kernel file:** `metal/shaders/secp256k1_kernels.metal` (Kernels 19-22)
+
+Metal ZK uses branchless `affine_select` in scalar multiplication (semi-CT).
+8x32 limb representation.
+
+```metal
+// Device functions
+bool zk_knowledge_prove(...);
+bool zk_knowledge_verify(...);
+bool zk_dleq_prove(...);
+bool zk_dleq_verify(...);
+
+// Kernels 19-22
+kernel void zk_knowledge_prove_batch(...)  [[kernel]];
+kernel void zk_knowledge_verify_batch(...) [[kernel]];
+kernel void zk_dleq_prove_batch(...)       [[kernel]];
+kernel void zk_dleq_verify_batch(...)      [[kernel]];
+```
+
+---
+
 ## WASM API
 
 **Module:** `@ultrafastsecp256k1/wasm`

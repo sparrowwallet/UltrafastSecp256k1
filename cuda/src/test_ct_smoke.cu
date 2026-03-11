@@ -6,6 +6,7 @@
 // ============================================================================
 
 #include "ct/ct_sign.cuh"
+#include "ct/ct_zk.cuh"
 #include <cstdio>
 #include <cstring>
 
@@ -171,6 +172,73 @@ __global__ void test_ct_scalar_inv_kernel(int* result) {
     *result = 0;
 }
 
+// ---------- CT ZK Knowledge Proof: Prove + Verify ----------------------------
+
+__global__ void test_ct_zk_knowledge_kernel(int* result) {
+    // Compute pubkey P = secret * G (CT)
+    JacobianPoint pubkey;
+    ct::ct_generator_mul(&TEST_PRIVKEY, &pubkey);
+
+    // Prove knowledge of secret
+    KnowledgeProofGPU proof;
+    bool ok = ct::ct_knowledge_prove_generator_device(
+        &TEST_PRIVKEY, &pubkey, TEST_MSG, ZERO_AUX, &proof);
+    if (!ok) { *result = 1; return; }
+
+    // Verify with fast path: convert pubkey to affine
+    FieldElement ax, ay;
+    jacobian_to_affine(&pubkey, &ax, &ay);
+    AffinePoint pub_aff;
+    pub_aff.x = ax;
+    pub_aff.y = ay;
+
+    bool verified = knowledge_verify_device(&proof, &pub_aff, TEST_MSG);
+    *result = verified ? 0 : 2;
+}
+
+// ---------- CT ZK DLEQ Proof: Prove + Verify --------------------------------
+
+__global__ void test_ct_zk_dleq_kernel(int* result) {
+    // Set up generator G
+    JacobianPoint G;
+    for (int i = 0; i < 4; ++i) {
+        G.x.limbs[i] = GENERATOR_X[i];
+        G.y.limbs[i] = GENERATOR_Y[i];
+    }
+    field_set_one(&G.z);
+    G.infinity = false;
+
+    // Use H = 2*G as second base (deterministic, always valid)
+    JacobianPoint H;
+    jacobian_double(&G, &H);
+
+    // P = secret * G, Q = secret * H  (CT)
+    JacobianPoint P, Q;
+    ct::ct_scalar_mul(&G, &TEST_PRIVKEY, &P);
+    ct::ct_scalar_mul(&H, &TEST_PRIVKEY, &Q);
+
+    // Prove DLEQ
+    DLEQProofGPU proof;
+    bool ok = ct::ct_dleq_prove_device(
+        &TEST_PRIVKEY, &G, &H, &P, &Q, ZERO_AUX, &proof);
+    if (!ok) { *result = 1; return; }
+
+    // Verify: convert all to affine
+    AffinePoint Ga, Ha, Pa, Qa;
+    FieldElement tmp_x, tmp_y;
+    jacobian_to_affine(&G, &tmp_x, &tmp_y);
+    Ga.x = tmp_x; Ga.y = tmp_y;
+    jacobian_to_affine(&H, &tmp_x, &tmp_y);
+    Ha.x = tmp_x; Ha.y = tmp_y;
+    jacobian_to_affine(&P, &tmp_x, &tmp_y);
+    Pa.x = tmp_x; Pa.y = tmp_y;
+    jacobian_to_affine(&Q, &tmp_x, &tmp_y);
+    Qa.x = tmp_x; Qa.y = tmp_y;
+
+    bool verified = dleq_verify_device(&proof, &Ga, &Ha, &Pa, &Qa);
+    *result = verified ? 0 : 2;
+}
+
 // ---------- Main -------------------------------------------------------------
 
 int main() {
@@ -215,6 +283,8 @@ int main() {
     if (run("CT Schnorr sign + verify", test_ct_schnorr_kernel)) pass++; else fail++;
     if (run("CT Schnorr keypair sign", test_ct_schnorr_keypair_kernel)) pass++; else fail++;
     if (run("CT vs Fast ECDSA parity", test_ct_fast_ecdsa_parity_kernel)) pass++; else fail++;
+    if (run("CT ZK knowledge prove+verify", test_ct_zk_knowledge_kernel)) pass++; else fail++;
+    if (run("CT ZK DLEQ prove+verify", test_ct_zk_dleq_kernel)) pass++; else fail++;
 
     printf("\n%d/%d passed\n", pass, pass + fail);
 

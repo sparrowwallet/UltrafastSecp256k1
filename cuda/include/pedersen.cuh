@@ -40,82 +40,7 @@ __device__ static bool g_pedersen_init = false;
 
 // -- Field sqrt (needed for lift_x) -------------------------------------------
 
-__device__ inline void field_sqrt(const FieldElement* a, FieldElement* r) {
-    // p = 2^256 - 2^32 - 977, p % 4 == 3
-    // sqrt(a) = a^((p+1)/4) mod p
-    // (p+1)/4 = (2^256 - 2^32 - 976) / 4 = 2^254 - 2^30 - 244
-    // Use square-and-multiply with optimized chain
-
-    FieldElement x2, x3, x6, x9, x11, x22, x44, x88, x176, x220, x223;
-
-    // x2 = a^2 * a = a^3
-    field_sqr(a, &x2);
-    field_mul(&x2, a, &x2);
-
-    // x3 = x2^2 * a = a^7
-    field_sqr(&x2, &x3);
-    field_mul(&x3, a, &x3);
-
-    // x6 = x3^(2^3) * x3
-    x6 = x3;
-    for (int i = 0; i < 3; ++i) field_sqr(&x6, &x6);
-    field_mul(&x6, &x3, &x6);
-
-    // x9 = x6^(2^3) * x3
-    x9 = x6;
-    for (int i = 0; i < 3; ++i) field_sqr(&x9, &x9);
-    field_mul(&x9, &x3, &x9);
-
-    // x11 = x9^(2^2) * x2
-    x11 = x9;
-    for (int i = 0; i < 2; ++i) field_sqr(&x11, &x11);
-    field_mul(&x11, &x2, &x11);
-
-    // x22 = x11^(2^11) * x11
-    x22 = x11;
-    for (int i = 0; i < 11; ++i) field_sqr(&x22, &x22);
-    field_mul(&x22, &x11, &x22);
-
-    // x44 = x22^(2^22) * x22
-    x44 = x22;
-    for (int i = 0; i < 22; ++i) field_sqr(&x44, &x44);
-    field_mul(&x44, &x22, &x44);
-
-    // x88 = x44^(2^44) * x44
-    x88 = x44;
-    for (int i = 0; i < 44; ++i) field_sqr(&x88, &x88);
-    field_mul(&x88, &x44, &x88);
-
-    // x176 = x88^(2^88) * x88
-    x176 = x88;
-    for (int i = 0; i < 88; ++i) field_sqr(&x176, &x176);
-    field_mul(&x176, &x88, &x176);
-
-    // x220 = x176^(2^44) * x44
-    x220 = x176;
-    for (int i = 0; i < 44; ++i) field_sqr(&x220, &x220);
-    field_mul(&x220, &x44, &x220);
-
-    // x223 = x220^(2^3) * x3
-    x223 = x220;
-    for (int i = 0; i < 3; ++i) field_sqr(&x223, &x223);
-    field_mul(&x223, &x3, &x223);
-
-    // result = x223^(2^23) * x22^(2^1) * ... -> a^((p+1)/4)
-    // t1 = x223^(2^23)
-    FieldElement t1 = x223;
-    for (int i = 0; i < 23; ++i) field_sqr(&t1, &t1);
-
-    // t2 = t1 * x22
-    field_mul(&t1, &x22, &t1);
-
-    // result = t1^(2^6) * x2 * a
-    for (int i = 0; i < 6; ++i) field_sqr(&t1, &t1);
-    field_mul(&t1, &x2, &t1);
-    for (int i = 0; i < 2; ++i) field_sqr(&t1, &t1);
-
-    *r = t1;
-}
+// -- Field sqrt is defined in secp256k1.cuh -- no redefinition needed ---------
 
 // -- lift_x: find point with given x-coordinate and even y --------------------
 
@@ -126,7 +51,7 @@ __device__ inline bool lift_x_even(const FieldElement* x, AffinePoint* out) {
     field_mul(&x2, x, &x3);
 
     FieldElement seven = FIELD_ONE;
-    seven.d[0] = 7;
+    seven.limbs[0] = 7;
     field_add(&x3, &seven, &y2);
 
     field_sqrt(&y2, &y);
@@ -135,17 +60,12 @@ __device__ inline bool lift_x_even(const FieldElement* x, AffinePoint* out) {
     FieldElement check;
     field_sqr(&y, &check);
     field_sub(&check, &y2, &check);
-    field_normalize(&check);
 
-    bool valid = (check.d[0] == 0 && check.d[1] == 0 &&
-                  check.d[2] == 0 && check.d[3] == 0);
-    if (!valid) return false;
+    if (!field_is_zero(&check)) return false;
 
     // Ensure even y
-    field_normalize(&y);
-    if (y.d[0] & 1) {
+    if (y.limbs[0] & 1) {
         field_negate(&y, &y);
-        field_normalize(&y);
     }
 
     out->x = *x;
@@ -203,9 +123,6 @@ __global__ void pedersen_commit_batch_kernel(
 
     field_mul(&result.x, &z_inv2, &commitments_out[idx].x);
     field_mul(&result.y, &z_inv3, &commitments_out[idx].y);
-
-    field_normalize(&commitments_out[idx].x);
-    field_normalize(&commitments_out[idx].y);
 }
 
 // -- Batch Pedersen verify sum kernel -----------------------------------------
@@ -235,15 +152,11 @@ __global__ void pedersen_verify_sum_kernel(
         AffinePoint neg_pt = neg[i];
         // Negate Y coordinate
         field_negate(&neg_pt.y, &neg_pt.y);
-        field_normalize(&neg_pt.y);
         jacobian_add_mixed(&sum, &neg_pt, &sum);
     }
 
     // Check if sum is infinity
-    field_normalize(&sum.z);
-    *result = (sum.infinity ||
-               (sum.z.d[0] == 0 && sum.z.d[1] == 0 &&
-                sum.z.d[2] == 0 && sum.z.d[3] == 0));
+    *result = (sum.infinity || field_is_zero(&sum.z));
 }
 
 } // namespace cuda

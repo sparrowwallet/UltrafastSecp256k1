@@ -30,6 +30,7 @@
 #include "secp256k1_bloom.h"
 #include "secp256k1_extended.h"
 #include "secp256k1_hash160.h"
+#include "secp256k1_zk.h"
 
 using namespace metal;
 
@@ -729,5 +730,148 @@ kernel void ecdsa_bench(
 
     // Verify
     results[tid] = ecdsa_verify(msg, pub_aff, r_sig, s_sig) ? 1u : 0u;
+}
+
+// =============================================================================
+// Kernel 19: ZK Knowledge Proof -- Batch Prove
+// =============================================================================
+
+kernel void zk_knowledge_prove_batch(
+    device const uchar *secrets        [[buffer(0)]],
+    device const uchar *pubkeys        [[buffer(1)]],
+    device const uchar *messages       [[buffer(2)]],
+    device const uchar *aux_rands      [[buffer(3)]],
+    device uchar *proof_rx_out         [[buffer(4)]],
+    device uchar *proof_s_out          [[buffer(5)]],
+    device uint *results               [[buffer(6)]],
+    constant uint &count               [[buffer(7)]],
+    uint tid [[thread_position_in_grid]]
+) {
+    if (tid >= count) return;
+
+    Scalar256 sec = scalar_from_bytes(secrets + tid * 32);
+    JacobianPoint pk = scalar_mul_generator_windowed(sec);
+
+    uchar msg[32], aux[32];
+    for (int i = 0; i < 32; ++i) { msg[i] = messages[tid * 32 + i]; aux[i] = aux_rands[tid * 32 + i]; }
+
+    AffinePoint G = generator_affine();
+    ZKKnowledgeProof proof;
+    bool ok = zk_knowledge_prove(sec, pk, G, msg, aux, proof);
+
+    for (int i = 0; i < 32; ++i) proof_rx_out[tid * 32 + i] = proof.rx[i];
+    uchar s_bytes[32];
+    scalar_to_bytes(proof.s, s_bytes);
+    for (int i = 0; i < 32; ++i) proof_s_out[tid * 32 + i] = s_bytes[i];
+    results[tid] = ok ? 1u : 0u;
+}
+
+// =============================================================================
+// Kernel 20: ZK Knowledge Proof -- Batch Verify
+// =============================================================================
+
+kernel void zk_knowledge_verify_batch(
+    device const uchar *proof_rx_in    [[buffer(0)]],
+    device const uchar *proof_s_in     [[buffer(1)]],
+    device const uchar *pubkeys        [[buffer(2)]],
+    device const uchar *messages       [[buffer(3)]],
+    device uint *results               [[buffer(4)]],
+    constant uint &count               [[buffer(5)]],
+    uint tid [[thread_position_in_grid]]
+) {
+    if (tid >= count) return;
+
+    ZKKnowledgeProof proof;
+    for (int i = 0; i < 32; ++i) proof.rx[i] = proof_rx_in[tid * 32 + i];
+    uchar s_bytes[32];
+    for (int i = 0; i < 32; ++i) s_bytes[i] = proof_s_in[tid * 32 + i];
+    proof.s = scalar_from_bytes(s_bytes);
+
+    Scalar256 pk_scalar = scalar_from_bytes(pubkeys + tid * 32);
+    JacobianPoint pk = scalar_mul_generator_windowed(pk_scalar);
+
+    uchar msg[32];
+    for (int i = 0; i < 32; ++i) msg[i] = messages[tid * 32 + i];
+
+    AffinePoint G = generator_affine();
+    results[tid] = zk_knowledge_verify(proof, pk, G, msg) ? 1u : 0u;
+}
+
+// =============================================================================
+// Kernel 21: ZK DLEQ Proof -- Batch Prove
+// =============================================================================
+
+kernel void zk_dleq_prove_batch(
+    device const uchar *secrets        [[buffer(0)]],
+    device const uchar *aux_rands      [[buffer(1)]],
+    device uchar *proof_e_out          [[buffer(2)]],
+    device uchar *proof_s_out          [[buffer(3)]],
+    device uint *results               [[buffer(4)]],
+    constant uint &count               [[buffer(5)]],
+    uint tid [[thread_position_in_grid]]
+) {
+    if (tid >= count) return;
+
+    Scalar256 sec = scalar_from_bytes(secrets + tid * 32);
+    uchar aux[32];
+    for (int i = 0; i < 32; ++i) aux[i] = aux_rands[tid * 32 + i];
+
+    AffinePoint G = generator_affine();
+    // H = second generator (deterministic derivation)
+    uchar h_tag[] = {'Z','K','/','d','l','e','q','/','H'};
+    uchar h_hash[32];
+    tagged_hash(h_tag, 9, h_tag, 9, h_hash);
+    JacobianPoint H_jac;
+    lift_x(h_hash, H_jac);
+    AffinePoint H = jacobian_to_affine(H_jac);
+
+    JacobianPoint P = scalar_mul(G, sec);
+    JacobianPoint Q = scalar_mul(H, sec);
+
+    ZKDLEQProof proof;
+    bool ok = zk_dleq_prove(sec, G, H, P, Q, aux, proof);
+
+    uchar e_bytes[32], s_bytes[32];
+    scalar_to_bytes(proof.e, e_bytes);
+    scalar_to_bytes(proof.s, s_bytes);
+    for (int i = 0; i < 32; ++i) { proof_e_out[tid * 32 + i] = e_bytes[i]; proof_s_out[tid * 32 + i] = s_bytes[i]; }
+    results[tid] = ok ? 1u : 0u;
+}
+
+// =============================================================================
+// Kernel 22: ZK DLEQ Proof -- Batch Verify
+// =============================================================================
+
+kernel void zk_dleq_verify_batch(
+    device const uchar *proof_e_in     [[buffer(0)]],
+    device const uchar *proof_s_in     [[buffer(1)]],
+    device const uchar *pubkeys_P      [[buffer(2)]],
+    device const uchar *pubkeys_Q      [[buffer(3)]],
+    device uint *results               [[buffer(4)]],
+    constant uint &count               [[buffer(5)]],
+    uint tid [[thread_position_in_grid]]
+) {
+    if (tid >= count) return;
+
+    ZKDLEQProof proof;
+    uchar e_bytes[32], s_bytes[32];
+    for (int i = 0; i < 32; ++i) { e_bytes[i] = proof_e_in[tid * 32 + i]; s_bytes[i] = proof_s_in[tid * 32 + i]; }
+    proof.e = scalar_from_bytes(e_bytes);
+    proof.s = scalar_from_bytes(s_bytes);
+
+    AffinePoint G = generator_affine();
+    uchar h_tag[] = {'Z','K','/','d','l','e','q','/','H'};
+    uchar h_hash[32];
+    tagged_hash(h_tag, 9, h_tag, 9, h_hash);
+    JacobianPoint H_jac;
+    lift_x(h_hash, H_jac);
+    AffinePoint H = jacobian_to_affine(H_jac);
+
+    // Reconstruct P and Q from pubkey bytes
+    JacobianPoint P, Q;
+    lift_x(pubkeys_P + tid * 32, P);
+    lift_x(pubkeys_Q + tid * 32, Q);
+
+    results[tid] = zk_dleq_verify(proof, G, H, P, Q) ? 1u : 0u;
 }
 
