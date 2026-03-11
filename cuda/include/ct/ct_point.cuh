@@ -379,6 +379,36 @@ void ct_point_neg(const CTJacobianPoint* p, CTJacobianPoint* r) {
     r->infinity = p->infinity;
 }
 
+// --- Montgomery Batch Field Inversion ----------------------------------------
+// Inverts N field elements using only 1 field_inv + 3*(N-1) field_mul.
+// inputs[i] and outputs[i] may alias.
+
+__device__ inline
+void ct_batch_field_inv(const FieldElement* inputs, FieldElement* outputs, int count) {
+    using namespace secp256k1::cuda;
+
+    if (count == 0) return;
+    if (count == 1) { field_inv(&inputs[0], &outputs[0]); return; }
+
+    // Running products: prod[i] = inputs[0] * inputs[1] * ... * inputs[i]
+    FieldElement products[16];  // max supported count
+    products[0] = inputs[0];
+    for (int i = 1; i < count; i++) {
+        field_mul(&products[i - 1], &inputs[i], &products[i]);
+    }
+
+    // Single inversion of the full product
+    FieldElement inv_all;
+    field_inv(&products[count - 1], &inv_all);
+
+    // Recover individual inverses right-to-left
+    for (int i = count - 1; i > 0; i--) {
+        field_mul(&inv_all, &products[i - 1], &outputs[i]);
+        field_mul(&inv_all, &inputs[i], &inv_all);
+    }
+    outputs[0] = inv_all;
+}
+
 // --- CT Scalar Multiplication: k*P (GLV + fixed-window, CT) ------------------
 // Uses CT complete addition, CT table lookups.
 // Cost: ~128 doublings + ~64 mixed additions (CT complete)
@@ -400,46 +430,33 @@ void ct_scalar_mul(const JacobianPoint* p_in, const Scalar* k,
     CTAffinePoint table_a[TABLE_SIZE];
     CTAffinePoint table_b[TABLE_SIZE];  // endomorphism table (beta)
 
-    // Table[0] = P (affine)
-    {
-        FieldElement z_inv, z_inv2, z_inv3;
-        field_inv(&p.z, &z_inv);
-        field_sqr(&z_inv, &z_inv2);
-        field_mul(&z_inv, &z_inv2, &z_inv3);
-        field_mul(&p.x, &z_inv2, &table_a[0].x);
-        field_mul(&p.y, &z_inv3, &table_a[0].y);
-        table_a[0].infinity = p.infinity;
-    }
+    // Step 1: Compute all odd multiples in Jacobian coordinates
+    CTJacobianPoint jac_pts[TABLE_SIZE];
+    jac_pts[0] = p;  // 1P
 
-    // Build remaining odd multiples via complete additions
-    // 2P (Jacobian)
     CTJacobianPoint dbl;
-    ct_point_dbl(&p, &dbl);
+    ct_point_dbl(&p, &dbl);  // 2P
 
-    // Convert 2P to affine for mixed adds
-    CTAffinePoint dbl_aff;
-    {
-        FieldElement z_inv, z_inv2, z_inv3;
-        field_inv(&dbl.z, &z_inv);
-        field_sqr(&z_inv, &z_inv2);
-        field_mul(&z_inv, &z_inv2, &z_inv3);
-        field_mul(&dbl.x, &z_inv2, &dbl_aff.x);
-        field_mul(&dbl.y, &z_inv3, &dbl_aff.y);
-        dbl_aff.infinity = dbl.infinity;
-    }
-
-    // table[i] = (2i+1)*P via accumulation
+    // Accumulate: 3P, 5P, ..., 15P via Jac+Jac complete additions
     CTJacobianPoint acc = p;
     for (int i = 1; i < TABLE_SIZE; i++) {
-        ct_point_add_mixed(&acc, &dbl_aff, &acc);
-        // Convert to affine
-        FieldElement z_inv, z_inv2, z_inv3;
-        field_inv(&acc.z, &z_inv);
-        field_sqr(&z_inv, &z_inv2);
-        field_mul(&z_inv, &z_inv2, &z_inv3);
-        field_mul(&acc.x, &z_inv2, &table_a[i].x);
-        field_mul(&acc.y, &z_inv3, &table_a[i].y);
-        table_a[i].infinity = acc.infinity;
+        ct_point_add(&acc, &dbl, &acc);  // acc += 2P
+        jac_pts[i] = acc;
+    }
+
+    // Step 2: Batch invert all Z coordinates (1 field_inv + 21 field_mul)
+    FieldElement z_vals[TABLE_SIZE], z_inv_vals[TABLE_SIZE];
+    for (int i = 0; i < TABLE_SIZE; i++) z_vals[i] = jac_pts[i].z;
+    ct_batch_field_inv(z_vals, z_inv_vals, TABLE_SIZE);
+
+    // Step 3: Convert to affine using batch-inverted Z values
+    for (int i = 0; i < TABLE_SIZE; i++) {
+        FieldElement z_inv2, z_inv3;
+        field_sqr(&z_inv_vals[i], &z_inv2);
+        field_mul(&z_inv_vals[i], &z_inv2, &z_inv3);
+        field_mul(&jac_pts[i].x, &z_inv2, &table_a[i].x);
+        field_mul(&jac_pts[i].y, &z_inv3, &table_a[i].y);
+        table_a[i].infinity = jac_pts[i].infinity;
     }
 
     // Build endomorphism table: beta * X, same Y (or negated if k2_neg)
