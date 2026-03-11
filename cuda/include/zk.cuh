@@ -39,9 +39,21 @@ __device__ inline void sha256_hash(const uint8_t* data, size_t len, uint8_t out[
 __device__ inline void affine_to_compressed(
     const FieldElement* x, const FieldElement* y, uint8_t out[33])
 {
-    uint8_t y_bytes[32];
-    field_to_bytes(y, y_bytes);
-    out[0] = (y_bytes[31] & 1) ? 0x03 : 0x02;
+    // Extract Y parity from normalized limbs[0] bit 0 -- avoids full field_to_bytes(y)
+    // Normalize Y mod p: try y - p, if no borrow then y >= p so use y - p
+    constexpr uint64_t P0 = 0xFFFFFFFEFFFFFC2FULL;
+    uint64_t borrow = 0;
+    unsigned __int128 d0 = (unsigned __int128)y->limbs[0] - P0;
+    uint64_t r0 = (uint64_t)d0;
+    borrow = (uint64_t)(-(int64_t)(d0 >> 64));
+    for (int i = 1; i < 4; i++) {
+        unsigned __int128 di = (unsigned __int128)y->limbs[i] - 0xFFFFFFFFFFFFFFFFULL - borrow;
+        borrow = (uint64_t)(-(int64_t)(di >> 64));
+    }
+    // If borrow==0, y >= p, use reduced r0; otherwise use original limbs[0]
+    uint64_t use_reduced = -(uint64_t)(borrow == 0); // branchless mask
+    uint64_t y_low = (r0 & use_reduced) | (y->limbs[0] & ~use_reduced);
+    out[0] = 0x02 | (uint8_t)(y_low & 1);
     field_to_bytes(x, out + 1);
 }
 
@@ -97,6 +109,24 @@ __constant__ const ZKTagMidstate ZK_KNOWLEDGE_MIDSTATE = {{
 __constant__ const ZKTagMidstate ZK_DLEQ_MIDSTATE = {{
     0xad61ec8eU, 0x5a747086U, 0x1dd98eefU, 0xe172f2ffU,
     0x9b119897U, 0x02f290ddU, 0x21ffc089U, 0x0a5520b9U
+}};
+
+// Midstate for "Bulletproof/y" (13 bytes)
+__constant__ const ZKTagMidstate ZK_BULLETPROOF_Y_MIDSTATE = {{
+    0x770918afU, 0xa4791204U, 0x3c076a40U, 0x5fb23056U,
+    0x902acdb9U, 0x1d85371bU, 0x10f624c4U, 0x9048ba46U
+}};
+
+// Midstate for "Bulletproof/z" (13 bytes)
+__constant__ const ZKTagMidstate ZK_BULLETPROOF_Z_MIDSTATE = {{
+    0x22be001aU, 0x3c79431bU, 0xe60a9432U, 0xfd965d54U,
+    0x84df949fU, 0x62937ceeU, 0x20924a62U, 0x99f23a35U
+}};
+
+// Midstate for "Bulletproof/x" (13 bytes)
+__constant__ const ZKTagMidstate ZK_BULLETPROOF_X_MIDSTATE = {{
+    0x1378a3c8U, 0x2e8ad1b2U, 0xa47ce2e2U, 0x143037a2U,
+    0xbaec0bd8U, 0x40cb0ed7U, 0xd1b23b65U, 0x43871df4U
 }};
 
 // Tagged hash using precomputed midstate -- skips tag hashing + first block
@@ -170,26 +200,7 @@ __device__ inline bool knowledge_verify_device(
 
     // Compute R from rx (lift_x with even Y)
     FieldElement rx_fe;
-    uint8_t rx_bytes[32];
-    for (int i = 0; i < 32; ++i) rx_bytes[i] = proof->rx[i];
-
-    // Parse big-endian rx to field element
-    rx_fe.limbs[3] = ((uint64_t)rx_bytes[0] << 56) | ((uint64_t)rx_bytes[1] << 48) |
-                 ((uint64_t)rx_bytes[2] << 40) | ((uint64_t)rx_bytes[3] << 32) |
-                 ((uint64_t)rx_bytes[4] << 24) | ((uint64_t)rx_bytes[5] << 16) |
-                 ((uint64_t)rx_bytes[6] << 8)  | (uint64_t)rx_bytes[7];
-    rx_fe.limbs[2] = ((uint64_t)rx_bytes[8] << 56) | ((uint64_t)rx_bytes[9] << 48) |
-                 ((uint64_t)rx_bytes[10] << 40) | ((uint64_t)rx_bytes[11] << 32) |
-                 ((uint64_t)rx_bytes[12] << 24) | ((uint64_t)rx_bytes[13] << 16) |
-                 ((uint64_t)rx_bytes[14] << 8)  | (uint64_t)rx_bytes[15];
-    rx_fe.limbs[1] = ((uint64_t)rx_bytes[16] << 56) | ((uint64_t)rx_bytes[17] << 48) |
-                 ((uint64_t)rx_bytes[18] << 40) | ((uint64_t)rx_bytes[19] << 32) |
-                 ((uint64_t)rx_bytes[20] << 24) | ((uint64_t)rx_bytes[21] << 16) |
-                 ((uint64_t)rx_bytes[22] << 8)  | (uint64_t)rx_bytes[23];
-    rx_fe.limbs[0] = ((uint64_t)rx_bytes[24] << 56) | ((uint64_t)rx_bytes[25] << 48) |
-                 ((uint64_t)rx_bytes[26] << 40) | ((uint64_t)rx_bytes[27] << 32) |
-                 ((uint64_t)rx_bytes[28] << 24) | ((uint64_t)rx_bytes[29] << 16) |
-                 ((uint64_t)rx_bytes[30] << 8)  | (uint64_t)rx_bytes[31];
+    field_from_bytes(proof->rx, &rx_fe);
 
     AffinePoint R_affine;
     if (!lift_x_even(&rx_fe, &R_affine)) return false;
@@ -198,14 +209,34 @@ __device__ inline bool knowledge_verify_device(
     JacobianPoint R_plus_eP;
     jacobian_add_mixed(&eP, &R_affine, &R_plus_eP);
 
-    // Compare s*G == R + e*P by converting both to compressed form
-    uint8_t comp1[33], comp2[33];
-    if (!point_to_compressed(&sG, comp1)) return false;
-    if (!point_to_compressed(&R_plus_eP, comp2)) return false;
+    // Compare s*G == R + e*P via Jacobian cross-multiply (0 field_inv)
+    // Two Jacobian points (X1:Y1:Z1) == (X2:Y2:Z2) iff:
+    //   X1 * Z2^2 == X2 * Z1^2  AND  Y1 * Z2^3 == Y2 * Z1^3
+    {
+        FieldElement z1sq, z2sq, z1cu, z2cu;
+        field_sqr(&sG.z, &z1sq);
+        field_sqr(&R_plus_eP.z, &z2sq);
+        field_mul(&z1sq, &sG.z, &z1cu);
+        field_mul(&z2sq, &R_plus_eP.z, &z2cu);
 
-    for (int i = 0; i < 33; ++i)
-        if (comp1[i] != comp2[i]) return false;
-    return true;
+        FieldElement lx, rx_cmp, ly, ry;
+        field_mul(&sG.x, &z2sq, &lx);
+        field_mul(&R_plus_eP.x, &z1sq, &rx_cmp);
+        field_mul(&sG.y, &z2cu, &ly);
+        field_mul(&R_plus_eP.y, &z1cu, &ry);
+
+        // Branchless compare: subtract and OR all limbs
+        FieldElement dx, dy;
+        field_sub(&lx, &rx_cmp, &dx);
+        field_sub(&ly, &ry, &dy);
+        // Normalize differences mod p
+        uint8_t dx_b[32], dy_b[32];
+        field_to_bytes(&dx, dx_b);
+        field_to_bytes(&dy, dy_b);
+        uint64_t acc = 0;
+        for (int i = 0; i < 32; ++i) acc |= dx_b[i] | dy_b[i];
+        return acc == 0;
+    }
 }
 
 __global__ void knowledge_verify_batch_kernel(
@@ -326,19 +357,11 @@ __device__ inline bool range_proof_poly_check_device(
     const AffinePoint* commitment,
     const AffinePoint* H_gen)
 {
-    // Compute Fiat-Shamir challenges y, z, x
-    // Serialize A, S, V for y/z challenge
+    // Serialize A, S, V directly from affine (Z=1, no field_inv)
     uint8_t a_comp[33], s_comp[33], v_comp[33];
-    JacobianPoint tmp;
-
-    tmp.x = proof->A.x; tmp.y = proof->A.y; tmp.z = FIELD_ONE; tmp.infinity = false;
-    point_to_compressed(&tmp, a_comp);
-
-    tmp.x = proof->S.x; tmp.y = proof->S.y; tmp.z = FIELD_ONE; tmp.infinity = false;
-    point_to_compressed(&tmp, s_comp);
-
-    tmp.x = commitment->x; tmp.y = commitment->y; tmp.z = FIELD_ONE; tmp.infinity = false;
-    point_to_compressed(&tmp, v_comp);
+    affine_to_compressed(&proof->A.x, &proof->A.y, a_comp);
+    affine_to_compressed(&proof->S.x, &proof->S.y, s_comp);
+    affine_to_compressed(&commitment->x, &commitment->y, v_comp);
 
     uint8_t fs_buf[33 + 33 + 33];
     for (int i = 0; i < 33; ++i) {
@@ -348,19 +371,17 @@ __device__ inline bool range_proof_poly_check_device(
     }
 
     uint8_t y_hash[32], z_hash[32];
-    zk_tagged_hash("Bulletproof/y", 13, fs_buf, sizeof(fs_buf), y_hash);
-    zk_tagged_hash("Bulletproof/z", 13, fs_buf, sizeof(fs_buf), z_hash);
+    zk_tagged_hash_midstate(&ZK_BULLETPROOF_Y_MIDSTATE, fs_buf, sizeof(fs_buf), y_hash);
+    zk_tagged_hash_midstate(&ZK_BULLETPROOF_Z_MIDSTATE, fs_buf, sizeof(fs_buf), z_hash);
 
     Scalar y, z;
     scalar_from_bytes(y_hash, &y);
     scalar_from_bytes(z_hash, &z);
 
-    // Compute x from T1, T2, y, z
+    // Serialize T1, T2 directly from affine
     uint8_t t1_comp[33], t2_comp[33];
-    tmp.x = proof->T1.x; tmp.y = proof->T1.y; tmp.z = FIELD_ONE; tmp.infinity = false;
-    point_to_compressed(&tmp, t1_comp);
-    tmp.x = proof->T2.x; tmp.y = proof->T2.y; tmp.z = FIELD_ONE; tmp.infinity = false;
-    point_to_compressed(&tmp, t2_comp);
+    affine_to_compressed(&proof->T1.x, &proof->T1.y, t1_comp);
+    affine_to_compressed(&proof->T2.x, &proof->T2.y, t2_comp);
 
     uint8_t y_bytes[32], z_bytes[32];
     scalar_to_bytes(&y, y_bytes);
@@ -371,7 +392,7 @@ __device__ inline bool range_proof_poly_check_device(
     for (int i = 0; i < 32; ++i) { x_buf[66 + i] = y_bytes[i]; x_buf[98 + i] = z_bytes[i]; }
 
     uint8_t x_hash[32];
-    zk_tagged_hash("Bulletproof/x", 13, x_buf, sizeof(x_buf), x_hash);
+    zk_tagged_hash_midstate(&ZK_BULLETPROOF_X_MIDSTATE, x_buf, sizeof(x_buf), x_hash);
 
     Scalar x;
     scalar_from_bytes(x_hash, &x);
@@ -416,30 +437,47 @@ __device__ inline bool range_proof_poly_check_device(
     Scalar x2;
     scalar_mul_mod_n(&x, &x, &x2);
 
-    tmp.x = commitment->x; tmp.y = commitment->y; tmp.z = FIELD_ONE; tmp.infinity = false;
+    JacobianPoint V_jac;
+    V_jac.x = commitment->x; V_jac.y = commitment->y; V_jac.z = FIELD_ONE; V_jac.infinity = false;
     JacobianPoint z2V, deltaH, xT1, x2T2;
-    scalar_mul(&tmp, &z2, &z2V);
+    scalar_mul(&V_jac, &z2, &z2V);
     scalar_mul(&H_jac, &delta, &deltaH);
 
-    tmp.x = proof->T1.x; tmp.y = proof->T1.y; tmp.z = FIELD_ONE; tmp.infinity = false;
-    scalar_mul(&tmp, &x, &xT1);
+    JacobianPoint T1_jac;
+    T1_jac.x = proof->T1.x; T1_jac.y = proof->T1.y; T1_jac.z = FIELD_ONE; T1_jac.infinity = false;
+    scalar_mul(&T1_jac, &x, &xT1);
 
-    tmp.x = proof->T2.x; tmp.y = proof->T2.y; tmp.z = FIELD_ONE; tmp.infinity = false;
-    scalar_mul(&tmp, &x2, &x2T2);
+    JacobianPoint T2_jac;
+    T2_jac.x = proof->T2.x; T2_jac.y = proof->T2.y; T2_jac.z = FIELD_ONE; T2_jac.infinity = false;
+    scalar_mul(&T2_jac, &x2, &x2T2);
 
     JacobianPoint RHS;
     jacobian_add(&z2V, &deltaH, &RHS);
     jacobian_add(&RHS, &xT1, &RHS);
     jacobian_add(&RHS, &x2T2, &RHS);
 
-    // Compare LHS == RHS
-    uint8_t lhs_comp[33], rhs_comp[33];
-    point_to_compressed(&LHS, lhs_comp);
-    point_to_compressed(&RHS, rhs_comp);
+    // Compare LHS == RHS via Jacobian cross-multiply (0 field_inv)
+    FieldElement z1sq, z2sq, z1cu, z2cu;
+    field_sqr(&LHS.z, &z1sq);
+    field_sqr(&RHS.z, &z2sq);
+    field_mul(&z1sq, &LHS.z, &z1cu);
+    field_mul(&z2sq, &RHS.z, &z2cu);
 
-    for (int i = 0; i < 33; ++i)
-        if (lhs_comp[i] != rhs_comp[i]) return false;
-    return true;
+    FieldElement lx, rx_cmp, ly, ry;
+    field_mul(&LHS.x, &z2sq, &lx);
+    field_mul(&RHS.x, &z1sq, &rx_cmp);
+    field_mul(&LHS.y, &z2cu, &ly);
+    field_mul(&RHS.y, &z1cu, &ry);
+
+    FieldElement dx, dy;
+    field_sub(&lx, &rx_cmp, &dx);
+    field_sub(&ly, &ry, &dy);
+    uint8_t dx_b[32], dy_b[32];
+    field_to_bytes(&dx, dx_b);
+    field_to_bytes(&dy, dy_b);
+    uint64_t acc = 0;
+    for (int i = 0; i < 32; ++i) acc |= dx_b[i] | dy_b[i];
+    return acc == 0;
 }
 
 __global__ void range_proof_poly_batch_kernel(
