@@ -596,8 +596,9 @@ int main() {
     bp_gen_table_init_w8_kernel<<<1, 128>>>();
     bp_lut4_init_kernel<<<1, 128>>>();
     bp_h_lut4_init_kernel<<<1, 1>>>(d_H_ped);
+    bp_g_lut4_init_kernel<<<1, 1>>>();
     cudaDeviceSynchronize();
-    printf("  Precomputed tables initialized (w4: 128 KB, w8: 2 MB, lut4: 8 MB, H-lut4: 64 KB).\n");
+    printf("  Precomputed tables initialized (w4: 128 KB, w8: 2 MB, lut4: 8 MB, H-lut4: 64 KB, G-lut4: 64 KB).\n");
     fflush(stdout);
 
     int bp_blocks = (BP_BATCH + 64 - 1) / 64;  // fewer threads per block for heavy kernel

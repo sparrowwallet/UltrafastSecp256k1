@@ -2213,8 +2213,8 @@ __device__ inline bool range_verify_warp_lut4_p1par_device(
         // +t_hat * H  (using H LUT4 precomp)
         scalar_mul_bp_lut4(g_bp_h_lut4, &proof->t_hat, &local_pt);
     } else if (lane == 1) {
-        // +tau_x * G
-        scalar_mul_generator_const(&proof->tau_x, &local_pt);
+        // +tau_x * G  (using G LUT4 precomp)
+        scalar_mul_bp_lut4(g_bp_g_lut4, &proof->tau_x, &local_pt);
     } else if (lane == 2) {
         // -(z2 * V) — negate scalar to get -z2*V
         Scalar neg_z2;
@@ -2251,10 +2251,10 @@ __device__ inline bool range_verify_warp_lut4_p1par_device(
         S_jac.x = proof->S.x; S_jac.y = proof->S.y; S_jac.z = FIELD_ONE; S_jac.infinity = false;
         scalar_mul_glv(&S_jac, &smem->x_val, &local_pt);
     } else if (lane == 8) {
-        // -(mu * G)
+        // -(mu * G)  (using G LUT4 precomp)
         Scalar neg_mu;
         scalar_negate(&proof->mu, &neg_mu);
-        scalar_mul_generator_const(&neg_mu, &local_pt);
+        scalar_mul_bp_lut4(g_bp_g_lut4, &neg_mu, &local_pt);
     } else if (lane == 9) {
         // +(t_hat - ab) * H  (using H LUT4 precomp)
         scalar_mul_bp_lut4(g_bp_h_lut4, &smem->t_ab_val, &local_pt);

@@ -233,6 +233,11 @@ __device__ bool g_bp_lut4_ready = false;
 __device__ AffinePoint g_bp_h_lut4[BP_LUT4_GEN_STRIDE];
 __device__ bool g_bp_h_lut4_ready = false;
 
+// --- G generator (secp256k1 base point) positional LUT4 -- 64 KB -------------
+// Used by verify P1c lanes 1, 8 which compute k*G.
+__device__ AffinePoint g_bp_g_lut4[BP_LUT4_GEN_STRIDE];
+__device__ bool g_bp_g_lut4_ready = false;
+
 // Init kernel: each thread builds the full LUT for one generator.
 // For window j, base = 2^(4*j) * P.
 // table[j][d] = d * base  for d = 0..15
@@ -351,6 +356,61 @@ __global__ void bp_h_lut4_init_kernel(const AffinePoint* H_gen) {
     }
 
     g_bp_h_lut4_ready = true;
+}
+
+// --- G generator LUT4 init kernel -------------------------------------------
+// Builds positional LUT4 for the secp256k1 generator G (64 KB).
+// Uses GENERATOR_TABLE_AFFINE[1] as the base point.
+// Launch: <<<1, 1>>>
+
+__global__ void bp_g_lut4_init_kernel() {
+    if (threadIdx.x != 0) return;
+
+    const AffinePoint& G_gen = GENERATOR_TABLE_AFFINE[1];
+    AffinePoint* lut = g_bp_g_lut4;
+
+    JacobianPoint window_base;
+    window_base.x = G_gen.x; window_base.y = G_gen.y;
+    window_base.z = FIELD_ONE; window_base.infinity = false;
+
+    for (int win = 0; win < BP_LUT4_WINDOWS; win++) {
+        AffinePoint* win_table = &lut[win * BP_LUT4_WIN_SIZE];
+
+        AffinePoint base_affine;
+        {
+            FieldElement zi, zi2, zi3;
+            field_inv(&window_base.z, &zi);
+            field_sqr(&zi, &zi2);
+            field_mul(&zi2, &zi, &zi3);
+            field_mul(&window_base.x, &zi2, &base_affine.x);
+            field_mul(&window_base.y, &zi3, &base_affine.y);
+        }
+
+        field_set_zero(&win_table[0].x);
+        field_set_zero(&win_table[0].y);
+        win_table[1] = base_affine;
+
+        JacobianPoint acc;
+        acc.x = base_affine.x; acc.y = base_affine.y;
+        acc.z = FIELD_ONE; acc.infinity = false;
+
+        for (int d = 2; d < BP_LUT4_WIN_SIZE; d++) {
+            jacobian_add_mixed(&acc, &base_affine, &acc);
+            FieldElement zi, zi2, zi3;
+            field_inv(&acc.z, &zi);
+            field_sqr(&zi, &zi2);
+            field_mul(&zi2, &zi, &zi3);
+            field_mul(&acc.x, &zi2, &win_table[d].x);
+            field_mul(&acc.y, &zi3, &win_table[d].y);
+        }
+
+        jacobian_double(&window_base, &window_base);
+        jacobian_double(&window_base, &window_base);
+        jacobian_double(&window_base, &window_base);
+        jacobian_double(&window_base, &window_base);
+    }
+
+    g_bp_g_lut4_ready = true;
 }
 
 // --- Positional LUT scalar multiplication: ZERO doublings --------------------
