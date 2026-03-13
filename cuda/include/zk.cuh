@@ -17,6 +17,7 @@
 #include "secp256k1.cuh"
 #include "pedersen.cuh"
 #include "ecdsa.cuh"  // SHA256Ctx, sha256_*
+#include "bp_gen_table.cuh"
 
 #if !SECP256K1_CUDA_LIMBS_32
 
@@ -875,6 +876,1516 @@ __device__ inline bool range_verify_full_device(
     // Check: msm_acc should be identity (infinity)
     if (msm_acc.infinity) return true;
     return field_is_zero(&msm_acc.z);
+}
+
+// ============================================================================
+// 6. Warp-Cooperative Bulletproof Verify
+// ============================================================================
+// 32 threads (1 warp) cooperate on a single proof.
+// Lane 0 handles Fiat-Shamir + polynomial check + scalar precomputation.
+// All 32 lanes share the MSM work over 64 G_i + 64 H_i generators.
+// Tree reduction combines partial Jacobian accumulators.
+//
+// Shared memory layout per warp (index = warpId within block):
+//   s_coeff[64], s_inv[64], y_inv_powers[64], two_powers[64]  (scalar precomputation)
+//   proof_data: neg_z, z, z2, a_proof, b_proof, t_hat, mu, x, x2, ab  (10 Scalars)
+//   H_jac (1 JacobianPoint): Pedersen H as Jacobian
+//   reduce_buf[32] JacobianPoints: for warp tree reduction
+//   poly_ok: bool
+// ============================================================================
+
+// Shared memory struct for one warp's bulletproof verify work
+struct BPWarpShared {
+    Scalar s_coeff[BP_BITS];       // 64 * 32 = 2048 bytes
+    Scalar s_inv[BP_BITS];         // 2048
+    Scalar y_inv_powers[BP_BITS];  // 2048
+    Scalar two_powers[BP_BITS];    // 2048
+    // Proof-derived scalars (broadcast by lane 0)
+    Scalar neg_z, z, z2, a_proof, b_proof;
+    // IPA round challenges
+    Scalar x_rounds[BP_LOG2];      // 6 * 32 = 192
+    Scalar x_inv_rounds[BP_LOG2];  // 192
+    // Pre-accumulated MSM terms (non-GiHi) computed by lane 0
+    JacobianPoint msm_base;        // A + xS - muG + (t-ab)U + L/R terms + poly check
+    bool poly_ok;
+    // Phase 1 parallel: scalars broadcast for parallel point scalar_muls
+    Scalar y_val;
+    Scalar x_val, x2_val;
+    Scalar delta_val;
+    Scalar t_ab_val;               // t_hat - a*b
+    Scalar xj_sq[BP_LOG2];         // x_rounds[j]^2
+    Scalar xj_inv_sq[BP_LOG2];     // x_inv_rounds[j]^2
+    // Phase profiling (clock64 cycle stamps, lane 0 only)
+    long long phase_ts[6];             // T0..T5 for P1a/P1b/P1c/P2/P3
+};
+
+__device__ inline bool range_verify_warp_device(
+    const RangeProofGPU* proof,
+    const AffinePoint* commitment,
+    const AffinePoint* H_gen,
+    BPWarpShared* smem)         // caller provides per-warp shared memory
+{
+    const int lane = threadIdx.x & 31;
+    constexpr uint32_t FULL_MASK = 0xFFFFFFFF;
+
+    // ====================================================================
+    // Phase 1: lane 0 does Fiat-Shamir, polynomial check, scalar precomp
+    // ====================================================================
+    if (lane == 0) {
+        smem->poly_ok = false;  // pessimistic default
+
+        // ---- Fiat-Shamir: recompute y, z, x ----
+        uint8_t a_comp[33], s_comp[33], v_comp[33];
+        affine_to_compressed(&proof->A.x, &proof->A.y, a_comp);
+        affine_to_compressed(&proof->S.x, &proof->S.y, s_comp);
+        affine_to_compressed(&commitment->x, &commitment->y, v_comp);
+
+        uint8_t fs_buf[33 + 33 + 33];
+        for (int i = 0; i < 33; ++i) {
+            fs_buf[i]      = a_comp[i];
+            fs_buf[33 + i] = s_comp[i];
+            fs_buf[66 + i] = v_comp[i];
+        }
+        uint8_t y_hash[32], z_hash[32];
+        zk_tagged_hash_midstate(&ZK_BULLETPROOF_Y_MIDSTATE, fs_buf, sizeof(fs_buf), y_hash);
+        zk_tagged_hash_midstate(&ZK_BULLETPROOF_Z_MIDSTATE, fs_buf, sizeof(fs_buf), z_hash);
+
+        Scalar y, z_val;
+        scalar_from_bytes(y_hash, &y);
+        scalar_from_bytes(z_hash, &z_val);
+
+        uint8_t t1_comp[33], t2_comp[33];
+        affine_to_compressed(&proof->T1.x, &proof->T1.y, t1_comp);
+        affine_to_compressed(&proof->T2.x, &proof->T2.y, t2_comp);
+
+        uint8_t x_buf[33 + 33 + 32 + 32];
+        for (int i = 0; i < 33; ++i) { x_buf[i] = t1_comp[i]; x_buf[33 + i] = t2_comp[i]; }
+        scalar_to_bytes(&y, x_buf + 66);
+        scalar_to_bytes(&z_val, x_buf + 98);
+
+        uint8_t x_hash[32];
+        zk_tagged_hash_midstate(&ZK_BULLETPROOF_X_MIDSTATE, x_buf, sizeof(x_buf), x_hash);
+        Scalar x;
+        scalar_from_bytes(x_hash, &x);
+
+        // ---- delta(y,z) ----
+        Scalar z2_val, z3, x2;
+        scalar_mul_mod_n(&z_val, &z_val, &z2_val);
+        scalar_mul_mod_n(&z2_val, &z_val, &z3);
+        scalar_mul_mod_n(&x, &x, &x2);
+
+        Scalar sum_y;
+        sum_y.limbs[0] = 1; sum_y.limbs[1] = 0; sum_y.limbs[2] = 0; sum_y.limbs[3] = 0;
+        Scalar y_pow = y;
+        for (int i = 1; i < BP_BITS; ++i) {
+            scalar_add(&sum_y, &y_pow, &sum_y);
+            scalar_mul_mod_n(&y_pow, &y, &y_pow);
+        }
+
+        Scalar sum_2;
+        sum_2.limbs[0] = 0xFFFFFFFFFFFFFFFFULL;
+        sum_2.limbs[1] = 0; sum_2.limbs[2] = 0; sum_2.limbs[3] = 0;
+
+        Scalar z_minus_z2, term1, term2, delta;
+        scalar_sub(&z_val, &z2_val, &z_minus_z2);
+        scalar_mul_mod_n(&z_minus_z2, &sum_y, &term1);
+        scalar_mul_mod_n(&z3, &sum_2, &term2);
+        scalar_sub(&term1, &term2, &delta);
+
+        // ---- Polynomial check ----
+        Scalar t_hat_minus_delta;
+        scalar_sub(&proof->t_hat, &delta, &t_hat_minus_delta);
+
+        JacobianPoint H_jac;
+        H_jac.x = H_gen->x; H_jac.y = H_gen->y; H_jac.z = FIELD_ONE; H_jac.infinity = false;
+
+        JacobianPoint tH, tauG, LHS;
+        scalar_mul(&H_jac, &proof->t_hat, &tH);
+        scalar_mul_generator_const(&proof->tau_x, &tauG);
+        jacobian_add(&tH, &tauG, &LHS);
+
+        JacobianPoint V_jac;
+        V_jac.x = commitment->x; V_jac.y = commitment->y; V_jac.z = FIELD_ONE; V_jac.infinity = false;
+        JacobianPoint z2V, deltaH, xT1, x2T2;
+        scalar_mul(&V_jac, &z2_val, &z2V);
+        scalar_mul(&H_jac, &delta, &deltaH);
+
+        JacobianPoint T1_jac;
+        T1_jac.x = proof->T1.x; T1_jac.y = proof->T1.y; T1_jac.z = FIELD_ONE; T1_jac.infinity = false;
+        scalar_mul(&T1_jac, &x, &xT1);
+
+        JacobianPoint T2_jac;
+        T2_jac.x = proof->T2.x; T2_jac.y = proof->T2.y; T2_jac.z = FIELD_ONE; T2_jac.infinity = false;
+        scalar_mul(&T2_jac, &x2, &x2T2);
+
+        JacobianPoint RHS;
+        jacobian_add(&z2V, &deltaH, &RHS);
+        jacobian_add(&RHS, &xT1, &RHS);
+        jacobian_add(&RHS, &x2T2, &RHS);
+
+        // Compare LHS == RHS
+        {
+            FieldElement z1sq, z2sq, z1cu, z2cu;
+            field_sqr(&LHS.z, &z1sq); field_sqr(&RHS.z, &z2sq);
+            field_mul(&z1sq, &LHS.z, &z1cu); field_mul(&z2sq, &RHS.z, &z2cu);
+            FieldElement lx, rx_val, ly, ry;
+            field_mul(&LHS.x, &z2sq, &lx); field_mul(&RHS.x, &z1sq, &rx_val);
+            field_mul(&LHS.y, &z2cu, &ly); field_mul(&RHS.y, &z1cu, &ry);
+            FieldElement dx, dy;
+            field_sub(&lx, &rx_val, &dx); field_sub(&ly, &ry, &dy);
+            uint64_t acc = dx.limbs[0] | dx.limbs[1] | dx.limbs[2] | dx.limbs[3]
+                         | dy.limbs[0] | dy.limbs[1] | dy.limbs[2] | dy.limbs[3];
+            if (acc != 0) return false;  // poly check failed -- all lanes return below
+        }
+
+        // ---- IPA challenge reconstruction ----
+        for (int round = 0; round < BP_LOG2; ++round) {
+            uint8_t l_comp[33], r_comp[33];
+            affine_to_compressed(&proof->L[round].x, &proof->L[round].y, l_comp);
+            affine_to_compressed(&proof->R[round].x, &proof->R[round].y, r_comp);
+            uint8_t ip_buf[33 + 33];
+            for (int i = 0; i < 33; ++i) { ip_buf[i] = l_comp[i]; ip_buf[33 + i] = r_comp[i]; }
+            uint8_t xr_hash[32];
+            zk_tagged_hash_midstate(&g_bp_ip_midstate, ip_buf, sizeof(ip_buf), xr_hash);
+            scalar_from_bytes(xr_hash, &smem->x_rounds[round]);
+        }
+
+        // Batch inversion of x_rounds
+        {
+            Scalar acc[BP_LOG2];
+            acc[0] = smem->x_rounds[0];
+            for (int j = 1; j < BP_LOG2; ++j) scalar_mul_mod_n(&acc[j-1], &smem->x_rounds[j], &acc[j]);
+            Scalar inv_acc;
+            scalar_inverse(&acc[BP_LOG2 - 1], &inv_acc);
+            for (int j = BP_LOG2 - 1; j >= 1; --j) {
+                scalar_mul_mod_n(&inv_acc, &acc[j-1], &smem->x_inv_rounds[j]);
+                scalar_mul_mod_n(&inv_acc, &smem->x_rounds[j], &inv_acc);
+            }
+            smem->x_inv_rounds[0] = inv_acc;
+        }
+
+        // y_inv and y_inv_powers
+        Scalar y_inv;
+        scalar_inverse(&y, &y_inv);
+        smem->y_inv_powers[0].limbs[0] = 1; smem->y_inv_powers[0].limbs[1] = 0;
+        smem->y_inv_powers[0].limbs[2] = 0; smem->y_inv_powers[0].limbs[3] = 0;
+        for (int i = 1; i < BP_BITS; ++i)
+            scalar_mul_mod_n(&smem->y_inv_powers[i-1], &y_inv, &smem->y_inv_powers[i]);
+
+        // s_coeff[i] = product tree
+        smem->s_coeff[0].limbs[0] = 1; smem->s_coeff[0].limbs[1] = 0;
+        smem->s_coeff[0].limbs[2] = 0; smem->s_coeff[0].limbs[3] = 0;
+        for (int j = 0; j < BP_LOG2; ++j)
+            scalar_mul_mod_n(&smem->s_coeff[0], &smem->x_inv_rounds[j], &smem->s_coeff[0]);
+        for (int i = 1; i < BP_BITS; ++i) {
+            smem->s_coeff[i].limbs[0] = 1; smem->s_coeff[i].limbs[1] = 0;
+            smem->s_coeff[i].limbs[2] = 0; smem->s_coeff[i].limbs[3] = 0;
+            for (int jj = 0; jj < BP_LOG2; ++jj) {
+                if ((i >> (BP_LOG2 - 1 - jj)) & 1)
+                    scalar_mul_mod_n(&smem->s_coeff[i], &smem->x_rounds[jj], &smem->s_coeff[i]);
+                else
+                    scalar_mul_mod_n(&smem->s_coeff[i], &smem->x_inv_rounds[jj], &smem->s_coeff[i]);
+            }
+        }
+
+        // Batch inversion for s_inv
+        {
+            Scalar acc[BP_BITS];
+            acc[0] = smem->s_coeff[0];
+            for (int i = 1; i < BP_BITS; ++i) scalar_mul_mod_n(&acc[i-1], &smem->s_coeff[i], &acc[i]);
+            Scalar inv_acc;
+            scalar_inverse(&acc[BP_BITS - 1], &inv_acc);
+            for (int i = BP_BITS - 1; i >= 1; --i) {
+                scalar_mul_mod_n(&inv_acc, &acc[i-1], &smem->s_inv[i]);
+                scalar_mul_mod_n(&inv_acc, &smem->s_coeff[i], &inv_acc);
+            }
+            smem->s_inv[0] = inv_acc;
+        }
+
+        // two_powers
+        smem->two_powers[0].limbs[0] = 1; smem->two_powers[0].limbs[1] = 0;
+        smem->two_powers[0].limbs[2] = 0; smem->two_powers[0].limbs[3] = 0;
+        for (int i = 1; i < BP_BITS; ++i)
+            scalar_add(&smem->two_powers[i-1], &smem->two_powers[i-1], &smem->two_powers[i]);
+
+        // Store broadcast scalars
+        Scalar neg_z_val;
+        scalar_negate(&z_val, &neg_z_val);
+        smem->neg_z = neg_z_val;
+        smem->z     = z_val;
+        smem->z2    = z2_val;
+        smem->a_proof = proof->a;
+        smem->b_proof = proof->b;
+
+        Scalar ab;
+        scalar_mul_mod_n(&proof->a, &proof->b, &ab);
+
+        // Build non-GiHi MSM terms
+        JacobianPoint msm;
+        msm.infinity = true; msm.z = FIELD_ONE;
+
+        // A (coefficient 1)
+        {
+            JacobianPoint A_jac;
+            A_jac.x = proof->A.x; A_jac.y = proof->A.y; A_jac.z = FIELD_ONE; A_jac.infinity = false;
+            jacobian_add(&msm, &A_jac, &msm);
+        }
+        // x * S
+        {
+            JacobianPoint S_jac, xS;
+            S_jac.x = proof->S.x; S_jac.y = proof->S.y; S_jac.z = FIELD_ONE; S_jac.infinity = false;
+            scalar_mul(&S_jac, &x, &xS);
+            jacobian_add(&msm, &xS, &msm);
+        }
+        // -mu * G
+        {
+            Scalar neg_mu;
+            scalar_negate(&proof->mu, &neg_mu);
+            JacobianPoint muG;
+            scalar_mul_generator_const(&neg_mu, &muG);
+            jacobian_add(&msm, &muG, &msm);
+        }
+        // (t_hat - a*b) * U (H_ped)
+        {
+            Scalar t_ab;
+            scalar_sub(&proof->t_hat, &ab, &t_ab);
+            JacobianPoint tU;
+            scalar_mul(&H_jac, &t_ab, &tU);
+            jacobian_add(&msm, &tU, &msm);
+        }
+        // L_j and R_j contributions
+        for (int j = 0; j < BP_LOG2; ++j) {
+            Scalar xj2, xj_inv2;
+            scalar_mul_mod_n(&smem->x_rounds[j], &smem->x_rounds[j], &xj2);
+            scalar_mul_mod_n(&smem->x_inv_rounds[j], &smem->x_inv_rounds[j], &xj_inv2);
+            JacobianPoint Lj, Rj, lterm, rterm;
+            Lj.x = proof->L[j].x; Lj.y = proof->L[j].y; Lj.z = FIELD_ONE; Lj.infinity = false;
+            Rj.x = proof->R[j].x; Rj.y = proof->R[j].y; Rj.z = FIELD_ONE; Rj.infinity = false;
+            scalar_mul(&Lj, &xj2, &lterm);
+            scalar_mul(&Rj, &xj_inv2, &rterm);
+            jacobian_add(&msm, &lterm, &msm);
+            jacobian_add(&msm, &rterm, &msm);
+        }
+
+        smem->msm_base = msm;
+        smem->poly_ok = true;
+    }
+
+    // Synchronize warp -- ensure smem is visible to all lanes
+    __syncwarp(FULL_MASK);
+
+    // If polynomial check failed (lane 0 returned false above, but only for lane 0),
+    // need to broadcast the result
+    if (!smem->poly_ok) return false;
+
+    // ====================================================================
+    // Phase 2: All 32 lanes compute partial MSM over G_i + H_i
+    // ====================================================================
+    // 64 generators = 2 per lane for G, 2 per lane for H
+    // lane k handles G[2k], G[2k+1], H[2k], H[2k+1]
+
+    JacobianPoint local_acc;
+    local_acc.infinity = true;
+    local_acc.z = FIELD_ONE;
+
+    if (lane < 32) {
+        const int base_i = lane * 2;
+        for (int off = 0; off < 2 && (base_i + off) < BP_BITS; ++off) {
+            const int i = base_i + off;
+
+            // G_i: (-z - a*s_i)
+            Scalar a_si, g_coeff;
+            scalar_mul_mod_n(&smem->a_proof, &smem->s_coeff[i], &a_si);
+            scalar_sub(&smem->neg_z, &a_si, &g_coeff);
+
+            JacobianPoint Gi_jac, g_term;
+            Gi_jac.x = g_bulletproof_G[i].x; Gi_jac.y = g_bulletproof_G[i].y;
+            Gi_jac.z = FIELD_ONE; Gi_jac.infinity = false;
+            scalar_mul(&Gi_jac, &g_coeff, &g_term);
+            jacobian_add(&local_acc, &g_term, &local_acc);
+
+            // H_i: (z + z2*2^i*y_inv^i) - b*s_inv[i]*y_inv^i
+            Scalar z2_2i, z2_2i_yi, h_pcheck;
+            scalar_mul_mod_n(&smem->z2, &smem->two_powers[i], &z2_2i);
+            scalar_mul_mod_n(&z2_2i, &smem->y_inv_powers[i], &z2_2i_yi);
+            scalar_add(&smem->z, &z2_2i_yi, &h_pcheck);
+
+            Scalar b_si, b_si_yi, h_coeff;
+            scalar_mul_mod_n(&smem->b_proof, &smem->s_inv[i], &b_si);
+            scalar_mul_mod_n(&b_si, &smem->y_inv_powers[i], &b_si_yi);
+            scalar_sub(&h_pcheck, &b_si_yi, &h_coeff);
+
+            JacobianPoint Hi_jac, h_term;
+            Hi_jac.x = g_bulletproof_H[i].x; Hi_jac.y = g_bulletproof_H[i].y;
+            Hi_jac.z = FIELD_ONE; Hi_jac.infinity = false;
+            scalar_mul(&Hi_jac, &h_coeff, &h_term);
+            jacobian_add(&local_acc, &h_term, &local_acc);
+        }
+    }
+
+    // ====================================================================
+    // Phase 3: Warp tree reduction of partial Jacobian accumulators
+    // ====================================================================
+    // 5 rounds of shuffle-based reduction (32 -> 16 -> 8 -> 4 -> 2 -> 1)
+    // We use shared memory since JacobianPoint is too large for __shfl_sync
+
+    // Declare shared memory for reduction (reuse smem region after scalar data is consumed)
+    // We need 32 JacobianPoint slots for the reduction tree
+    // But BPWarpShared doesn't have this -- use a separate shared buffer
+    // Strategy: write local_acc to smem array, then tree-reduce in-place
+    // We need the caller to also provide a reduction buffer.
+    // Alternative: use __shfl_sync on individual uint32_t words (JacobianPoint = 136 bytes = 34 words)
+    // That's 34 shuffles per round * 5 rounds = 170 shuffles -- acceptable
+
+    // Shuffle-based tree reduction for JacobianPoint
+    #pragma unroll
+    for (int offset = 16; offset >= 1; offset >>= 1) {
+        // Receive partner's point via __shfl_down_sync (limb by limb)
+        JacobianPoint partner;
+        // x: 4 limbs * 2 words each = 8 words
+        for (int w = 0; w < 4; ++w) {
+            uint32_t lo = __shfl_down_sync(FULL_MASK, (uint32_t)(local_acc.x.limbs[w]),       offset);
+            uint32_t hi = __shfl_down_sync(FULL_MASK, (uint32_t)(local_acc.x.limbs[w] >> 32), offset);
+            partner.x.limbs[w] = ((uint64_t)hi << 32) | lo;
+        }
+        // y: 4 limbs
+        for (int w = 0; w < 4; ++w) {
+            uint32_t lo = __shfl_down_sync(FULL_MASK, (uint32_t)(local_acc.y.limbs[w]),       offset);
+            uint32_t hi = __shfl_down_sync(FULL_MASK, (uint32_t)(local_acc.y.limbs[w] >> 32), offset);
+            partner.y.limbs[w] = ((uint64_t)hi << 32) | lo;
+        }
+        // z: 4 limbs
+        for (int w = 0; w < 4; ++w) {
+            uint32_t lo = __shfl_down_sync(FULL_MASK, (uint32_t)(local_acc.z.limbs[w]),       offset);
+            uint32_t hi = __shfl_down_sync(FULL_MASK, (uint32_t)(local_acc.z.limbs[w] >> 32), offset);
+            partner.z.limbs[w] = ((uint64_t)hi << 32) | lo;
+        }
+        // infinity flag
+        uint32_t inf_raw = __shfl_down_sync(FULL_MASK, (uint32_t)local_acc.infinity, offset);
+        partner.infinity = (bool)inf_raw;
+
+        if (lane + offset < 32) {
+            jacobian_add(&local_acc, &partner, &local_acc);
+        }
+    }
+
+    // Lane 0 now has the combined GiHi MSM result
+    // Add the base MSM (A + xS - muG + ... + L/R terms)
+    if (lane == 0) {
+        jacobian_add(&local_acc, &smem->msm_base, &local_acc);
+        // Check identity
+        bool is_id = local_acc.infinity || field_is_zero(&local_acc.z);
+        // Store result via __shfl_sync broadcast below
+        smem->poly_ok = is_id;  // reuse poly_ok for final result
+    }
+    __syncwarp(FULL_MASK);
+
+    return smem->poly_ok;
+}
+
+// ============================================================================
+// 7. Precomputed-Table Warp-Cooperative Bulletproof Verify
+// ============================================================================
+// Same as range_verify_warp_device but uses precomputed fixed-window tables
+// for the G_i/H_i scalar multiplications (Phase 2).
+// WIN_BITS=4: 128 KB table, 64 windows, up to 64 mixed adds per scalar_mul
+// WIN_BITS=8: 2 MB table,  32 windows, up to 32 mixed adds per scalar_mul
+//
+// Phase 1 (Fiat-Shamir + poly check + scalar precomp) is IDENTICAL.
+// Phase 3 (warp reduction + finalize) is IDENTICAL.
+// Only Phase 2 MSM uses the precomputed tables.
+
+template<int WIN_BITS>
+__device__ inline bool range_verify_warp_precomp_impl(
+    const RangeProofGPU* proof,
+    const AffinePoint* commitment,
+    const AffinePoint* H_gen,
+    BPWarpShared* smem)
+{
+    static_assert(WIN_BITS == 4 || WIN_BITS == 8, "Only w=4 and w=8 supported");
+    constexpr int TABLE_SIZE = (1 << WIN_BITS);
+
+    const int lane = threadIdx.x & 31;
+    constexpr uint32_t FULL_MASK = 0xFFFFFFFF;
+
+    // ====================================================================
+    // Phase 1: lane 0 does Fiat-Shamir, polynomial check, scalar precomp
+    // (IDENTICAL to range_verify_warp_device)
+    // ====================================================================
+    if (lane == 0) {
+        smem->poly_ok = false;
+
+        uint8_t a_comp[33], s_comp[33], v_comp[33];
+        affine_to_compressed(&proof->A.x, &proof->A.y, a_comp);
+        affine_to_compressed(&proof->S.x, &proof->S.y, s_comp);
+        affine_to_compressed(&commitment->x, &commitment->y, v_comp);
+
+        uint8_t fs_buf[33 + 33 + 33];
+        for (int i = 0; i < 33; ++i) {
+            fs_buf[i]      = a_comp[i];
+            fs_buf[33 + i] = s_comp[i];
+            fs_buf[66 + i] = v_comp[i];
+        }
+        uint8_t y_hash[32], z_hash[32];
+        zk_tagged_hash_midstate(&ZK_BULLETPROOF_Y_MIDSTATE, fs_buf, sizeof(fs_buf), y_hash);
+        zk_tagged_hash_midstate(&ZK_BULLETPROOF_Z_MIDSTATE, fs_buf, sizeof(fs_buf), z_hash);
+
+        Scalar y, z_val;
+        scalar_from_bytes(y_hash, &y);
+        scalar_from_bytes(z_hash, &z_val);
+
+        uint8_t t1_comp[33], t2_comp[33];
+        affine_to_compressed(&proof->T1.x, &proof->T1.y, t1_comp);
+        affine_to_compressed(&proof->T2.x, &proof->T2.y, t2_comp);
+
+        uint8_t x_buf[33 + 33 + 32 + 32];
+        for (int i = 0; i < 33; ++i) { x_buf[i] = t1_comp[i]; x_buf[33 + i] = t2_comp[i]; }
+        scalar_to_bytes(&y, x_buf + 66);
+        scalar_to_bytes(&z_val, x_buf + 98);
+
+        uint8_t x_hash[32];
+        zk_tagged_hash_midstate(&ZK_BULLETPROOF_X_MIDSTATE, x_buf, sizeof(x_buf), x_hash);
+        Scalar x;
+        scalar_from_bytes(x_hash, &x);
+
+        Scalar z2_val, z3, x2;
+        scalar_mul_mod_n(&z_val, &z_val, &z2_val);
+        scalar_mul_mod_n(&z2_val, &z_val, &z3);
+        scalar_mul_mod_n(&x, &x, &x2);
+
+        Scalar sum_y;
+        sum_y.limbs[0] = 1; sum_y.limbs[1] = 0; sum_y.limbs[2] = 0; sum_y.limbs[3] = 0;
+        Scalar y_pow = y;
+        for (int i = 1; i < BP_BITS; ++i) {
+            scalar_add(&sum_y, &y_pow, &sum_y);
+            scalar_mul_mod_n(&y_pow, &y, &y_pow);
+        }
+
+        Scalar sum_2;
+        sum_2.limbs[0] = 0xFFFFFFFFFFFFFFFFULL;
+        sum_2.limbs[1] = 0; sum_2.limbs[2] = 0; sum_2.limbs[3] = 0;
+
+        Scalar z_minus_z2, term1, term2, delta;
+        scalar_sub(&z_val, &z2_val, &z_minus_z2);
+        scalar_mul_mod_n(&z_minus_z2, &sum_y, &term1);
+        scalar_mul_mod_n(&z3, &sum_2, &term2);
+        scalar_sub(&term1, &term2, &delta);
+
+        Scalar t_hat_minus_delta;
+        scalar_sub(&proof->t_hat, &delta, &t_hat_minus_delta);
+
+        JacobianPoint H_jac;
+        H_jac.x = H_gen->x; H_jac.y = H_gen->y; H_jac.z = FIELD_ONE; H_jac.infinity = false;
+
+        JacobianPoint tH, tauG, LHS;
+        scalar_mul(&H_jac, &proof->t_hat, &tH);
+        scalar_mul_generator_const(&proof->tau_x, &tauG);
+        jacobian_add(&tH, &tauG, &LHS);
+
+        JacobianPoint V_jac;
+        V_jac.x = commitment->x; V_jac.y = commitment->y; V_jac.z = FIELD_ONE; V_jac.infinity = false;
+        JacobianPoint z2V, deltaH, xT1, x2T2;
+        scalar_mul(&V_jac, &z2_val, &z2V);
+        scalar_mul(&H_jac, &delta, &deltaH);
+
+        JacobianPoint T1_jac;
+        T1_jac.x = proof->T1.x; T1_jac.y = proof->T1.y; T1_jac.z = FIELD_ONE; T1_jac.infinity = false;
+        scalar_mul(&T1_jac, &x, &xT1);
+
+        JacobianPoint T2_jac;
+        T2_jac.x = proof->T2.x; T2_jac.y = proof->T2.y; T2_jac.z = FIELD_ONE; T2_jac.infinity = false;
+        scalar_mul(&T2_jac, &x2, &x2T2);
+
+        JacobianPoint RHS;
+        jacobian_add(&z2V, &deltaH, &RHS);
+        jacobian_add(&RHS, &xT1, &RHS);
+        jacobian_add(&RHS, &x2T2, &RHS);
+
+        {
+            FieldElement z1sq, z2sq, z1cu, z2cu;
+            field_sqr(&LHS.z, &z1sq); field_sqr(&RHS.z, &z2sq);
+            field_mul(&z1sq, &LHS.z, &z1cu); field_mul(&z2sq, &RHS.z, &z2cu);
+            FieldElement lx, rx_val, ly, ry;
+            field_mul(&LHS.x, &z2sq, &lx); field_mul(&RHS.x, &z1sq, &rx_val);
+            field_mul(&LHS.y, &z2cu, &ly); field_mul(&RHS.y, &z1cu, &ry);
+            FieldElement dx, dy;
+            field_sub(&lx, &rx_val, &dx); field_sub(&ly, &ry, &dy);
+            uint64_t acc = dx.limbs[0] | dx.limbs[1] | dx.limbs[2] | dx.limbs[3]
+                         | dy.limbs[0] | dy.limbs[1] | dy.limbs[2] | dy.limbs[3];
+            if (acc != 0) return false;
+        }
+
+        for (int round = 0; round < BP_LOG2; ++round) {
+            uint8_t l_comp[33], r_comp[33];
+            affine_to_compressed(&proof->L[round].x, &proof->L[round].y, l_comp);
+            affine_to_compressed(&proof->R[round].x, &proof->R[round].y, r_comp);
+            uint8_t ip_buf[33 + 33];
+            for (int i = 0; i < 33; ++i) { ip_buf[i] = l_comp[i]; ip_buf[33 + i] = r_comp[i]; }
+            uint8_t xr_hash[32];
+            zk_tagged_hash_midstate(&g_bp_ip_midstate, ip_buf, sizeof(ip_buf), xr_hash);
+            scalar_from_bytes(xr_hash, &smem->x_rounds[round]);
+        }
+
+        {
+            Scalar acc[BP_LOG2];
+            acc[0] = smem->x_rounds[0];
+            for (int j = 1; j < BP_LOG2; ++j) scalar_mul_mod_n(&acc[j-1], &smem->x_rounds[j], &acc[j]);
+            Scalar inv_acc;
+            scalar_inverse(&acc[BP_LOG2 - 1], &inv_acc);
+            for (int j = BP_LOG2 - 1; j >= 1; --j) {
+                scalar_mul_mod_n(&inv_acc, &acc[j-1], &smem->x_inv_rounds[j]);
+                scalar_mul_mod_n(&inv_acc, &smem->x_rounds[j], &inv_acc);
+            }
+            smem->x_inv_rounds[0] = inv_acc;
+        }
+
+        Scalar y_inv;
+        scalar_inverse(&y, &y_inv);
+        smem->y_inv_powers[0].limbs[0] = 1; smem->y_inv_powers[0].limbs[1] = 0;
+        smem->y_inv_powers[0].limbs[2] = 0; smem->y_inv_powers[0].limbs[3] = 0;
+        for (int i = 1; i < BP_BITS; ++i)
+            scalar_mul_mod_n(&smem->y_inv_powers[i-1], &y_inv, &smem->y_inv_powers[i]);
+
+        smem->s_coeff[0].limbs[0] = 1; smem->s_coeff[0].limbs[1] = 0;
+        smem->s_coeff[0].limbs[2] = 0; smem->s_coeff[0].limbs[3] = 0;
+        for (int j = 0; j < BP_LOG2; ++j)
+            scalar_mul_mod_n(&smem->s_coeff[0], &smem->x_inv_rounds[j], &smem->s_coeff[0]);
+        for (int i = 1; i < BP_BITS; ++i) {
+            smem->s_coeff[i].limbs[0] = 1; smem->s_coeff[i].limbs[1] = 0;
+            smem->s_coeff[i].limbs[2] = 0; smem->s_coeff[i].limbs[3] = 0;
+            for (int jj = 0; jj < BP_LOG2; ++jj) {
+                if ((i >> (BP_LOG2 - 1 - jj)) & 1)
+                    scalar_mul_mod_n(&smem->s_coeff[i], &smem->x_rounds[jj], &smem->s_coeff[i]);
+                else
+                    scalar_mul_mod_n(&smem->s_coeff[i], &smem->x_inv_rounds[jj], &smem->s_coeff[i]);
+            }
+        }
+
+        {
+            Scalar acc[BP_BITS];
+            acc[0] = smem->s_coeff[0];
+            for (int i = 1; i < BP_BITS; ++i) scalar_mul_mod_n(&acc[i-1], &smem->s_coeff[i], &acc[i]);
+            Scalar inv_acc;
+            scalar_inverse(&acc[BP_BITS - 1], &inv_acc);
+            for (int i = BP_BITS - 1; i >= 1; --i) {
+                scalar_mul_mod_n(&inv_acc, &acc[i-1], &smem->s_inv[i]);
+                scalar_mul_mod_n(&inv_acc, &smem->s_coeff[i], &inv_acc);
+            }
+            smem->s_inv[0] = inv_acc;
+        }
+
+        smem->two_powers[0].limbs[0] = 1; smem->two_powers[0].limbs[1] = 0;
+        smem->two_powers[0].limbs[2] = 0; smem->two_powers[0].limbs[3] = 0;
+        for (int i = 1; i < BP_BITS; ++i)
+            scalar_add(&smem->two_powers[i-1], &smem->two_powers[i-1], &smem->two_powers[i]);
+
+        Scalar neg_z_val;
+        scalar_negate(&z_val, &neg_z_val);
+        smem->neg_z = neg_z_val;
+        smem->z     = z_val;
+        smem->z2    = z2_val;
+        smem->a_proof = proof->a;
+        smem->b_proof = proof->b;
+
+        Scalar ab;
+        scalar_mul_mod_n(&proof->a, &proof->b, &ab);
+
+        JacobianPoint msm;
+        msm.infinity = true; msm.z = FIELD_ONE;
+
+        {
+            JacobianPoint A_jac;
+            A_jac.x = proof->A.x; A_jac.y = proof->A.y; A_jac.z = FIELD_ONE; A_jac.infinity = false;
+            jacobian_add(&msm, &A_jac, &msm);
+        }
+        {
+            JacobianPoint S_jac, xS;
+            S_jac.x = proof->S.x; S_jac.y = proof->S.y; S_jac.z = FIELD_ONE; S_jac.infinity = false;
+            scalar_mul(&S_jac, &x, &xS);
+            jacobian_add(&msm, &xS, &msm);
+        }
+        {
+            Scalar neg_mu;
+            scalar_negate(&proof->mu, &neg_mu);
+            JacobianPoint muG;
+            scalar_mul_generator_const(&neg_mu, &muG);
+            jacobian_add(&msm, &muG, &msm);
+        }
+        {
+            Scalar t_ab;
+            scalar_sub(&proof->t_hat, &ab, &t_ab);
+            JacobianPoint tU;
+            scalar_mul(&H_jac, &t_ab, &tU);
+            jacobian_add(&msm, &tU, &msm);
+        }
+        for (int j = 0; j < BP_LOG2; ++j) {
+            Scalar xj2, xj_inv2;
+            scalar_mul_mod_n(&smem->x_rounds[j], &smem->x_rounds[j], &xj2);
+            scalar_mul_mod_n(&smem->x_inv_rounds[j], &smem->x_inv_rounds[j], &xj_inv2);
+            JacobianPoint Lj, Rj, lterm, rterm;
+            Lj.x = proof->L[j].x; Lj.y = proof->L[j].y; Lj.z = FIELD_ONE; Lj.infinity = false;
+            Rj.x = proof->R[j].x; Rj.y = proof->R[j].y; Rj.z = FIELD_ONE; Rj.infinity = false;
+            scalar_mul(&Lj, &xj2, &lterm);
+            scalar_mul(&Rj, &xj_inv2, &rterm);
+            jacobian_add(&msm, &lterm, &msm);
+            jacobian_add(&msm, &rterm, &msm);
+        }
+
+        smem->msm_base = msm;
+        smem->poly_ok = true;
+    }
+
+    __syncwarp(FULL_MASK);
+    if (!smem->poly_ok) return false;
+
+    // ====================================================================
+    // Phase 2: All 32 lanes compute partial MSM over G_i + H_i
+    // PRECOMPUTED TABLE VERSION -- uses fixed-window lookup instead of scalar_mul
+    // ====================================================================
+    JacobianPoint local_acc;
+    local_acc.infinity = true;
+    local_acc.z = FIELD_ONE;
+
+    if (lane < 32) {
+        const int base_i = lane * 2;
+        for (int off = 0; off < 2 && (base_i + off) < BP_BITS; ++off) {
+            const int i = base_i + off;
+
+            Scalar a_si, g_coeff;
+            scalar_mul_mod_n(&smem->a_proof, &smem->s_coeff[i], &a_si);
+            scalar_sub(&smem->neg_z, &a_si, &g_coeff);
+
+            JacobianPoint g_term;
+            if constexpr (WIN_BITS == 4)
+                scalar_mul_bp_fixed_w4(&g_bp_gen_table_w4[i * TABLE_SIZE], &g_coeff, &g_term);
+            else
+                scalar_mul_bp_fixed_w8(&g_bp_gen_table_w8[i * TABLE_SIZE], &g_coeff, &g_term);
+            jacobian_add(&local_acc, &g_term, &local_acc);
+
+            Scalar z2_2i, z2_2i_yi, h_pcheck;
+            scalar_mul_mod_n(&smem->z2, &smem->two_powers[i], &z2_2i);
+            scalar_mul_mod_n(&z2_2i, &smem->y_inv_powers[i], &z2_2i_yi);
+            scalar_add(&smem->z, &z2_2i_yi, &h_pcheck);
+
+            Scalar b_si, b_si_yi, h_coeff;
+            scalar_mul_mod_n(&smem->b_proof, &smem->s_inv[i], &b_si);
+            scalar_mul_mod_n(&b_si, &smem->y_inv_powers[i], &b_si_yi);
+            scalar_sub(&h_pcheck, &b_si_yi, &h_coeff);
+
+            JacobianPoint h_term;
+            if constexpr (WIN_BITS == 4)
+                scalar_mul_bp_fixed_w4(&g_bp_gen_table_w4[(64 + i) * TABLE_SIZE], &h_coeff, &h_term);
+            else
+                scalar_mul_bp_fixed_w8(&g_bp_gen_table_w8[(64 + i) * TABLE_SIZE], &h_coeff, &h_term);
+            jacobian_add(&local_acc, &h_term, &local_acc);
+        }
+    }
+
+    // ====================================================================
+    // Phase 3: Warp tree reduction (IDENTICAL to original)
+    // ====================================================================
+    #pragma unroll
+    for (int offset = 16; offset >= 1; offset >>= 1) {
+        JacobianPoint partner;
+        for (int w = 0; w < 4; ++w) {
+            uint32_t lo = __shfl_down_sync(FULL_MASK, (uint32_t)(local_acc.x.limbs[w]),       offset);
+            uint32_t hi = __shfl_down_sync(FULL_MASK, (uint32_t)(local_acc.x.limbs[w] >> 32), offset);
+            partner.x.limbs[w] = ((uint64_t)hi << 32) | lo;
+        }
+        for (int w = 0; w < 4; ++w) {
+            uint32_t lo = __shfl_down_sync(FULL_MASK, (uint32_t)(local_acc.y.limbs[w]),       offset);
+            uint32_t hi = __shfl_down_sync(FULL_MASK, (uint32_t)(local_acc.y.limbs[w] >> 32), offset);
+            partner.y.limbs[w] = ((uint64_t)hi << 32) | lo;
+        }
+        for (int w = 0; w < 4; ++w) {
+            uint32_t lo = __shfl_down_sync(FULL_MASK, (uint32_t)(local_acc.z.limbs[w]),       offset);
+            uint32_t hi = __shfl_down_sync(FULL_MASK, (uint32_t)(local_acc.z.limbs[w] >> 32), offset);
+            partner.z.limbs[w] = ((uint64_t)hi << 32) | lo;
+        }
+        uint32_t inf_raw = __shfl_down_sync(FULL_MASK, (uint32_t)local_acc.infinity, offset);
+        partner.infinity = (bool)inf_raw;
+
+        if (lane + offset < 32) {
+            jacobian_add(&local_acc, &partner, &local_acc);
+        }
+    }
+
+    if (lane == 0) {
+        jacobian_add(&local_acc, &smem->msm_base, &local_acc);
+        bool is_id = local_acc.infinity || field_is_zero(&local_acc.z);
+        smem->poly_ok = is_id;
+    }
+    __syncwarp(FULL_MASK);
+
+    return smem->poly_ok;
+}
+
+// Public wrappers for precomputed table warp verify
+__device__ inline bool range_verify_warp_precomp_w4_device(
+    const RangeProofGPU* proof,
+    const AffinePoint* commitment,
+    const AffinePoint* H_gen,
+    BPWarpShared* smem)
+{
+    return range_verify_warp_precomp_impl<4>(proof, commitment, H_gen, smem);
+}
+
+__device__ inline bool range_verify_warp_precomp_w8_device(
+    const RangeProofGPU* proof,
+    const AffinePoint* commitment,
+    const AffinePoint* H_gen,
+    BPWarpShared* smem)
+{
+    return range_verify_warp_precomp_impl<8>(proof, commitment, H_gen, smem);
+}
+
+// ============================================================================
+// 8. Positional LUT4 Warp-Cooperative Verify (ZERO DOUBLINGS)
+// ============================================================================
+// Uses g_bp_lut4: positional tables where
+//   lut[gen][window_j][digit_d] = d * 2^(4*j) * P
+// Each scalar_mul becomes 63 mixed additions with 0 doublings.
+// Phase 1 (Fiat-Shamir) is identical. Only Phase 2 MSM changes.
+
+__device__ inline bool range_verify_warp_lut4_device(
+    const RangeProofGPU* proof,
+    const AffinePoint* commitment,
+    const AffinePoint* H_gen,
+    BPWarpShared* smem)
+{
+    const int lane = threadIdx.x & 31;
+    constexpr uint32_t FULL_MASK = 0xFFFFFFFF;
+
+    // Phase 1: lane 0 does Fiat-Shamir, polynomial check, scalar precomp
+    // (IDENTICAL to all other warp verify variants)
+    if (lane == 0) {
+        smem->poly_ok = false;
+
+        uint8_t a_comp[33], s_comp[33], v_comp[33];
+        affine_to_compressed(&proof->A.x, &proof->A.y, a_comp);
+        affine_to_compressed(&proof->S.x, &proof->S.y, s_comp);
+        affine_to_compressed(&commitment->x, &commitment->y, v_comp);
+
+        uint8_t fs_buf[33 + 33 + 33];
+        for (int i = 0; i < 33; ++i) {
+            fs_buf[i]      = a_comp[i];
+            fs_buf[33 + i] = s_comp[i];
+            fs_buf[66 + i] = v_comp[i];
+        }
+        uint8_t y_hash[32], z_hash[32];
+        zk_tagged_hash_midstate(&ZK_BULLETPROOF_Y_MIDSTATE, fs_buf, sizeof(fs_buf), y_hash);
+        zk_tagged_hash_midstate(&ZK_BULLETPROOF_Z_MIDSTATE, fs_buf, sizeof(fs_buf), z_hash);
+
+        Scalar y, z_val;
+        scalar_from_bytes(y_hash, &y);
+        scalar_from_bytes(z_hash, &z_val);
+
+        uint8_t t1_comp[33], t2_comp[33];
+        affine_to_compressed(&proof->T1.x, &proof->T1.y, t1_comp);
+        affine_to_compressed(&proof->T2.x, &proof->T2.y, t2_comp);
+
+        uint8_t x_buf[33 + 33 + 32 + 32];
+        for (int i = 0; i < 33; ++i) { x_buf[i] = t1_comp[i]; x_buf[33 + i] = t2_comp[i]; }
+        scalar_to_bytes(&y, x_buf + 66);
+        scalar_to_bytes(&z_val, x_buf + 98);
+
+        uint8_t x_hash[32];
+        zk_tagged_hash_midstate(&ZK_BULLETPROOF_X_MIDSTATE, x_buf, sizeof(x_buf), x_hash);
+        Scalar x;
+        scalar_from_bytes(x_hash, &x);
+
+        Scalar z2_val, z3, x2;
+        scalar_mul_mod_n(&z_val, &z_val, &z2_val);
+        scalar_mul_mod_n(&z2_val, &z_val, &z3);
+        scalar_mul_mod_n(&x, &x, &x2);
+
+        Scalar sum_y;
+        sum_y.limbs[0] = 1; sum_y.limbs[1] = 0; sum_y.limbs[2] = 0; sum_y.limbs[3] = 0;
+        Scalar y_pow = y;
+        for (int i = 1; i < BP_BITS; ++i) {
+            scalar_add(&sum_y, &y_pow, &sum_y);
+            scalar_mul_mod_n(&y_pow, &y, &y_pow);
+        }
+
+        Scalar sum_2;
+        sum_2.limbs[0] = 0xFFFFFFFFFFFFFFFFULL;
+        sum_2.limbs[1] = 0; sum_2.limbs[2] = 0; sum_2.limbs[3] = 0;
+
+        Scalar z_minus_z2, term1, term2, delta;
+        scalar_sub(&z_val, &z2_val, &z_minus_z2);
+        scalar_mul_mod_n(&z_minus_z2, &sum_y, &term1);
+        scalar_mul_mod_n(&z3, &sum_2, &term2);
+        scalar_sub(&term1, &term2, &delta);
+
+        Scalar t_hat_minus_delta;
+        scalar_sub(&proof->t_hat, &delta, &t_hat_minus_delta);
+
+        JacobianPoint H_jac;
+        H_jac.x = H_gen->x; H_jac.y = H_gen->y; H_jac.z = FIELD_ONE; H_jac.infinity = false;
+
+        JacobianPoint tH, tauG, LHS;
+        scalar_mul(&H_jac, &proof->t_hat, &tH);
+        scalar_mul_generator_const(&proof->tau_x, &tauG);
+        jacobian_add(&tH, &tauG, &LHS);
+
+        JacobianPoint V_jac;
+        V_jac.x = commitment->x; V_jac.y = commitment->y; V_jac.z = FIELD_ONE; V_jac.infinity = false;
+        JacobianPoint z2V, deltaH, xT1, x2T2;
+        scalar_mul(&V_jac, &z2_val, &z2V);
+        scalar_mul(&H_jac, &delta, &deltaH);
+
+        JacobianPoint T1_jac;
+        T1_jac.x = proof->T1.x; T1_jac.y = proof->T1.y; T1_jac.z = FIELD_ONE; T1_jac.infinity = false;
+        scalar_mul(&T1_jac, &x, &xT1);
+
+        JacobianPoint T2_jac;
+        T2_jac.x = proof->T2.x; T2_jac.y = proof->T2.y; T2_jac.z = FIELD_ONE; T2_jac.infinity = false;
+        scalar_mul(&T2_jac, &x2, &x2T2);
+
+        JacobianPoint RHS;
+        jacobian_add(&z2V, &deltaH, &RHS);
+        jacobian_add(&RHS, &xT1, &RHS);
+        jacobian_add(&RHS, &x2T2, &RHS);
+
+        {
+            FieldElement z1sq, z2sq, z1cu, z2cu;
+            field_sqr(&LHS.z, &z1sq); field_sqr(&RHS.z, &z2sq);
+            field_mul(&z1sq, &LHS.z, &z1cu); field_mul(&z2sq, &RHS.z, &z2cu);
+            FieldElement lx, rx_val, ly, ry;
+            field_mul(&LHS.x, &z2sq, &lx); field_mul(&RHS.x, &z1sq, &rx_val);
+            field_mul(&LHS.y, &z2cu, &ly); field_mul(&RHS.y, &z1cu, &ry);
+            FieldElement dx, dy;
+            field_sub(&lx, &rx_val, &dx); field_sub(&ly, &ry, &dy);
+            uint64_t acc = dx.limbs[0] | dx.limbs[1] | dx.limbs[2] | dx.limbs[3]
+                         | dy.limbs[0] | dy.limbs[1] | dy.limbs[2] | dy.limbs[3];
+            if (acc != 0) return false;
+        }
+
+        for (int round = 0; round < BP_LOG2; ++round) {
+            uint8_t l_comp[33], r_comp[33];
+            affine_to_compressed(&proof->L[round].x, &proof->L[round].y, l_comp);
+            affine_to_compressed(&proof->R[round].x, &proof->R[round].y, r_comp);
+            uint8_t ip_buf[33 + 33];
+            for (int i = 0; i < 33; ++i) { ip_buf[i] = l_comp[i]; ip_buf[33 + i] = r_comp[i]; }
+            uint8_t xr_hash[32];
+            zk_tagged_hash_midstate(&g_bp_ip_midstate, ip_buf, sizeof(ip_buf), xr_hash);
+            scalar_from_bytes(xr_hash, &smem->x_rounds[round]);
+        }
+
+        {
+            Scalar acc[BP_LOG2];
+            acc[0] = smem->x_rounds[0];
+            for (int j = 1; j < BP_LOG2; ++j) scalar_mul_mod_n(&acc[j-1], &smem->x_rounds[j], &acc[j]);
+            Scalar inv_acc;
+            scalar_inverse(&acc[BP_LOG2 - 1], &inv_acc);
+            for (int j = BP_LOG2 - 1; j >= 1; --j) {
+                scalar_mul_mod_n(&inv_acc, &acc[j-1], &smem->x_inv_rounds[j]);
+                scalar_mul_mod_n(&inv_acc, &smem->x_rounds[j], &inv_acc);
+            }
+            smem->x_inv_rounds[0] = inv_acc;
+        }
+
+        Scalar y_inv;
+        scalar_inverse(&y, &y_inv);
+        smem->y_inv_powers[0].limbs[0] = 1; smem->y_inv_powers[0].limbs[1] = 0;
+        smem->y_inv_powers[0].limbs[2] = 0; smem->y_inv_powers[0].limbs[3] = 0;
+        for (int i = 1; i < BP_BITS; ++i)
+            scalar_mul_mod_n(&smem->y_inv_powers[i-1], &y_inv, &smem->y_inv_powers[i]);
+
+        smem->s_coeff[0].limbs[0] = 1; smem->s_coeff[0].limbs[1] = 0;
+        smem->s_coeff[0].limbs[2] = 0; smem->s_coeff[0].limbs[3] = 0;
+        for (int j = 0; j < BP_LOG2; ++j)
+            scalar_mul_mod_n(&smem->s_coeff[0], &smem->x_inv_rounds[j], &smem->s_coeff[0]);
+        for (int i = 1; i < BP_BITS; ++i) {
+            smem->s_coeff[i].limbs[0] = 1; smem->s_coeff[i].limbs[1] = 0;
+            smem->s_coeff[i].limbs[2] = 0; smem->s_coeff[i].limbs[3] = 0;
+            for (int jj = 0; jj < BP_LOG2; ++jj) {
+                if ((i >> (BP_LOG2 - 1 - jj)) & 1)
+                    scalar_mul_mod_n(&smem->s_coeff[i], &smem->x_rounds[jj], &smem->s_coeff[i]);
+                else
+                    scalar_mul_mod_n(&smem->s_coeff[i], &smem->x_inv_rounds[jj], &smem->s_coeff[i]);
+            }
+        }
+
+        {
+            Scalar acc[BP_BITS];
+            acc[0] = smem->s_coeff[0];
+            for (int i = 1; i < BP_BITS; ++i) scalar_mul_mod_n(&acc[i-1], &smem->s_coeff[i], &acc[i]);
+            Scalar inv_acc;
+            scalar_inverse(&acc[BP_BITS - 1], &inv_acc);
+            for (int i = BP_BITS - 1; i >= 1; --i) {
+                scalar_mul_mod_n(&inv_acc, &acc[i-1], &smem->s_inv[i]);
+                scalar_mul_mod_n(&inv_acc, &smem->s_coeff[i], &inv_acc);
+            }
+            smem->s_inv[0] = inv_acc;
+        }
+
+        smem->two_powers[0].limbs[0] = 1; smem->two_powers[0].limbs[1] = 0;
+        smem->two_powers[0].limbs[2] = 0; smem->two_powers[0].limbs[3] = 0;
+        for (int i = 1; i < BP_BITS; ++i)
+            scalar_add(&smem->two_powers[i-1], &smem->two_powers[i-1], &smem->two_powers[i]);
+
+        Scalar neg_z_val;
+        scalar_negate(&z_val, &neg_z_val);
+        smem->neg_z = neg_z_val;
+        smem->z     = z_val;
+        smem->z2    = z2_val;
+        smem->a_proof = proof->a;
+        smem->b_proof = proof->b;
+
+        Scalar ab;
+        scalar_mul_mod_n(&proof->a, &proof->b, &ab);
+
+        JacobianPoint msm;
+        msm.infinity = true; msm.z = FIELD_ONE;
+
+        {
+            JacobianPoint A_jac;
+            A_jac.x = proof->A.x; A_jac.y = proof->A.y; A_jac.z = FIELD_ONE; A_jac.infinity = false;
+            jacobian_add(&msm, &A_jac, &msm);
+        }
+        {
+            JacobianPoint S_jac, xS;
+            S_jac.x = proof->S.x; S_jac.y = proof->S.y; S_jac.z = FIELD_ONE; S_jac.infinity = false;
+            scalar_mul(&S_jac, &x, &xS);
+            jacobian_add(&msm, &xS, &msm);
+        }
+        {
+            Scalar neg_mu;
+            scalar_negate(&proof->mu, &neg_mu);
+            JacobianPoint muG;
+            scalar_mul_generator_const(&neg_mu, &muG);
+            jacobian_add(&msm, &muG, &msm);
+        }
+        {
+            Scalar t_ab;
+            scalar_sub(&proof->t_hat, &ab, &t_ab);
+            JacobianPoint tU;
+            scalar_mul(&H_jac, &t_ab, &tU);
+            jacobian_add(&msm, &tU, &msm);
+        }
+        for (int j = 0; j < BP_LOG2; ++j) {
+            Scalar xj2, xj_inv2;
+            scalar_mul_mod_n(&smem->x_rounds[j], &smem->x_rounds[j], &xj2);
+            scalar_mul_mod_n(&smem->x_inv_rounds[j], &smem->x_inv_rounds[j], &xj_inv2);
+            JacobianPoint Lj, Rj, lterm, rterm;
+            Lj.x = proof->L[j].x; Lj.y = proof->L[j].y; Lj.z = FIELD_ONE; Lj.infinity = false;
+            Rj.x = proof->R[j].x; Rj.y = proof->R[j].y; Rj.z = FIELD_ONE; Rj.infinity = false;
+            scalar_mul(&Lj, &xj2, &lterm);
+            scalar_mul(&Rj, &xj_inv2, &rterm);
+            jacobian_add(&msm, &lterm, &msm);
+            jacobian_add(&msm, &rterm, &msm);
+        }
+
+        smem->msm_base = msm;
+        smem->poly_ok = true;
+    }
+
+    __syncwarp(FULL_MASK);
+    if (!smem->poly_ok) return false;
+
+    // ====================================================================
+    // Phase 2: POSITIONAL LUT4 -- ZERO DOUBLINGS
+    // scalar_mul_bp_lut4 does 63 mixed additions, 0 doublings per scalar
+    // ====================================================================
+    JacobianPoint local_acc;
+    local_acc.infinity = true;
+    local_acc.z = FIELD_ONE;
+
+    if (lane < 32) {
+        const int base_i = lane * 2;
+        for (int off = 0; off < 2 && (base_i + off) < BP_BITS; ++off) {
+            const int i = base_i + off;
+
+            Scalar a_si, g_coeff;
+            scalar_mul_mod_n(&smem->a_proof, &smem->s_coeff[i], &a_si);
+            scalar_sub(&smem->neg_z, &a_si, &g_coeff);
+
+            JacobianPoint g_term;
+            scalar_mul_bp_lut4(&g_bp_lut4[i * BP_LUT4_GEN_STRIDE], &g_coeff, &g_term);
+            jacobian_add(&local_acc, &g_term, &local_acc);
+
+            Scalar z2_2i, z2_2i_yi, h_pcheck;
+            scalar_mul_mod_n(&smem->z2, &smem->two_powers[i], &z2_2i);
+            scalar_mul_mod_n(&z2_2i, &smem->y_inv_powers[i], &z2_2i_yi);
+            scalar_add(&smem->z, &z2_2i_yi, &h_pcheck);
+
+            Scalar b_si, b_si_yi, h_coeff;
+            scalar_mul_mod_n(&smem->b_proof, &smem->s_inv[i], &b_si);
+            scalar_mul_mod_n(&b_si, &smem->y_inv_powers[i], &b_si_yi);
+            scalar_sub(&h_pcheck, &b_si_yi, &h_coeff);
+
+            JacobianPoint h_term;
+            scalar_mul_bp_lut4(&g_bp_lut4[(64 + i) * BP_LUT4_GEN_STRIDE], &h_coeff, &h_term);
+            jacobian_add(&local_acc, &h_term, &local_acc);
+        }
+    }
+
+    // Phase 3: Warp tree reduction (IDENTICAL)
+    #pragma unroll
+    for (int offset = 16; offset >= 1; offset >>= 1) {
+        JacobianPoint partner;
+        for (int w = 0; w < 4; ++w) {
+            uint32_t lo = __shfl_down_sync(FULL_MASK, (uint32_t)(local_acc.x.limbs[w]),       offset);
+            uint32_t hi = __shfl_down_sync(FULL_MASK, (uint32_t)(local_acc.x.limbs[w] >> 32), offset);
+            partner.x.limbs[w] = ((uint64_t)hi << 32) | lo;
+        }
+        for (int w = 0; w < 4; ++w) {
+            uint32_t lo = __shfl_down_sync(FULL_MASK, (uint32_t)(local_acc.y.limbs[w]),       offset);
+            uint32_t hi = __shfl_down_sync(FULL_MASK, (uint32_t)(local_acc.y.limbs[w] >> 32), offset);
+            partner.y.limbs[w] = ((uint64_t)hi << 32) | lo;
+        }
+        for (int w = 0; w < 4; ++w) {
+            uint32_t lo = __shfl_down_sync(FULL_MASK, (uint32_t)(local_acc.z.limbs[w]),       offset);
+            uint32_t hi = __shfl_down_sync(FULL_MASK, (uint32_t)(local_acc.z.limbs[w] >> 32), offset);
+            partner.z.limbs[w] = ((uint64_t)hi << 32) | lo;
+        }
+        uint32_t inf_raw = __shfl_down_sync(FULL_MASK, (uint32_t)local_acc.infinity, offset);
+        partner.infinity = (bool)inf_raw;
+
+        if (lane + offset < 32) {
+            jacobian_add(&local_acc, &partner, &local_acc);
+        }
+    }
+
+    if (lane == 0) {
+        jacobian_add(&local_acc, &smem->msm_base, &local_acc);
+        bool is_id = local_acc.infinity || field_is_zero(&local_acc.z);
+        smem->poly_ok = is_id;
+    }
+    __syncwarp(FULL_MASK);
+
+    return smem->poly_ok;
+}
+
+// ============================================================================
+// 9. Phase-1-Parallel Positional LUT4 Warp-Cooperative Verify
+// ============================================================================
+// Optimizations over range_verify_warp_lut4_device:
+//   Phase 1a: Lanes 1-6 compute IPA challenge hashes in parallel with
+//             lane 0's Fiat-Shamir derivation.
+//   Phase 1b: Lane 0 does scalar prep (batch inversions, s_coeff, etc.)
+//   Phase 1c: 22 lanes compute point scalar_muls in parallel. Poly check
+//             is folded into MSM base (LHS - RHS + MSM) for single warp
+//             reduction. If poly passes, LHS-RHS=0 → combined = MSM.
+//   Phase 2:  Identical LUT4 zero-doubling MSM.
+//   Phase 3:  Identical warp tree reduction + identity check.
+// ============================================================================
+
+__device__ inline bool range_verify_warp_lut4_p1par_device(
+    const RangeProofGPU* proof,
+    const AffinePoint* commitment,
+    const AffinePoint* H_gen,
+    BPWarpShared* smem)
+{
+    const int lane = threadIdx.x & 31;
+    constexpr uint32_t FULL_MASK = 0xFFFFFFFF;
+
+    // T0: start
+    if (lane == 0) smem->phase_ts[0] = clock64();
+
+    // ================================================================
+    // Phase 1a: PARALLEL Fiat-Shamir + IPA Challenge Derivation
+    // ================================================================
+    // Lane 0: Fiat-Shamir → y,z,x + sum_y → delta + t_ab
+    // Lanes 1-6: IPA challenge hashes (independent of y,z,x)
+
+    if (lane == 0) {
+        smem->poly_ok = false;
+
+        uint8_t a_comp[33], s_comp[33], v_comp[33];
+        affine_to_compressed(&proof->A.x, &proof->A.y, a_comp);
+        affine_to_compressed(&proof->S.x, &proof->S.y, s_comp);
+        affine_to_compressed(&commitment->x, &commitment->y, v_comp);
+
+        uint8_t fs_buf[33 + 33 + 33];
+        for (int i = 0; i < 33; ++i) {
+            fs_buf[i]      = a_comp[i];
+            fs_buf[33 + i] = s_comp[i];
+            fs_buf[66 + i] = v_comp[i];
+        }
+        uint8_t y_hash[32], z_hash[32];
+        zk_tagged_hash_midstate(&ZK_BULLETPROOF_Y_MIDSTATE, fs_buf, sizeof(fs_buf), y_hash);
+        zk_tagged_hash_midstate(&ZK_BULLETPROOF_Z_MIDSTATE, fs_buf, sizeof(fs_buf), z_hash);
+
+        Scalar y, z_val;
+        scalar_from_bytes(y_hash, &y);
+        scalar_from_bytes(z_hash, &z_val);
+
+        Scalar z2_val, z3;
+        scalar_mul_mod_n(&z_val, &z_val, &z2_val);
+        scalar_mul_mod_n(&z2_val, &z_val, &z3);
+
+        uint8_t t1_comp[33], t2_comp[33];
+        affine_to_compressed(&proof->T1.x, &proof->T1.y, t1_comp);
+        affine_to_compressed(&proof->T2.x, &proof->T2.y, t2_comp);
+
+        uint8_t x_buf[33 + 33 + 32 + 32];
+        for (int i = 0; i < 33; ++i) { x_buf[i] = t1_comp[i]; x_buf[33 + i] = t2_comp[i]; }
+        scalar_to_bytes(&y, x_buf + 66);
+        scalar_to_bytes(&z_val, x_buf + 98);
+
+        uint8_t x_hash[32];
+        zk_tagged_hash_midstate(&ZK_BULLETPROOF_X_MIDSTATE, x_buf, sizeof(x_buf), x_hash);
+        Scalar x;
+        scalar_from_bytes(x_hash, &x);
+
+        Scalar x2;
+        scalar_mul_mod_n(&x, &x, &x2);
+
+        // sum_y → delta
+        Scalar sum_y;
+        sum_y.limbs[0] = 1; sum_y.limbs[1] = 0; sum_y.limbs[2] = 0; sum_y.limbs[3] = 0;
+        Scalar y_pow = y;
+        for (int i = 1; i < BP_BITS; ++i) {
+            scalar_add(&sum_y, &y_pow, &sum_y);
+            scalar_mul_mod_n(&y_pow, &y, &y_pow);
+        }
+
+        Scalar sum_2;
+        sum_2.limbs[0] = 0xFFFFFFFFFFFFFFFFULL;
+        sum_2.limbs[1] = 0; sum_2.limbs[2] = 0; sum_2.limbs[3] = 0;
+
+        Scalar z_minus_z2, term1, term2, delta;
+        scalar_sub(&z_val, &z2_val, &z_minus_z2);
+        scalar_mul_mod_n(&z_minus_z2, &sum_y, &term1);
+        scalar_mul_mod_n(&z3, &sum_2, &term2);
+        scalar_sub(&term1, &term2, &delta);
+
+        // t_ab = t_hat - a*b
+        Scalar ab, t_ab;
+        scalar_mul_mod_n(&proof->a, &proof->b, &ab);
+        scalar_sub(&proof->t_hat, &ab, &t_ab);
+
+        Scalar neg_z_val;
+        scalar_negate(&z_val, &neg_z_val);
+
+        // Broadcast to shared memory
+        smem->y_val = y;
+        smem->z = z_val;
+        smem->z2 = z2_val;
+        smem->x_val = x;
+        smem->x2_val = x2;
+        smem->delta_val = delta;
+        smem->t_ab_val = t_ab;
+        smem->neg_z = neg_z_val;
+        smem->a_proof = proof->a;
+        smem->b_proof = proof->b;
+
+    } else if (lane >= 1 && lane <= BP_LOG2) {
+        // Lanes 1-6: IPA challenge hashes (independent of y,z,x)
+        int round = lane - 1;
+        uint8_t l_comp[33], r_comp[33];
+        affine_to_compressed(&proof->L[round].x, &proof->L[round].y, l_comp);
+        affine_to_compressed(&proof->R[round].x, &proof->R[round].y, r_comp);
+        uint8_t ip_buf[33 + 33];
+        for (int i = 0; i < 33; ++i) { ip_buf[i] = l_comp[i]; ip_buf[33 + i] = r_comp[i]; }
+        uint8_t xr_hash[32];
+        zk_tagged_hash_midstate(&g_bp_ip_midstate, ip_buf, sizeof(ip_buf), xr_hash);
+        scalar_from_bytes(xr_hash, &smem->x_rounds[round]);
+    }
+
+    __syncwarp(FULL_MASK);
+
+    // T1: after Phase 1a
+    if (lane == 0) smem->phase_ts[1] = clock64();
+
+    // ================================================================
+    // Phase 1b: Scalar prep — split serial/parallel
+    //   1b-serial (lane 0): batch inversion, xj_sq, y_inv_powers
+    //   1b-parallel (all 32 lanes): s_coeff[i] computation
+    //   1b-final (lane 0): batch inversion s_coeff → s_inv, two_powers
+    // ================================================================
+
+    // --- 1b-serial: lane 0 computes inversions and y_inv_powers ---
+    if (lane == 0) {
+        // Combined batch inversion: x_rounds[0..5] + y → 7 scalars, 1 inverse
+        {
+            Scalar acc[BP_LOG2 + 1];
+            acc[0] = smem->x_rounds[0];
+            for (int j = 1; j < BP_LOG2; ++j)
+                scalar_mul_mod_n(&acc[j-1], &smem->x_rounds[j], &acc[j]);
+            scalar_mul_mod_n(&acc[BP_LOG2 - 1], &smem->y_val, &acc[BP_LOG2]);
+
+            Scalar inv_acc;
+            scalar_inverse(&acc[BP_LOG2], &inv_acc);
+
+            // Extract y_inv (last element)
+            Scalar y_inv;
+            scalar_mul_mod_n(&inv_acc, &acc[BP_LOG2 - 1], &y_inv);
+            scalar_mul_mod_n(&inv_acc, &smem->y_val, &inv_acc);
+
+            // Extract x_inv_rounds
+            for (int j = BP_LOG2 - 1; j >= 1; --j) {
+                scalar_mul_mod_n(&inv_acc, &acc[j-1], &smem->x_inv_rounds[j]);
+                scalar_mul_mod_n(&inv_acc, &smem->x_rounds[j], &inv_acc);
+            }
+            smem->x_inv_rounds[0] = inv_acc;
+
+            // xj^2 and xj_inv^2 for Phase 1c L/R terms
+            for (int j = 0; j < BP_LOG2; ++j) {
+                scalar_mul_mod_n(&smem->x_rounds[j], &smem->x_rounds[j], &smem->xj_sq[j]);
+                scalar_mul_mod_n(&smem->x_inv_rounds[j], &smem->x_inv_rounds[j], &smem->xj_inv_sq[j]);
+            }
+
+            // y_inv_powers
+            smem->y_inv_powers[0].limbs[0] = 1; smem->y_inv_powers[0].limbs[1] = 0;
+            smem->y_inv_powers[0].limbs[2] = 0; smem->y_inv_powers[0].limbs[3] = 0;
+            for (int i = 1; i < BP_BITS; ++i)
+                scalar_mul_mod_n(&smem->y_inv_powers[i-1], &y_inv, &smem->y_inv_powers[i]);
+        }
+    }
+
+    __syncwarp(FULL_MASK);
+
+    // --- 1b-parallel: all 32 lanes compute s_coeff (2 per lane) ---
+    {
+        const int base_i = lane * 2;
+        for (int off = 0; off < 2 && (base_i + off) < BP_BITS; ++off) {
+            const int i = base_i + off;
+            Scalar sc;
+            sc.limbs[0] = 1; sc.limbs[1] = 0; sc.limbs[2] = 0; sc.limbs[3] = 0;
+            for (int jj = 0; jj < BP_LOG2; ++jj) {
+                if ((i >> (BP_LOG2 - 1 - jj)) & 1)
+                    scalar_mul_mod_n(&sc, &smem->x_rounds[jj], &sc);
+                else
+                    scalar_mul_mod_n(&sc, &smem->x_inv_rounds[jj], &sc);
+            }
+            smem->s_coeff[i] = sc;
+        }
+    }
+
+    __syncwarp(FULL_MASK);
+
+    // --- 1b-final: lane 0 does s_inv batch inversion + two_powers ---
+    if (lane == 0) {
+        // Batch inversion: s_coeff → s_inv
+        {
+            Scalar acc[BP_BITS];
+            acc[0] = smem->s_coeff[0];
+            for (int i = 1; i < BP_BITS; ++i) scalar_mul_mod_n(&acc[i-1], &smem->s_coeff[i], &acc[i]);
+            Scalar inv_acc;
+            scalar_inverse(&acc[BP_BITS - 1], &inv_acc);
+            for (int i = BP_BITS - 1; i >= 1; --i) {
+                scalar_mul_mod_n(&inv_acc, &acc[i-1], &smem->s_inv[i]);
+                scalar_mul_mod_n(&inv_acc, &smem->s_coeff[i], &inv_acc);
+            }
+            smem->s_inv[0] = inv_acc;
+        }
+
+        // two_powers
+        smem->two_powers[0].limbs[0] = 1; smem->two_powers[0].limbs[1] = 0;
+        smem->two_powers[0].limbs[2] = 0; smem->two_powers[0].limbs[3] = 0;
+        for (int i = 1; i < BP_BITS; ++i)
+            scalar_add(&smem->two_powers[i-1], &smem->two_powers[i-1], &smem->two_powers[i]);
+
+        smem->poly_ok = true;
+    }
+
+    __syncwarp(FULL_MASK);
+    if (!smem->poly_ok) return false;
+
+    // T2: after Phase 1b
+    if (lane == 0) smem->phase_ts[2] = clock64();
+
+    // ================================================================
+    // Phase 1c: 22 lanes PARALLEL point scalar_muls + warp reduction
+    // ================================================================
+    // Poly check (LHS - RHS) folded into MSM base for single reduction.
+    // Lane assignments:
+    //  0: +t_hat*H        (poly LHS)     10: +L[0]*xj_sq[0]  (MSM)
+    //  1: +tau_x*G         (poly LHS)     11: +R[0]*xj_inv_sq[0]
+    //  2: -(z2*V)          (poly RHS)     12: +L[1]*xj_sq[1]
+    //  3: -(delta*H)       (poly RHS)     13: +R[1]*xj_inv_sq[1]
+    //  4: -(x*T1)          (poly RHS)     14: +L[2]*xj_sq[2]
+    //  5: -(x2*T2)         (poly RHS)     15: +R[2]*xj_inv_sq[2]
+    //  6: +A               (MSM, free)    16: +L[3]*xj_sq[3]
+    //  7: +x*S             (MSM)          17: +R[3]*xj_inv_sq[3]
+    //  8: -(mu*G)          (MSM)          18: +L[4]*xj_sq[4]
+    //  9: +(t_hat-ab)*H    (MSM)          19: +R[4]*xj_inv_sq[4]
+    // 20: +L[5]*xj_sq[5]   21: +R[5]*xj_inv_sq[5]   22-31: identity
+
+    JacobianPoint local_pt;
+    local_pt.infinity = true;
+    local_pt.z = FIELD_ONE;
+
+    if (lane == 0) {
+        // +t_hat * H  (using H LUT4 precomp)
+        scalar_mul_bp_lut4(g_bp_h_lut4, &proof->t_hat, &local_pt);
+    } else if (lane == 1) {
+        // +tau_x * G
+        scalar_mul_generator_const(&proof->tau_x, &local_pt);
+    } else if (lane == 2) {
+        // -(z2 * V) — negate scalar to get -z2*V
+        Scalar neg_z2;
+        scalar_negate(&smem->z2, &neg_z2);
+        JacobianPoint V_jac;
+        V_jac.x = commitment->x; V_jac.y = commitment->y; V_jac.z = FIELD_ONE; V_jac.infinity = false;
+        scalar_mul_glv(&V_jac, &neg_z2, &local_pt);
+    } else if (lane == 3) {
+        // -(delta * H) (using H LUT4 precomp)
+        Scalar neg_delta;
+        scalar_negate(&smem->delta_val, &neg_delta);
+        scalar_mul_bp_lut4(g_bp_h_lut4, &neg_delta, &local_pt);
+    } else if (lane == 4) {
+        // -(x * T1)
+        Scalar neg_x;
+        scalar_negate(&smem->x_val, &neg_x);
+        JacobianPoint T1_jac;
+        T1_jac.x = proof->T1.x; T1_jac.y = proof->T1.y; T1_jac.z = FIELD_ONE; T1_jac.infinity = false;
+        scalar_mul_glv(&T1_jac, &neg_x, &local_pt);
+    } else if (lane == 5) {
+        // -(x2 * T2)
+        Scalar neg_x2;
+        scalar_negate(&smem->x2_val, &neg_x2);
+        JacobianPoint T2_jac;
+        T2_jac.x = proof->T2.x; T2_jac.y = proof->T2.y; T2_jac.z = FIELD_ONE; T2_jac.infinity = false;
+        scalar_mul_glv(&T2_jac, &neg_x2, &local_pt);
+    } else if (lane == 6) {
+        // +A (no scalar_mul needed)
+        local_pt.x = proof->A.x; local_pt.y = proof->A.y;
+        local_pt.z = FIELD_ONE; local_pt.infinity = false;
+    } else if (lane == 7) {
+        // +x * S
+        JacobianPoint S_jac;
+        S_jac.x = proof->S.x; S_jac.y = proof->S.y; S_jac.z = FIELD_ONE; S_jac.infinity = false;
+        scalar_mul_glv(&S_jac, &smem->x_val, &local_pt);
+    } else if (lane == 8) {
+        // -(mu * G)
+        Scalar neg_mu;
+        scalar_negate(&proof->mu, &neg_mu);
+        scalar_mul_generator_const(&neg_mu, &local_pt);
+    } else if (lane == 9) {
+        // +(t_hat - ab) * H  (using H LUT4 precomp)
+        scalar_mul_bp_lut4(g_bp_h_lut4, &smem->t_ab_val, &local_pt);
+    } else if (lane <= 21) {
+        // L/R round terms: lanes 10-21
+        int idx = lane - 10;
+        int j = idx >> 1;
+        if (idx & 1) {
+            // R[j] * xj_inv_sq[j]
+            JacobianPoint Rj;
+            Rj.x = proof->R[j].x; Rj.y = proof->R[j].y;
+            Rj.z = FIELD_ONE; Rj.infinity = false;
+            scalar_mul_glv(&Rj, &smem->xj_inv_sq[j], &local_pt);
+        } else {
+            // L[j] * xj_sq[j]
+            JacobianPoint Lj;
+            Lj.x = proof->L[j].x; Lj.y = proof->L[j].y;
+            Lj.z = FIELD_ONE; Lj.infinity = false;
+            scalar_mul_glv(&Lj, &smem->xj_sq[j], &local_pt);
+        }
+    }
+    // lanes 22-31: local_pt stays identity (contributes nothing)
+
+    // Warp tree reduction for combined_base
+    #pragma unroll
+    for (int offset = 16; offset >= 1; offset >>= 1) {
+        JacobianPoint partner;
+        for (int w = 0; w < 4; ++w) {
+            uint32_t lo = __shfl_down_sync(FULL_MASK, (uint32_t)(local_pt.x.limbs[w]),       offset);
+            uint32_t hi = __shfl_down_sync(FULL_MASK, (uint32_t)(local_pt.x.limbs[w] >> 32), offset);
+            partner.x.limbs[w] = ((uint64_t)hi << 32) | lo;
+        }
+        for (int w = 0; w < 4; ++w) {
+            uint32_t lo = __shfl_down_sync(FULL_MASK, (uint32_t)(local_pt.y.limbs[w]),       offset);
+            uint32_t hi = __shfl_down_sync(FULL_MASK, (uint32_t)(local_pt.y.limbs[w] >> 32), offset);
+            partner.y.limbs[w] = ((uint64_t)hi << 32) | lo;
+        }
+        for (int w = 0; w < 4; ++w) {
+            uint32_t lo = __shfl_down_sync(FULL_MASK, (uint32_t)(local_pt.z.limbs[w]),       offset);
+            uint32_t hi = __shfl_down_sync(FULL_MASK, (uint32_t)(local_pt.z.limbs[w] >> 32), offset);
+            partner.z.limbs[w] = ((uint64_t)hi << 32) | lo;
+        }
+        uint32_t inf_raw = __shfl_down_sync(FULL_MASK, (uint32_t)local_pt.infinity, offset);
+        partner.infinity = (bool)inf_raw;
+
+        if (lane + offset < 32)
+            jacobian_add(&local_pt, &partner, &local_pt);
+    }
+
+    if (lane == 0)
+        smem->msm_base = local_pt;
+    __syncwarp(FULL_MASK);
+
+    // T3: after Phase 1c
+    if (lane == 0) smem->phase_ts[3] = clock64();
+
+    // ================================================================
+    // Phase 2: POSITIONAL LUT4 MSM (IDENTICAL to lut4 version)
+    // ================================================================
+    JacobianPoint local_acc;
+    local_acc.infinity = true;
+    local_acc.z = FIELD_ONE;
+
+    if (lane < 32) {
+        const int base_i = lane * 2;
+        for (int off = 0; off < 2 && (base_i + off) < BP_BITS; ++off) {
+            const int i = base_i + off;
+
+            Scalar a_si, g_coeff;
+            scalar_mul_mod_n(&smem->a_proof, &smem->s_coeff[i], &a_si);
+            scalar_sub(&smem->neg_z, &a_si, &g_coeff);
+
+            JacobianPoint g_term;
+            scalar_mul_bp_lut4(&g_bp_lut4[i * BP_LUT4_GEN_STRIDE], &g_coeff, &g_term);
+            jacobian_add(&local_acc, &g_term, &local_acc);
+
+            Scalar z2_2i, z2_2i_yi, h_pcheck;
+            scalar_mul_mod_n(&smem->z2, &smem->two_powers[i], &z2_2i);
+            scalar_mul_mod_n(&z2_2i, &smem->y_inv_powers[i], &z2_2i_yi);
+            scalar_add(&smem->z, &z2_2i_yi, &h_pcheck);
+
+            Scalar b_si, b_si_yi, h_coeff;
+            scalar_mul_mod_n(&smem->b_proof, &smem->s_inv[i], &b_si);
+            scalar_mul_mod_n(&b_si, &smem->y_inv_powers[i], &b_si_yi);
+            scalar_sub(&h_pcheck, &b_si_yi, &h_coeff);
+
+            JacobianPoint h_term;
+            scalar_mul_bp_lut4(&g_bp_lut4[(64 + i) * BP_LUT4_GEN_STRIDE], &h_coeff, &h_term);
+            jacobian_add(&local_acc, &h_term, &local_acc);
+        }
+    }
+
+    // T4: after Phase 2 MSM
+    if (lane == 0) smem->phase_ts[4] = clock64();
+
+    // Phase 3: Warp tree reduction + final identity check
+    #pragma unroll
+    for (int offset = 16; offset >= 1; offset >>= 1) {
+        JacobianPoint partner;
+        for (int w = 0; w < 4; ++w) {
+            uint32_t lo = __shfl_down_sync(FULL_MASK, (uint32_t)(local_acc.x.limbs[w]),       offset);
+            uint32_t hi = __shfl_down_sync(FULL_MASK, (uint32_t)(local_acc.x.limbs[w] >> 32), offset);
+            partner.x.limbs[w] = ((uint64_t)hi << 32) | lo;
+        }
+        for (int w = 0; w < 4; ++w) {
+            uint32_t lo = __shfl_down_sync(FULL_MASK, (uint32_t)(local_acc.y.limbs[w]),       offset);
+            uint32_t hi = __shfl_down_sync(FULL_MASK, (uint32_t)(local_acc.y.limbs[w] >> 32), offset);
+            partner.y.limbs[w] = ((uint64_t)hi << 32) | lo;
+        }
+        for (int w = 0; w < 4; ++w) {
+            uint32_t lo = __shfl_down_sync(FULL_MASK, (uint32_t)(local_acc.z.limbs[w]),       offset);
+            uint32_t hi = __shfl_down_sync(FULL_MASK, (uint32_t)(local_acc.z.limbs[w] >> 32), offset);
+            partner.z.limbs[w] = ((uint64_t)hi << 32) | lo;
+        }
+        uint32_t inf_raw = __shfl_down_sync(FULL_MASK, (uint32_t)local_acc.infinity, offset);
+        partner.infinity = (bool)inf_raw;
+
+        if (lane + offset < 32)
+            jacobian_add(&local_acc, &partner, &local_acc);
+    }
+
+    if (lane == 0) {
+        jacobian_add(&local_acc, &smem->msm_base, &local_acc);
+        bool is_id = local_acc.infinity || field_is_zero(&local_acc.z);
+        smem->poly_ok = is_id;
+        // T5: end
+        smem->phase_ts[5] = clock64();
+    }
+    __syncwarp(FULL_MASK);
+
+    return smem->poly_ok;
 }
 
 } // namespace cuda

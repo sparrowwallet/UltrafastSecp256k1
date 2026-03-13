@@ -15,6 +15,7 @@ static constexpr int BATCH       = 4096;
 static constexpr int BP_BATCH    = 256;   // Bulletproof: smaller batch (heavy per-thread)
 static constexpr int WARMUP      = 5;
 static constexpr int PASSES      = 11;
+static constexpr int WARPS_PER_BLOCK = 4; // Warp-cooperative: 128 threads per block
 
 // -- Test data ----------------------------------------------------------------
 
@@ -182,6 +183,60 @@ __global__ void bench_bp_prove_kernel(
         values[idx], &blindings[idx], &commitments[idx], H_gen, aux, &proofs[idx]);
 }
 
+// ===== Warp-cooperative Bulletproof prove kernel =============================
+__global__ void bench_bp_prove_warp_kernel(
+    const uint64_t* values, const Scalar* blindings,
+    const AffinePoint* commitments, const AffinePoint* H_gen,
+    RangeProofGPU* proofs, bool* results, int n)
+{
+    __shared__ ct::BPProveWarpShared prove_smem[WARPS_PER_BLOCK];
+
+    const int warp_id_in_block = threadIdx.x >> 5;
+    const int global_warp_id   = blockIdx.x * WARPS_PER_BLOCK + warp_id_in_block;
+
+    if (global_warp_id >= n) return;
+
+    uint8_t aux[32] = {0};
+    bool ok = ct::ct_range_prove_warp_device(
+        values[global_warp_id],
+        &blindings[global_warp_id],
+        &commitments[global_warp_id],
+        H_gen,
+        aux,
+        &proofs[global_warp_id],
+        &prove_smem[warp_id_in_block]);
+
+    if ((threadIdx.x & 31) == 0)
+        results[global_warp_id] = ok;
+}
+
+// ===== Warp-cooperative Bulletproof prove LUT4 kernel =========================
+__global__ void bench_bp_prove_warp_lut4_kernel(
+    const uint64_t* values, const Scalar* blindings,
+    const AffinePoint* commitments, const AffinePoint* H_gen,
+    RangeProofGPU* proofs, bool* results, int n)
+{
+    __shared__ ct::BPProveWarpShared prove_smem[WARPS_PER_BLOCK];
+
+    const int warp_id_in_block = threadIdx.x >> 5;
+    const int global_warp_id   = blockIdx.x * WARPS_PER_BLOCK + warp_id_in_block;
+
+    if (global_warp_id >= n) return;
+
+    uint8_t aux[32] = {0};
+    bool ok = ct::ct_range_prove_warp_lut4_device(
+        values[global_warp_id],
+        &blindings[global_warp_id],
+        &commitments[global_warp_id],
+        H_gen,
+        aux,
+        &proofs[global_warp_id],
+        &prove_smem[warp_id_in_block]);
+
+    if ((threadIdx.x & 31) == 0)
+        results[global_warp_id] = ok;
+}
+
 __global__ void bench_bp_verify_kernel(
     const RangeProofGPU* proofs, const AffinePoint* commitments,
     const AffinePoint* H_gen, int* fail_count, int n)
@@ -190,6 +245,114 @@ __global__ void bench_bp_verify_kernel(
     if (idx >= n) return;
     bool v = range_verify_full_device(&proofs[idx], &commitments[idx], H_gen);
     if (!v) atomicAdd(fail_count, 1);
+}
+
+// ===== Warp-cooperative Bulletproof verify kernel ============================
+// 32 threads (1 warp) per proof. Each block has WARPS_PER_BLOCK warps.
+
+__global__ void bench_bp_verify_warp_kernel(
+    const RangeProofGPU* proofs, const AffinePoint* commitments,
+    const AffinePoint* H_gen, int* fail_count, int n)
+{
+    // Shared memory: one BPWarpShared per warp in the block
+    __shared__ BPWarpShared warp_smem[WARPS_PER_BLOCK];
+
+    const int warp_id_in_block = threadIdx.x >> 5;         // which warp within this block
+    const int global_warp_id   = blockIdx.x * WARPS_PER_BLOCK + warp_id_in_block;
+
+    if (global_warp_id >= n) return;
+
+    bool v = range_verify_warp_device(
+        &proofs[global_warp_id],
+        &commitments[global_warp_id],
+        H_gen,
+        &warp_smem[warp_id_in_block]);
+
+    // Only lane 0 reports failure
+    if ((threadIdx.x & 31) == 0 && !v)
+        atomicAdd(fail_count, 1);
+}
+
+// ===== Precomputed-table warp verify kernels =================================
+
+__global__ void bench_bp_verify_warp_precomp_w4_kernel(
+    const RangeProofGPU* proofs, const AffinePoint* commitments,
+    const AffinePoint* H_gen, int* fail_count, int n)
+{
+    __shared__ BPWarpShared warp_smem[WARPS_PER_BLOCK];
+    const int warp_id_in_block = threadIdx.x >> 5;
+    const int global_warp_id   = blockIdx.x * WARPS_PER_BLOCK + warp_id_in_block;
+    if (global_warp_id >= n) return;
+
+    bool v = range_verify_warp_precomp_w4_device(
+        &proofs[global_warp_id], &commitments[global_warp_id],
+        H_gen, &warp_smem[warp_id_in_block]);
+    if ((threadIdx.x & 31) == 0 && !v)
+        atomicAdd(fail_count, 1);
+}
+
+__global__ void bench_bp_verify_warp_precomp_w8_kernel(
+    const RangeProofGPU* proofs, const AffinePoint* commitments,
+    const AffinePoint* H_gen, int* fail_count, int n)
+{
+    __shared__ BPWarpShared warp_smem[WARPS_PER_BLOCK];
+    const int warp_id_in_block = threadIdx.x >> 5;
+    const int global_warp_id   = blockIdx.x * WARPS_PER_BLOCK + warp_id_in_block;
+    if (global_warp_id >= n) return;
+
+    bool v = range_verify_warp_precomp_w8_device(
+        &proofs[global_warp_id], &commitments[global_warp_id],
+        H_gen, &warp_smem[warp_id_in_block]);
+    if ((threadIdx.x & 31) == 0 && !v)
+        atomicAdd(fail_count, 1);
+}
+
+// ===== Phase profiling kernel: runs 1 proof, records per-phase cycle counts ===
+__global__ void bench_bp_profile_p1par_kernel(
+    const RangeProofGPU* proofs, const AffinePoint* commitments,
+    const AffinePoint* H_gen, long long* d_phase_out)
+{
+    __shared__ BPWarpShared warp_smem[1];
+    range_verify_warp_lut4_p1par_device(
+        &proofs[0], &commitments[0], H_gen, &warp_smem[0]);
+    if ((threadIdx.x & 31) == 0) {
+        for (int i = 0; i < 6; ++i)
+            d_phase_out[i] = warp_smem[0].phase_ts[i];
+    }
+}
+
+// ===== Positional LUT4 warp verify kernel (zero doublings) ==================
+
+__global__ void bench_bp_verify_warp_lut4_p1par_kernel(
+    const RangeProofGPU* proofs, const AffinePoint* commitments,
+    const AffinePoint* H_gen, int* fail_count, int n)
+{
+    __shared__ BPWarpShared warp_smem[WARPS_PER_BLOCK];
+    const int warp_id_in_block = threadIdx.x >> 5;
+    const int global_warp_id   = blockIdx.x * WARPS_PER_BLOCK + warp_id_in_block;
+    if (global_warp_id >= n) return;
+
+    bool v = range_verify_warp_lut4_p1par_device(
+        &proofs[global_warp_id], &commitments[global_warp_id],
+        H_gen, &warp_smem[warp_id_in_block]);
+    if ((threadIdx.x & 31) == 0 && !v)
+        atomicAdd(fail_count, 1);
+}
+
+__global__ void bench_bp_verify_warp_lut4_kernel(
+    const RangeProofGPU* proofs, const AffinePoint* commitments,
+    const AffinePoint* H_gen, int* fail_count, int n)
+{
+    __shared__ BPWarpShared warp_smem[WARPS_PER_BLOCK];
+    const int warp_id_in_block = threadIdx.x >> 5;
+    const int global_warp_id   = blockIdx.x * WARPS_PER_BLOCK + warp_id_in_block;
+    if (global_warp_id >= n) return;
+
+    bool v = range_verify_warp_lut4_device(
+        &proofs[global_warp_id], &commitments[global_warp_id],
+        H_gen, &warp_smem[warp_id_in_block]);
+    if ((threadIdx.x & 31) == 0 && !v)
+        atomicAdd(fail_count, 1);
 }
 
 // Setup: generate Pedersen H, commitments, and values for Bulletproof bench
@@ -427,6 +590,14 @@ int main() {
     bulletproof_init_kernel<<<1, 1>>>();
     cudaDeviceSynchronize();
     printf("  Bulletproof generators initialized.\n");
+
+    // Initialize precomputed tables for fixed-base acceleration
+    bp_gen_table_init_w4_kernel<<<1, 128>>>();
+    bp_gen_table_init_w8_kernel<<<1, 128>>>();
+    bp_lut4_init_kernel<<<1, 128>>>();
+    bp_h_lut4_init_kernel<<<1, 1>>>(d_H_ped);
+    cudaDeviceSynchronize();
+    printf("  Precomputed tables initialized (w4: 128 KB, w8: 2 MB, lut4: 8 MB, H-lut4: 64 KB).\n");
     fflush(stdout);
 
     int bp_blocks = (BP_BATCH + 64 - 1) / 64;  // fewer threads per block for heavy kernel
@@ -494,6 +665,280 @@ int main() {
     }, WARMUP, PASSES, BP_BATCH);
     printf("  range_verify        : %8.1f ns/op  (%7.1f k/s)\n", bp_verify_ns, 1e6/bp_verify_ns);
 
+    // ===== Warp-Cooperative Bulletproof Verify =====
+    printf("\n  -- Bulletproof Warp-Cooperative (batch=%d) --\n", BP_BATCH);
+    fflush(stdout);
+
+    // Warp verify: 32 threads per proof, WARPS_PER_BLOCK warps per block
+    int warp_threads_per_block = WARPS_PER_BLOCK * 32;  // 128
+    int warp_blocks = (BP_BATCH + WARPS_PER_BLOCK - 1) / WARPS_PER_BLOCK;
+
+    // Correctness check: warp verify must match original
+    cudaMemset(d_fail, 0, sizeof(int));
+    bench_bp_verify_warp_kernel<<<warp_blocks, warp_threads_per_block>>>(
+        d_bp_proofs, d_bp_commits, d_H_ped, d_fail, BP_BATCH);
+    cudaDeviceSynchronize();
+    cudaMemcpy(&h_fail, d_fail, sizeof(int), cudaMemcpyDeviceToHost);
+    if (h_fail != 0) {
+        printf("  FAIL: %d/%d warp_verify failures\n", h_fail, BP_BATCH);
+    } else {
+        printf("  Warp verify correctness OK.\n");
+    }
+    fflush(stdout);
+
+    // Benchmark warp verify
+    double bp_warp_verify_ns = bench_kernel([&]() {
+        cudaMemset(d_fail, 0, sizeof(int));
+        bench_bp_verify_warp_kernel<<<warp_blocks, warp_threads_per_block>>>(
+            d_bp_proofs, d_bp_commits, d_H_ped, d_fail, BP_BATCH);
+    }, WARMUP, PASSES, BP_BATCH);
+    printf("  range_verify_warp   : %8.1f ns/op  (%7.1f k/s)\n", bp_warp_verify_ns, 1e6/bp_warp_verify_ns);
+    printf("  warp vs single      :  %.1fx speedup\n", bp_verify_ns / bp_warp_verify_ns);
+
+    // ===== Warp-Cooperative Bulletproof Prove =====
+    printf("\n  -- Bulletproof Warp-Cooperative Prove (batch=%d) --\n", BP_BATCH);
+    fflush(stdout);
+
+    // Generate separate proofs for warp prover to avoid overwriting
+    RangeProofGPU* d_bp_warp_proofs;
+    bool* d_bp_warp_results;
+    cudaMalloc(&d_bp_warp_proofs, BP_BATCH * sizeof(RangeProofGPU));
+    cudaMalloc(&d_bp_warp_results, BP_BATCH * sizeof(bool));
+
+    // Prove with warp kernel
+    bench_bp_prove_warp_kernel<<<warp_blocks, warp_threads_per_block>>>(
+        d_bp_values, d_bp_blindings, d_bp_commits, d_H_ped,
+        d_bp_warp_proofs, d_bp_warp_results, BP_BATCH);
+    cudaDeviceSynchronize();
+
+    // Check warp prove results
+    {
+        bool* h_results = new bool[BP_BATCH];
+        cudaMemcpy(h_results, d_bp_warp_results, BP_BATCH * sizeof(bool), cudaMemcpyDeviceToHost);
+        int prove_fails = 0;
+        for (int i = 0; i < BP_BATCH; ++i) if (!h_results[i]) ++prove_fails;
+        if (prove_fails > 0) {
+            printf("  FAIL: %d/%d warp_prove failures\n", prove_fails, BP_BATCH);
+        }
+        delete[] h_results;
+    }
+
+    // Verify warp proofs with original verifier (cross-check)
+    cudaMemset(d_fail, 0, sizeof(int));
+    bench_bp_verify_kernel<<<bp_blocks, bp_threads>>>(
+        d_bp_warp_proofs, d_bp_commits, d_H_ped, d_fail, BP_BATCH);
+    cudaDeviceSynchronize();
+    cudaMemcpy(&h_fail, d_fail, sizeof(int), cudaMemcpyDeviceToHost);
+    if (h_fail != 0) {
+        printf("  FAIL: %d/%d warp_prove->verify failures\n", h_fail, BP_BATCH);
+    } else {
+        printf("  Warp prove correctness OK (verified by original verifier).\n");
+    }
+    fflush(stdout);
+
+    // Benchmark warp prove
+    double bp_warp_prove_ns = bench_kernel([&]() {
+        bench_bp_prove_warp_kernel<<<warp_blocks, warp_threads_per_block>>>(
+            d_bp_values, d_bp_blindings, d_bp_commits, d_H_ped,
+            d_bp_warp_proofs, d_bp_warp_results, BP_BATCH);
+    }, WARMUP, PASSES, BP_BATCH);
+    printf("  range_prove_warp    : %8.1f ns/op  (%7.1f k/s)\n", bp_warp_prove_ns, 1e6/bp_warp_prove_ns);
+    printf("  warp vs single      :  %.1fx speedup\n", bp_prove_ns / bp_warp_prove_ns);
+
+    // ===== Prove Warp + LUT4 (zero doublings for generators) =====
+    printf("\n  -- Bulletproof Warp-Cooperative Prove LUT4 (batch=%d) --\n", BP_BATCH);
+    fflush(stdout);
+
+    // Prove with LUT4 kernel
+    bench_bp_prove_warp_lut4_kernel<<<warp_blocks, warp_threads_per_block>>>(
+        d_bp_values, d_bp_blindings, d_bp_commits, d_H_ped,
+        d_bp_warp_proofs, d_bp_warp_results, BP_BATCH);
+    cudaDeviceSynchronize();
+
+    // Check prove results
+    {
+        bool* h_results = new bool[BP_BATCH];
+        cudaMemcpy(h_results, d_bp_warp_results, BP_BATCH * sizeof(bool), cudaMemcpyDeviceToHost);
+        int prove_fails = 0;
+        for (int i = 0; i < BP_BATCH; ++i) if (!h_results[i]) ++prove_fails;
+        if (prove_fails > 0) {
+            printf("  FAIL: %d/%d prove_lut4 failures\n", prove_fails, BP_BATCH);
+        }
+        delete[] h_results;
+    }
+
+    // Verify LUT4 proofs with original verifier (cross-check)
+    cudaMemset(d_fail, 0, sizeof(int));
+    bench_bp_verify_kernel<<<bp_blocks, bp_threads>>>(
+        d_bp_warp_proofs, d_bp_commits, d_H_ped, d_fail, BP_BATCH);
+    cudaDeviceSynchronize();
+    cudaMemcpy(&h_fail, d_fail, sizeof(int), cudaMemcpyDeviceToHost);
+    if (h_fail != 0) {
+        printf("  FAIL: %d/%d prove_lut4->verify failures\n", h_fail, BP_BATCH);
+    } else {
+        printf("  Prove LUT4 correctness OK (verified by original verifier).\n");
+    }
+    fflush(stdout);
+
+    // Benchmark prove LUT4
+    double bp_prove_lut4_ns = bench_kernel([&]() {
+        bench_bp_prove_warp_lut4_kernel<<<warp_blocks, warp_threads_per_block>>>(
+            d_bp_values, d_bp_blindings, d_bp_commits, d_H_ped,
+            d_bp_warp_proofs, d_bp_warp_results, BP_BATCH);
+    }, WARMUP, PASSES, BP_BATCH);
+    printf("  prove_warp_lut4     : %8.1f ns/op  (%7.1f k/s)\n", bp_prove_lut4_ns, 1e6/bp_prove_lut4_ns);
+    printf("    vs warp_orig      :  %.2fx speedup\n", bp_warp_prove_ns / bp_prove_lut4_ns);
+    printf("    vs single_orig    :  %.1fx total speedup\n", bp_prove_ns / bp_prove_lut4_ns);
+
+    // ===== Precomputed Table Warp Verify (w=4 and w=8) =====
+    printf("\n  -- Bulletproof Precomputed Table Verify (batch=%d) --\n", BP_BATCH);
+    fflush(stdout);
+
+    // Correctness: w=4 precomp must match original verifier
+    cudaMemset(d_fail, 0, sizeof(int));
+    bench_bp_verify_warp_precomp_w4_kernel<<<warp_blocks, warp_threads_per_block>>>(
+        d_bp_proofs, d_bp_commits, d_H_ped, d_fail, BP_BATCH);
+    cudaDeviceSynchronize();
+    cudaMemcpy(&h_fail, d_fail, sizeof(int), cudaMemcpyDeviceToHost);
+    if (h_fail != 0) {
+        printf("  FAIL: %d/%d warp_precomp_w4 failures\n", h_fail, BP_BATCH);
+    } else {
+        printf("  Precomp w=4 correctness OK.\n");
+    }
+    fflush(stdout);
+
+    // Correctness: w=8 precomp must match original verifier
+    cudaMemset(d_fail, 0, sizeof(int));
+    bench_bp_verify_warp_precomp_w8_kernel<<<warp_blocks, warp_threads_per_block>>>(
+        d_bp_proofs, d_bp_commits, d_H_ped, d_fail, BP_BATCH);
+    cudaDeviceSynchronize();
+    cudaMemcpy(&h_fail, d_fail, sizeof(int), cudaMemcpyDeviceToHost);
+    if (h_fail != 0) {
+        printf("  FAIL: %d/%d warp_precomp_w8 failures\n", h_fail, BP_BATCH);
+    } else {
+        printf("  Precomp w=8 correctness OK.\n");
+    }
+    fflush(stdout);
+
+    // Benchmark w=4 precomp
+    double bp_precomp_w4_ns = bench_kernel([&]() {
+        cudaMemset(d_fail, 0, sizeof(int));
+        bench_bp_verify_warp_precomp_w4_kernel<<<warp_blocks, warp_threads_per_block>>>(
+            d_bp_proofs, d_bp_commits, d_H_ped, d_fail, BP_BATCH);
+    }, WARMUP, PASSES, BP_BATCH);
+    printf("  verify_warp_w4      : %8.1f ns/op  (%7.1f k/s)\n", bp_precomp_w4_ns, 1e6/bp_precomp_w4_ns);
+    printf("    vs warp_orig      :  %.2fx speedup\n", bp_warp_verify_ns / bp_precomp_w4_ns);
+
+    // Benchmark w=8 precomp
+    double bp_precomp_w8_ns = bench_kernel([&]() {
+        cudaMemset(d_fail, 0, sizeof(int));
+        bench_bp_verify_warp_precomp_w8_kernel<<<warp_blocks, warp_threads_per_block>>>(
+            d_bp_proofs, d_bp_commits, d_H_ped, d_fail, BP_BATCH);
+    }, WARMUP, PASSES, BP_BATCH);
+    printf("  verify_warp_w8      : %8.1f ns/op  (%7.1f k/s)\n", bp_precomp_w8_ns, 1e6/bp_precomp_w8_ns);
+    printf("    vs warp_orig      :  %.2fx speedup\n", bp_warp_verify_ns / bp_precomp_w8_ns);
+    printf("    vs single_orig    :  %.1fx total speedup\n", bp_verify_ns / bp_precomp_w8_ns);
+
+    // ===== Positional LUT4 Warp Verify (ZERO doublings) =====
+    printf("\n  -- Bulletproof Positional LUT4 Verify (batch=%d) --\n", BP_BATCH);
+    fflush(stdout);
+
+    // Correctness: lut4 must match original verifier
+    cudaMemset(d_fail, 0, sizeof(int));
+    bench_bp_verify_warp_lut4_kernel<<<warp_blocks, warp_threads_per_block>>>(
+        d_bp_proofs, d_bp_commits, d_H_ped, d_fail, BP_BATCH);
+    cudaDeviceSynchronize();
+    cudaMemcpy(&h_fail, d_fail, sizeof(int), cudaMemcpyDeviceToHost);
+    if (h_fail != 0) {
+        printf("  FAIL: %d/%d warp_lut4 failures\n", h_fail, BP_BATCH);
+    } else {
+        printf("  LUT4 correctness OK.\n");
+    }
+    fflush(stdout);
+
+    // Benchmark lut4
+    double bp_lut4_ns = bench_kernel([&]() {
+        cudaMemset(d_fail, 0, sizeof(int));
+        bench_bp_verify_warp_lut4_kernel<<<warp_blocks, warp_threads_per_block>>>(
+            d_bp_proofs, d_bp_commits, d_H_ped, d_fail, BP_BATCH);
+    }, WARMUP, PASSES, BP_BATCH);
+    printf("  verify_warp_lut4    : %8.1f ns/op  (%7.1f k/s)\n", bp_lut4_ns, 1e6/bp_lut4_ns);
+    printf("    vs warp_orig      :  %.2fx speedup\n", bp_warp_verify_ns / bp_lut4_ns);
+    printf("    vs single_orig    :  %.1fx total speedup\n", bp_verify_ns / bp_lut4_ns);
+    printf("    vs CPU            :  %.1fx\n", 2669843.0 / bp_lut4_ns);
+
+    // ===== Phase 1 Parallel + LUT4 Verify =====
+    printf("\n  -- Bulletproof Phase1-Parallel LUT4 Verify (batch=%d) --\n", BP_BATCH);
+    fflush(stdout);
+
+    // Correctness
+    cudaMemset(d_fail, 0, sizeof(int));
+    bench_bp_verify_warp_lut4_p1par_kernel<<<warp_blocks, warp_threads_per_block>>>(
+        d_bp_proofs, d_bp_commits, d_H_ped, d_fail, BP_BATCH);
+    cudaDeviceSynchronize();
+    cudaMemcpy(&h_fail, d_fail, sizeof(int), cudaMemcpyDeviceToHost);
+    if (h_fail != 0) {
+        printf("  FAIL: %d/%d p1par_lut4 failures\n", h_fail, BP_BATCH);
+    } else {
+        printf("  P1par LUT4 correctness OK.\n");
+    }
+    fflush(stdout);
+
+    // Benchmark
+    double bp_p1par_ns = bench_kernel([&]() {
+        cudaMemset(d_fail, 0, sizeof(int));
+        bench_bp_verify_warp_lut4_p1par_kernel<<<warp_blocks, warp_threads_per_block>>>(
+            d_bp_proofs, d_bp_commits, d_H_ped, d_fail, BP_BATCH);
+    }, WARMUP, PASSES, BP_BATCH);
+    printf("  verify_p1par_lut4   : %8.1f ns/op  (%7.1f k/s)\n", bp_p1par_ns, 1e6/bp_p1par_ns);
+    printf("    vs lut4           :  %.2fx speedup\n", bp_lut4_ns / bp_p1par_ns);
+    printf("    vs warp_orig      :  %.2fx speedup\n", bp_warp_verify_ns / bp_p1par_ns);
+    printf("    vs single_orig    :  %.1fx total speedup\n", bp_verify_ns / bp_p1par_ns);
+    printf("    vs CPU            :  %.1fx\n", 2669843.0 / bp_p1par_ns);
+
+    // ===== Phase Profiling: P1a / P1b / P1c / P2 / P3 breakdown =====
+    {
+        printf("\n  -- Phase Profiling (p1par_lut4, single proof, 32 runs) --\n");
+        fflush(stdout);
+        long long* d_phase;
+        cudaMalloc(&d_phase, 6 * sizeof(long long));
+        constexpr int PROF_RUNS = 32;
+        long long totals[5] = {0,0,0,0,0};
+        for (int run = 0; run < PROF_RUNS + 4; ++run) {
+            cudaMemset(d_phase, 0, 6 * sizeof(long long));
+            bench_bp_profile_p1par_kernel<<<1, 32>>>(
+                d_bp_proofs, d_bp_commits, d_H_ped, d_phase);
+            cudaDeviceSynchronize();
+            if (run < 4) continue; // warmup
+            long long h_ts[6];
+            cudaMemcpy(h_ts, d_phase, 6 * sizeof(long long), cudaMemcpyDeviceToHost);
+            for (int p = 0; p < 5; ++p)
+                totals[p] += (h_ts[p+1] - h_ts[p]);
+        }
+        long long total_all = 0;
+        for (int p = 0; p < 5; ++p) total_all += totals[p];
+        // Get GPU clock rate for ns conversion
+        int dev; cudaGetDevice(&dev);
+        int clock_khz;
+        cudaDeviceGetAttribute(&clock_khz, cudaDevAttrClockRate, dev);
+        double clk_mhz = clock_khz / 1000.0;
+        const char* phase_names[5] = {"P1a (Fiat-Shamir+IPA)", "P1b (s_coeff+inv+pow)", "P1c (22-lane scalar*P)", "P2  (LUT4 MSM 128gen)", "P3  (reduction+check)"};
+        printf("  GPU clock: %.0f MHz\n", clk_mhz);
+        printf("  %-24s %10s %8s %12s\n", "Phase", "Cycles", "%", "~ns (avg)");
+        printf("  %-24s %10s %8s %12s\n", "------------------------", "----------", "--------", "------------");
+        for (int p = 0; p < 5; ++p) {
+            long long avg_cyc = totals[p] / PROF_RUNS;
+            double pct = 100.0 * totals[p] / total_all;
+            double ns = avg_cyc / clk_mhz * 1000.0;
+            printf("  %-24s %10lld %7.1f%% %10.0f ns\n", phase_names[p], avg_cyc, pct, ns);
+        }
+        long long total_avg = total_all / PROF_RUNS;
+        double total_ns = total_avg / clk_mhz * 1000.0;
+        printf("  %-24s %10lld %7.1f%% %10.0f ns\n", "TOTAL", total_avg, 100.0, total_ns);
+        cudaFree(d_phase);
+        fflush(stdout);
+    }
+
     // -- Summary with baseline comparison --
     printf("\n  %-22s %8s  %8s  %6s\n", "Operation", "Now", "Baseline", "Speedup");
     printf("  %-22s %8s  %8s  %6s\n", "----------------------", "--------", "--------", "------");
@@ -503,12 +948,26 @@ int main() {
     printf("  %-22s %7.1f   %7.1f   %5.2fx\n", "dleq_verify",        dv_ns, 2148.2, 2148.2/dv_ns);
     printf("  %-22s %7.1f\n", "pedersen_commit", ped_ns);
     printf("  %-22s %7.1f\n", "range_prove", bp_prove_ns);
+    printf("  %-22s %7.1f   (%.1fx vs single)\n", "range_prove_warp", bp_warp_prove_ns, bp_prove_ns / bp_warp_prove_ns);
+    printf("  %-22s %7.1f   (%.2fx vs warp)\n", "prove_warp_lut4", bp_prove_lut4_ns, bp_warp_prove_ns / bp_prove_lut4_ns);
     printf("  %-22s %7.1f\n", "range_verify", bp_verify_ns);
+    printf("  %-22s %7.1f   (%.1fx vs single)\n", "range_verify_warp", bp_warp_verify_ns, bp_verify_ns / bp_warp_verify_ns);
+    printf("  %-22s %7.1f   (%.2fx vs warp)\n", "verify_warp_w4", bp_precomp_w4_ns, bp_warp_verify_ns / bp_precomp_w4_ns);
+    printf("  %-22s %7.1f   (%.2fx vs warp)\n", "verify_warp_w8", bp_precomp_w8_ns, bp_warp_verify_ns / bp_precomp_w8_ns);
+    printf("  %-22s %7.1f   (%.2fx vs warp)\n", "verify_warp_lut4", bp_lut4_ns, bp_warp_verify_ns / bp_lut4_ns);
+    printf("  %-22s %7.1f   (%.2fx vs lut4)\n", "verify_p1par_lut4", bp_p1par_ns, bp_lut4_ns / bp_p1par_ns);
 
     printf("\n  -- GPU vs CPU (Bulletproof) --\n");
     printf("  %-22s %10s  %10s  %6s\n", "Operation", "GPU ns/op", "CPU ns/op", "Ratio");
     printf("  %-22s %10.1f  %10.0f  %5.1fx\n", "range_prove",  bp_prove_ns, 13618693.0, 13618693.0/bp_prove_ns);
+    printf("  %-22s %10.1f  %10.0f  %5.1fx\n", "range_prove_warp",  bp_warp_prove_ns, 13618693.0, 13618693.0/bp_warp_prove_ns);
+    printf("  %-22s %10.1f  %10.0f  %5.1fx\n", "prove_warp_lut4", bp_prove_lut4_ns, 13618693.0, 13618693.0/bp_prove_lut4_ns);
     printf("  %-22s %10.1f  %10.0f  %5.1fx\n", "range_verify", bp_verify_ns, 2669843.0, 2669843.0/bp_verify_ns);
+    printf("  %-22s %10.1f  %10.0f  %5.1fx\n", "range_verify_warp", bp_warp_verify_ns, 2669843.0, 2669843.0/bp_warp_verify_ns);
+    printf("  %-22s %10.1f  %10.0f  %5.1fx\n", "verify_warp_w4", bp_precomp_w4_ns, 2669843.0, 2669843.0/bp_precomp_w4_ns);
+    printf("  %-22s %10.1f  %10.0f  %5.1fx\n", "verify_warp_w8", bp_precomp_w8_ns, 2669843.0, 2669843.0/bp_precomp_w8_ns);
+    printf("  %-22s %10.1f  %10.0f  %5.1fx\n", "verify_warp_lut4", bp_lut4_ns, 2669843.0, 2669843.0/bp_lut4_ns);
+    printf("  %-22s %10.1f  %10.0f  %5.1fx\n", "verify_p1par_lut4", bp_p1par_ns, 2669843.0, 2669843.0/bp_p1par_ns);
     printf("  %-22s %10.1f  %10.0f  %5.1fx\n", "pedersen_commit", ped_ns, 29718.0, 29718.0/ped_ns);
 
     printf("\n=== Done ===\n");
@@ -535,5 +994,7 @@ int main() {
     cudaFree(d_bp_commits);
     cudaFree(d_bp_proofs);
     cudaFree(d_bp_results);
+    cudaFree(d_bp_warp_proofs);
+    cudaFree(d_bp_warp_results);
     return 0;
 }
