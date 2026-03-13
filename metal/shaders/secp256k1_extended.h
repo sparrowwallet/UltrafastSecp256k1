@@ -89,6 +89,13 @@ inline Scalar256 scalar_from_bytes(thread const uchar bytes[32]) {
     return s;
 }
 
+// Overload for device address space pointers (kernel buffers)
+inline Scalar256 scalar_from_bytes(device const uchar* bytes) {
+    uchar local_bytes[32];
+    for (int i = 0; i < 32; i++) local_bytes[i] = bytes[i];
+    return scalar_from_bytes(local_bytes);
+}
+
 // Scalar256 -> big-endian 32 bytes
 inline void scalar_to_bytes(thread const Scalar256 &s, thread uchar out[32]) {
     for (int i = 0; i < 8; i++) {
@@ -132,6 +139,13 @@ inline void field_to_bytes(thread const FieldElement &f, thread uchar out[32]) {
         out[i*4+2] = uchar(limb >> 8);
         out[i*4+3] = uchar(limb);
     }
+}
+
+// Overload for device address space output (kernel buffers)
+inline void field_to_bytes(thread const FieldElement &f, device uchar* out) {
+    uchar local_out[32];
+    field_to_bytes(f, local_out);
+    for (int i = 0; i < 32; i++) out[i] = local_out[i];
 }
 
 // Scalar256 is-zero check
@@ -746,6 +760,13 @@ inline bool lift_x(thread const uchar x_bytes[32], thread JacobianPoint &p) {
 
     p.x = x; p.y = y; p.z = field_one(); p.infinity = 0;
     return true;
+}
+
+// Overload for device address space pointers (kernel buffers)
+inline bool lift_x(device const uchar* x_bytes_dev, thread JacobianPoint &p) {
+    uchar local_bytes[32];
+    for (int i = 0; i < 32; i++) local_bytes[i] = x_bytes_dev[i];
+    return lift_x(local_bytes, p);
 }
 
 struct SchnorrSignature {

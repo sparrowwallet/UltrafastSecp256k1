@@ -129,6 +129,16 @@ inline JacobianPoint jacobian_double(thread const JacobianPoint &p) {
 // =============================================================================
 
 inline JacobianPoint jacobian_add_mixed(thread const JacobianPoint &p,
+                                         thread const AffinePoint &q);
+
+// Overload for device address space AffinePoint (kernel buffers)
+inline JacobianPoint jacobian_add_mixed(thread const JacobianPoint &p,
+                                         device const AffinePoint &q) {
+    AffinePoint local_q = q;
+    return jacobian_add_mixed(p, local_q);
+}
+
+inline JacobianPoint jacobian_add_mixed(thread const JacobianPoint &p,
                                          thread const AffinePoint &q) {
     if (p.infinity != 0) {
         JacobianPoint r;
