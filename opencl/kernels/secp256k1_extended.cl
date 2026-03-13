@@ -46,24 +46,39 @@
 #define BARRETT_MU3 0x0000000000000000UL
 #define BARRETT_MU4 0x0000000000000001UL
 
-// β (GLV endomorphism constant)
-#define GLV_BETA0 0x7AE96A2B657C0710UL
-#define GLV_BETA1 0x6E64479EAC3434E9UL
-#define GLV_BETA2 0x9CF0497512F58995UL
-#define GLV_BETA3 0xC1396C28719501EEUL
+// beta (GLV endomorphism field constant: cube root of unity in Fp)
+// BETA = 0x7ae96a2b657c0710_6e64479eac3434e9_9cf0497512f58995_c1396c28719501ee
+// Stored in LE limb order (limb[0] = LSW)
+#define GLV_BETA0 0xC1396C28719501EEUL
+#define GLV_BETA1 0x9CF0497512F58995UL
+#define GLV_BETA2 0x6E64479EAC3434E9UL
+#define GLV_BETA3 0x7AE96A2B657C0710UL
 
-// Half-scalar lattice constants for GLV decomposition (64-bit LE)
-#define GLV_G1_0 0x3086D221A7D46BCDUL
-#define GLV_G1_1 0xE4437ED6010E8828UL
+// lambda (GLV endomorphism scalar: [lambda]*P = (beta*x, y) for any point P on secp256k1)
+// LAMBDA = 0x5363ad4cc05c30e0_a5261c028812645a_122e22ea20816678_df02967c1b23bd72
+// Stored in LE limb order (limb[0] = LSW)
+#define GLV_LAMBDA0 0xDF02967C1B23BD72UL
+#define GLV_LAMBDA1 0x122E22EA20816678UL
+#define GLV_LAMBDA2 0xA5261C028812645AUL
+#define GLV_LAMBDA3 0x5363AD4CC05C30E0UL
 
-#define GLV_G2_0 0xE86C90E49284EB15UL
-#define GLV_G2_1 0x3086D221A7D46BCDULL
-
-#define GLV_MINUS_B1_0 0xE86C90E49284EB15UL
-#define GLV_MINUS_B1_1 0x3086D221A7D46BCDULL
-
-#define GLV_MINUS_B2_0 0x3086D221A7D46BCDUL
-#define GLV_MINUS_B2_1 0xE4437ED6010E8828UL
+// GLV lattice vectors g1, g2 (full 256-bit, for mul_shift_384)
+__constant ulong GLV_G1[4] = {
+    0xE893209A45DBB031UL, 0x3DAA8A1471E8CA7FUL,
+    0xE86C90E49284EB15UL, 0x3086D221A7D46BCDUL
+};
+__constant ulong GLV_G2[4] = {
+    0x1571B4AE8AC47F71UL, 0x221208AC9DF506C6UL,
+    0x6F547FA90ABFE4C4UL, 0xE4437ED6010E8828UL
+};
+// -b1 and -b2 vectors (full 256-bit)
+__constant ulong GLV_MINUS_B1[4] = {
+    0x6F547FA90ABFE4C3UL, 0xE4437ED6010E8828UL, 0x0UL, 0x0UL
+};
+__constant ulong GLV_MINUS_B2[4] = {
+    0xD765CDA83DB1562CUL, 0x8A280AC50774346DUL,
+    0xFFFFFFFFFFFFFFFEUL, 0xFFFFFFFFFFFFFFFFUL
+};
 
 // SHA-256 round constants
 __constant uint K256[64] = {
@@ -455,25 +470,165 @@ inline void apply_endomorphism_impl(const JacobianPoint* p, JacobianPoint* r) {
     r->infinity = p->infinity;
 }
 
-// Simplified GLV decomposition: k = k1 + k2*lambda mod n
-// Uses half-precision lattice approach
-inline void glv_decompose_simple(const Scalar* k, Scalar* k1, Scalar* k2, int* k1_neg, int* k2_neg) {
-    // For simplicity, split at 128-bit boundary
-    // k1 = k mod 2^128, k2 = k >> 128
-    // This is a simplified version; full lattice-based decomposition
-    // would use the G1, G2 vectors
-    k1->limbs[0] = k->limbs[0];
-    k1->limbs[1] = k->limbs[1];
-    k1->limbs[2] = 0;
-    k1->limbs[3] = 0;
+// Field negation: r = p - a (mod p)
+inline void field_negate_impl(FieldElement* r, const FieldElement* a) {
+    FieldElement zero;
+    zero.limbs[0] = 0; zero.limbs[1] = 0; zero.limbs[2] = 0; zero.limbs[3] = 0;
+    field_sub_impl(r, &zero, a);
+}
 
-    k2->limbs[0] = k->limbs[2];
-    k2->limbs[1] = k->limbs[3];
-    k2->limbs[2] = 0;
-    k2->limbs[3] = 0;
+// GLV decomposition: k = k1 + k2*lambda (mod n), |k1|,|k2| ~ 128 bits
+// Uses full lattice-based decomposition with Babai rounding.
 
-    *k1_neg = 0;
-    *k2_neg = 0;
+// (a * b) >> 384 with rounding (bit 383)
+inline void mul_shift_384_impl(const ulong a[4], __constant const ulong b[4], ulong result[4]) {
+    ulong prod[8] = {0,0,0,0,0,0,0,0};
+    for (int i = 0; i < 4; i++) {
+        ulong carry = 0;
+        for (int j = 0; j < 4; j++) {
+            ulong2 full = mul64_full(a[i], b[j]);
+            ulong c1 = 0, c2 = 0;
+            ulong s = add_with_carry(full.x, prod[i+j], 0, &c1);
+            s = add_with_carry(s, carry, 0, &c2);
+            prod[i+j] = s;
+            carry = full.y + c1 + c2;
+        }
+        prod[i+4] = carry;
+    }
+    result[0] = prod[6];  result[1] = prod[7];
+    result[2] = 0;        result[3] = 0;
+    if (prod[5] >> 63) {  // rounding bit 383
+        result[0]++;
+        if (result[0] == 0) result[1]++;
+    }
+}
+
+inline void glv_decompose_impl(const Scalar* k, Scalar* k1, Scalar* k2,
+                                 int* k1_neg, int* k2_neg) {
+    // c1 = round(k * g1 / 2^384), c2 = round(k * g2 / 2^384)
+    ulong c1_limbs[4], c2_limbs[4];
+    mul_shift_384_impl(k->limbs, GLV_G1, c1_limbs);
+    mul_shift_384_impl(k->limbs, GLV_G2, c2_limbs);
+
+    Scalar c1, c2;
+    for (int i = 0; i < 4; i++) { c1.limbs[i] = c1_limbs[i]; c2.limbs[i] = c2_limbs[i]; }
+
+    // Reduce c1, c2 mod n if needed
+    Scalar order;
+    order.limbs[0] = ORDER_N0; order.limbs[1] = ORDER_N1;
+    order.limbs[2] = ORDER_N2; order.limbs[3] = ORDER_N3;
+    if (scalar_ge_impl(&c1, &order)) scalar_sub_mod_n_impl(&c1, &order, &c1);
+    if (scalar_ge_impl(&c2, &order)) scalar_sub_mod_n_impl(&c2, &order, &c2);
+
+    // k2_mod = c1*(-b1) + c2*(-b2) mod n
+    Scalar minus_b1, minus_b2;
+    for (int i = 0; i < 4; i++) {
+        minus_b1.limbs[i] = GLV_MINUS_B1[i];
+        minus_b2.limbs[i] = GLV_MINUS_B2[i];
+    }
+    Scalar t1, t2, k2_mod;
+    scalar_mul_mod_n_impl(&c1, &minus_b1, &t1);
+    scalar_mul_mod_n_impl(&c2, &minus_b2, &t2);
+    scalar_add_mod_n_impl(&t1, &t2, &k2_mod);
+
+    // Pick shorter k2: compare |k2_mod| vs |n - k2_mod|
+    Scalar k2_neg_val;
+    scalar_negate_impl(&k2_mod, &k2_neg_val);
+    int k2_is_neg = (scalar_bitlen_impl(&k2_neg_val) < scalar_bitlen_impl(&k2_mod));
+    Scalar k2_abs = k2_is_neg ? k2_neg_val : k2_mod;
+
+    // For computing k1: need the signed k2
+    Scalar k2_signed;
+    if (k2_is_neg) { scalar_negate_impl(&k2_abs, &k2_signed); }
+    else           { k2_signed = k2_abs; }
+
+    // k1 = k - lambda*k2_signed mod n
+    Scalar lambda_s;
+    lambda_s.limbs[0] = GLV_LAMBDA0; lambda_s.limbs[1] = GLV_LAMBDA1;
+    lambda_s.limbs[2] = GLV_LAMBDA2; lambda_s.limbs[3] = GLV_LAMBDA3;
+    Scalar lk2;
+    scalar_mul_mod_n_impl(&lambda_s, &k2_signed, &lk2);
+    Scalar k1_mod;
+    scalar_sub_mod_n_impl(k, &lk2, &k1_mod);
+
+    // Pick shorter k1
+    Scalar k1_neg_val;
+    scalar_negate_impl(&k1_mod, &k1_neg_val);
+    int k1_is_neg = (scalar_bitlen_impl(&k1_neg_val) < scalar_bitlen_impl(&k1_mod));
+    Scalar k1_abs = k1_is_neg ? k1_neg_val : k1_mod;
+
+    *k1 = k1_abs;  *k2 = k2_abs;
+    *k1_neg = k1_is_neg;  *k2_neg = k2_is_neg;
+}
+
+// GLV-accelerated scalar multiplication: k*P using Shamir's trick
+// with endomorphism phi(P) = (beta*x, y) where phi corresponds to lambda.
+// Uses interleaved wNAF w=5 for both half-scalars k1, k2.
+inline void scalar_mul_glv_impl(JacobianPoint* r, const Scalar* k, const AffinePoint* p) {
+    Scalar k1, k2;
+    int k1_neg, k2_neg;
+    glv_decompose_impl(k, &k1, &k2, &k1_neg, &k2_neg);
+
+    // Build base point, negate if k1 is negative
+    AffinePoint base = *p;
+    if (k1_neg) field_negate_impl(&base.y, &base.y);
+
+    // Build P precomp table: [P, 3P, 5P, ..., 15P] (8 entries, w=5)
+    JacobianPoint tbl_jac[8];
+    JacobianPoint dbl;
+    point_from_affine(&tbl_jac[0], &base);
+    point_double_impl(&dbl, &tbl_jac[0]);
+    for (int i = 1; i < 8; i++)
+        point_add_impl(&tbl_jac[i], &tbl_jac[i-1], &dbl);
+
+    // Build phi(P) table: apply endomorphism, flip y if signs differ
+    AffinePoint endo_base;
+    FieldElement beta;
+    beta.limbs[0] = GLV_BETA0; beta.limbs[1] = GLV_BETA1;
+    beta.limbs[2] = GLV_BETA2; beta.limbs[3] = GLV_BETA3;
+    field_mul_impl(&endo_base.x, &base.x, &beta);
+    endo_base.y = base.y;
+    int flip_phi = (k1_neg != k2_neg);
+    if (flip_phi) field_negate_impl(&endo_base.y, &endo_base.y);
+
+    JacobianPoint tbl2_jac[8];
+    point_from_affine(&tbl2_jac[0], &endo_base);
+    JacobianPoint dbl2;
+    point_double_impl(&dbl2, &tbl2_jac[0]);
+    for (int i = 1; i < 8; i++)
+        point_add_impl(&tbl2_jac[i], &tbl2_jac[i-1], &dbl2);
+
+    // wNAF encode both half-width scalars
+    int wnaf1[260], wnaf2[260];
+    int len1 = scalar_to_wnaf(&k1, wnaf1);
+    int len2 = scalar_to_wnaf(&k2, wnaf2);
+    int max_len = (len1 > len2) ? len1 : len2;
+
+    // Shamir interleaved loop
+    point_set_infinity(r);
+    for (int i = max_len - 1; i >= 0; --i) {
+        if (!point_is_infinity(r)) point_double_impl(r, r);
+
+        int d1 = (i < len1) ? wnaf1[i] : 0;
+        if (d1 != 0) {
+            int idx = ((d1 > 0) ? d1 : -d1) >> 1;
+            if (idx >= 8) idx = 7;
+            JacobianPoint pt = tbl_jac[idx];
+            if (d1 < 0) field_negate_impl(&pt.y, &pt.y);
+            if (point_is_infinity(r)) { *r = pt; }
+            else { JacobianPoint tmp; point_add_impl(&tmp, r, &pt); *r = tmp; }
+        }
+
+        int d2 = (i < len2) ? wnaf2[i] : 0;
+        if (d2 != 0) {
+            int idx = ((d2 > 0) ? d2 : -d2) >> 1;
+            if (idx >= 8) idx = 7;
+            JacobianPoint pt = tbl2_jac[idx];
+            if (d2 < 0) field_negate_impl(&pt.y, &pt.y);
+            if (point_is_infinity(r)) { *r = pt; }
+            else { JacobianPoint tmp; point_add_impl(&tmp, r, &pt); *r = tmp; }
+        }
+    }
 }
 
 // Precomputed generator multiplication using fixed window w=4
@@ -801,6 +956,37 @@ inline void tagged_hash_impl(const uchar* tag, uint tag_len,
     sha256_final(&ctx, out);
 }
 
+// BIP-340 tagged hash midstate precomputation.
+// SHA256(tag||tag) for each BIP-340 tag is exactly 64 bytes (one block).
+// These midstates are the SHA-256 internal state after compressing that block,
+// saving 2 compressions per tagged_hash call.
+#define BIP340_TAG_AUX       0
+#define BIP340_TAG_NONCE     1
+#define BIP340_TAG_CHALLENGE 2
+
+__constant uint BIP340_MIDSTATES[3][8] = {
+    // "BIP0340/aux"
+    {0x24dd3219U, 0x4eba7e70U, 0xca0fabb9U, 0x0fa3166dU,
+     0x3afbe4b1U, 0x4c44df97U, 0x4aac2739U, 0x249e850aU},
+    // "BIP0340/nonce"
+    {0x46615b35U, 0xf4bfbff7U, 0x9f8dc671U, 0x83627ab3U,
+     0x60217180U, 0x57358661U, 0x21a29e54U, 0x68b07b4cU},
+    // "BIP0340/challenge"
+    {0x9cecba11U, 0x23925381U, 0x11679112U, 0xd1627e0fU,
+     0x97c87550U, 0x003cc765U, 0x90f61164U, 0x33e9b66aU},
+};
+
+inline void tagged_hash_fast_impl(int tag_idx,
+                                  const uchar* data, uint data_len,
+                                  uchar out[32]) {
+    SHA256Ctx ctx;
+    for (int i = 0; i < 8; i++) ctx.h[i] = BIP340_MIDSTATES[tag_idx][i];
+    ctx.buf_len = 0;
+    ctx.total_len = 64;  // 64 bytes already processed (tag_hash||tag_hash)
+    sha256_update(&ctx, data, data_len);
+    sha256_final(&ctx, out);
+}
+
 // Lift x to curve point with even Y
 inline int lift_x_impl(const uchar x_bytes[32], JacobianPoint* p) {
     FieldElement x;
@@ -878,8 +1064,7 @@ inline int schnorr_sign_impl(const Scalar* priv, const uchar msg[32],
 
     // t = d XOR tagged_hash("BIP0340/aux", aux_rand)
     uchar t_hash[32];
-    { uchar _tag[] = {'B','I','P','0','3','4','0','/','a','u','x'};
-    tagged_hash_impl(_tag, 11, aux_rand, 32, t_hash); }
+    tagged_hash_fast_impl(BIP340_TAG_AUX, aux_rand, 32, t_hash);
 
     uchar d_bytes[32];
     scalar_to_bytes_impl(&d, d_bytes);
@@ -894,8 +1079,7 @@ inline int schnorr_sign_impl(const Scalar* priv, const uchar msg[32],
     for (int i = 0; i < 32; i++) nonce_input[64+i] = msg[i];
 
     uchar rand_hash[32];
-    { uchar _tag[] = {'B','I','P','0','3','4','0','/','n','o','n','c','e'};
-    tagged_hash_impl(_tag, 13, nonce_input, 96, rand_hash); }
+    tagged_hash_fast_impl(BIP340_TAG_NONCE, nonce_input, 96, rand_hash);
 
     Scalar k_prime;
     scalar_from_bytes_impl(rand_hash, &k_prime);
@@ -927,8 +1111,7 @@ inline int schnorr_sign_impl(const Scalar* priv, const uchar msg[32],
     for (int i = 0; i < 32; i++) challenge_input[64+i] = msg[i];
 
     uchar e_hash[32];
-    { uchar _tag[] = {'B','I','P','0','3','4','0','/','c','h','a','l','l','e','n','g','e'};
-    tagged_hash_impl(_tag, 17, challenge_input, 96, e_hash); }
+    tagged_hash_fast_impl(BIP340_TAG_CHALLENGE, challenge_input, 96, e_hash);
 
     Scalar e;
     scalar_from_bytes_impl(e_hash, &e);
@@ -954,8 +1137,7 @@ inline int schnorr_verify_impl(const uchar pubkey_x[32], const uchar msg[32],
     for (int i = 0; i < 32; i++) challenge_input[64+i] = msg[i];
 
     uchar e_hash[32];
-    { uchar _tag[] = {'B','I','P','0','3','4','0','/','c','h','a','l','l','e','n','g','e'};
-    tagged_hash_impl(_tag, 17, challenge_input, 96, e_hash); }
+    tagged_hash_fast_impl(BIP340_TAG_CHALLENGE, challenge_input, 96, e_hash);
 
     Scalar e;
     scalar_from_bytes_impl(e_hash, &e);
@@ -963,7 +1145,7 @@ inline int schnorr_verify_impl(const uchar pubkey_x[32], const uchar msg[32],
     // R = s*G - e*P
     AffinePoint G; get_generator(&G);
     JacobianPoint sG, eP;
-    scalar_mul_impl(&sG, &sig->s, &G);
+    scalar_mul_glv_impl(&sG, &sig->s, &G);
 
     // Convert P to affine for scalar_mul_impl
     FieldElement pz_inv, pz_inv2, pz_inv3, px_aff, py_aff;
@@ -974,7 +1156,7 @@ inline int schnorr_verify_impl(const uchar pubkey_x[32], const uchar msg[32],
     field_mul_impl(&py_aff, &P.y, &pz_inv3);
     AffinePoint p_aff; p_aff.x = px_aff; p_aff.y = py_aff;
 
-    scalar_mul_impl(&eP, &e, &p_aff);
+    scalar_mul_glv_impl(&eP, &e, &p_aff);
 
     point_negate_y(&eP);
 
@@ -1007,7 +1189,7 @@ inline int schnorr_verify_impl(const uchar pubkey_x[32], const uchar msg[32],
 
 inline int ecdh_compute_raw_impl(const Scalar* priv, const AffinePoint* peer, uchar out[32]) {
     JacobianPoint shared;
-    scalar_mul_impl(&shared, priv, peer);
+    scalar_mul_glv_impl(&shared, priv, peer);
     if (point_is_infinity(&shared)) return 0;
 
     FieldElement z_inv, z_inv2, x_aff;
@@ -1191,11 +1373,11 @@ inline int ecdsa_recover_impl(const uchar msg_hash[32], const ECDSASignature* si
     field_mul_impl(&r_aff.y, &Rpt.y, &pz_inv3);
 
     JacobianPoint sR;
-    scalar_mul_impl(&sR, &sig->s, &r_aff);
+    scalar_mul_glv_impl(&sR, &sig->s, &r_aff);
 
     AffinePoint G; get_generator(&G);
     JacobianPoint zG;
-    scalar_mul_impl(&zG, &z, &G);
+    scalar_mul_glv_impl(&zG, &z, &G);
 
     point_negate_y(&zG);
     JacobianPoint sR_minus_zG;
@@ -1210,7 +1392,7 @@ inline int ecdsa_recover_impl(const uchar msg_hash[32], const ECDSASignature* si
     field_mul_impl(&diff_aff.x, &sR_minus_zG.x, &qz_inv2);
     field_mul_impl(&diff_aff.y, &sR_minus_zG.y, &qz_inv3);
 
-    scalar_mul_impl(Q, &r_inv, &diff_aff);
+    scalar_mul_glv_impl(Q, &r_inv, &diff_aff);
 
     if (point_is_infinity(Q)) return 0;
     return 1;
@@ -1243,7 +1425,7 @@ inline void msm_naive_impl(const Scalar* scalars, const AffinePoint* points,
     for (int i = 0; i < n; i++) {
         if (scalar_is_zero(&scalars[i])) continue;
         JacobianPoint tmp;
-        scalar_mul_impl(&tmp, &scalars[i], &points[i]);
+        scalar_mul_glv_impl(&tmp, &scalars[i], &points[i]);
         if (point_is_infinity(result)) {
             *result = tmp;
         } else {

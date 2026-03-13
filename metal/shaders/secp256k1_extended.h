@@ -455,6 +455,168 @@ inline JacobianPoint apply_endomorphism_jac(thread const JacobianPoint &p) {
     return r;
 }
 
+// =============================================================================
+// GLV Decomposition + Accelerated Scalar Multiplication
+// =============================================================================
+
+// GLV constants in 8x32 LE limb order
+
+// lambda: [lambda]*P = (beta*Px, Py)
+// LAMBDA = 0x5363ad4cc05c30e0_a5261c028812645a_122e22ea20816678_df02967c1b23bd72
+constant uint LAMBDA_LIMBS[8] = {
+    0x1B23BD72u, 0xDF02967Cu, 0x20816678u, 0x122E22EAu,
+    0x8812645Au, 0xA5261C02u, 0xC05C30E0u, 0x5363AD4Cu
+};
+
+// GLV lattice vectors g1, g2
+constant uint GLV_G1_LIMBS[8] = {
+    0x45DBB031u, 0xE893209Au, 0x71E8CA7Fu, 0x3DAA8A14u,
+    0x9284EB15u, 0xE86C90E4u, 0xA7D46BCDu, 0x3086D221u
+};
+constant uint GLV_G2_LIMBS[8] = {
+    0x8AC47F71u, 0x1571B4AEu, 0x9DF506C6u, 0x221208ACu,
+    0x0ABFE4C4u, 0x6F547FA9u, 0x010E8828u, 0xE4437ED6u
+};
+// -b1 and -b2 vectors
+constant uint GLV_MB1_LIMBS[8] = {
+    0x0ABFE4C3u, 0x6F547FA9u, 0x010E8828u, 0xE4437ED6u,
+    0x00000000u, 0x00000000u, 0x00000000u, 0x00000000u
+};
+constant uint GLV_MB2_LIMBS[8] = {
+    0x3DB1562Cu, 0xD765CDA8u, 0x0774346Du, 0x8A280AC5u,
+    0xFFFFFFFEu, 0xFFFFFFFFu, 0xFFFFFFFFu, 0xFFFFFFFFu
+};
+
+// (a * b) >> 384 with rounding (bit 383) — 8x8 schoolbook, 32-bit limbs
+// Both a and b are 8-limb (256-bit) LE. Product is 16 limbs (512-bit).
+// Result = prod[12..15] (with rounding from prod[11] MSB), zero-extended to 8 limbs.
+inline Scalar256 mul_shift_384(thread const Scalar256 &a, constant const uint b[8]) {
+    uint prod[16];
+    for (int i = 0; i < 16; i++) prod[i] = 0;
+
+    for (int i = 0; i < 8; i++) {
+        uint carry = 0;
+        for (int j = 0; j < 8; j++) {
+            uint lo = a.limbs[i] * b[j];
+            uint hi = mulhi(a.limbs[i], b[j]);
+            uint s = prod[i+j] + lo;
+            uint c1 = (s < prod[i+j]) ? 1u : 0u;
+            s += carry;
+            uint c2 = (s < carry) ? 1u : 0u;
+            prod[i+j] = s;
+            carry = hi + c1 + c2;
+        }
+        prod[i+8] = carry;
+    }
+
+    Scalar256 result;
+    result.limbs[0] = prod[12]; result.limbs[1] = prod[13];
+    result.limbs[2] = prod[14]; result.limbs[3] = prod[15];
+    result.limbs[4] = 0; result.limbs[5] = 0;
+    result.limbs[6] = 0; result.limbs[7] = 0;
+
+    // Rounding: if bit 383 (= bit 31 of limb 11) is set, round up
+    if (prod[11] >> 31) {
+        uint c = 1;
+        for (int i = 0; i < 4 && c; i++) {
+            uint s = result.limbs[i] + c;
+            c = (s < result.limbs[i]) ? 1u : 0u;
+            result.limbs[i] = s;
+        }
+    }
+    return result;
+}
+
+// GLV decomposition: k = k1 + k2*lambda (mod n), |k1|,|k2| ~ 128 bits
+// Uses Babai rounding with lattice vectors G1, G2
+inline void glv_decompose(thread const Scalar256 &k,
+                           thread Scalar256 &k1, thread Scalar256 &k2,
+                           thread int &k1_neg, thread int &k2_neg) {
+    // c1 = round(k * g1 / 2^384), c2 = round(k * g2 / 2^384)
+    Scalar256 c1 = mul_shift_384(k, GLV_G1_LIMBS);
+    Scalar256 c2 = mul_shift_384(k, GLV_G2_LIMBS);
+
+    // Reduce mod n if needed
+    Scalar256 order;
+    for (int i = 0; i < 8; i++) order.limbs[i] = SECP256K1_N[i];
+    if (scalar256_ge(c1, order)) c1 = scalar_sub_mod_n(c1, order);
+    if (scalar256_ge(c2, order)) c2 = scalar_sub_mod_n(c2, order);
+
+    // k2_mod = c1*(-b1) + c2*(-b2) mod n
+    Scalar256 mb1, mb2;
+    for (int i = 0; i < 8; i++) { mb1.limbs[i] = GLV_MB1_LIMBS[i]; mb2.limbs[i] = GLV_MB2_LIMBS[i]; }
+    Scalar256 t1 = scalar_mul_mod_n(c1, mb1);
+    Scalar256 t2 = scalar_mul_mod_n(c2, mb2);
+    Scalar256 k2_mod = scalar_add_mod_n(t1, t2);
+
+    // Pick shorter k2
+    Scalar256 k2_neg_val = scalar_negate(k2_mod);
+    k2_neg = (scalar256_bitlen(k2_neg_val) < scalar256_bitlen(k2_mod)) ? 1 : 0;
+    Scalar256 k2_abs = k2_neg ? k2_neg_val : k2_mod;
+    Scalar256 k2_signed = k2_neg ? scalar_negate(k2_abs) : k2_abs;
+
+    // k1 = k - lambda*k2_signed mod n
+    Scalar256 lambda_s;
+    for (int i = 0; i < 8; i++) lambda_s.limbs[i] = LAMBDA_LIMBS[i];
+    Scalar256 lk2 = scalar_mul_mod_n(lambda_s, k2_signed);
+    Scalar256 k1_mod = scalar_sub_mod_n(k, lk2);
+
+    // Pick shorter k1
+    Scalar256 k1_neg_val = scalar_negate(k1_mod);
+    k1_neg = (scalar256_bitlen(k1_neg_val) < scalar256_bitlen(k1_mod)) ? 1 : 0;
+    Scalar256 k1_abs = k1_neg ? k1_neg_val : k1_mod;
+
+    k1 = k1_abs;
+    k2 = k2_abs;
+}
+
+// GLV-accelerated scalar multiplication: k*P
+// Uses interleaved binary w/ mixed additions for ~30% fewer doublings
+inline JacobianPoint scalar_mul_glv(thread const AffinePoint &base,
+                                     thread const Scalar256 &k) {
+    if (scalar256_is_zero(k)) return point_at_infinity();
+
+    Scalar256 k1, k2;
+    int k1_neg, k2_neg;
+    glv_decompose(k, k1, k2, k1_neg, k2_neg);
+
+    // Build base P, negate if k1 is negative
+    AffinePoint P = base;
+    if (k1_neg) P.y = field_negate(P.y);
+
+    // Build phi(P) = (beta*x, (+/-)y)
+    FieldElement beta;
+    for (int i = 0; i < 8; i++) beta.limbs[i] = BETA_LIMBS[i];
+    AffinePoint phiP;
+    phiP.x = field_mul(P.x, beta);
+    phiP.y = (k1_neg != k2_neg) ? field_negate(P.y) : P.y;
+
+    // Find max bit length
+    int bl1 = scalar256_bitlen(k1);
+    int bl2 = scalar256_bitlen(k2);
+    int max_bit = (bl1 > bl2) ? bl1 : bl2;
+
+    // Interleaved binary double-and-add with mixed additions
+    JacobianPoint R = point_at_infinity();
+    for (int i = max_bit - 1; i >= 0; --i) {
+        if (R.infinity == 0) R = jacobian_double(R);
+
+        uint b1 = (k1.limbs[i >> 5] >> (i & 31)) & 1u;
+        uint b2 = (k2.limbs[i >> 5] >> (i & 31)) & 1u;
+
+        if (b1) R = jacobian_add_mixed(R, P);
+        if (b2) R = jacobian_add_mixed(R, phiP);
+    }
+    return R;
+}
+
+// device address space overload
+inline JacobianPoint scalar_mul_glv(device const AffinePoint &base,
+                                     thread const Scalar256 &k) {
+    AffinePoint local_base = base;
+    return scalar_mul_glv(local_base, k);
+}
+
 // Precomputed generator multiplication (4-bit window)
 inline JacobianPoint scalar_mul_generator_windowed(thread const Scalar256 &k) {
     AffinePoint G = generator_affine();
@@ -694,10 +856,10 @@ inline bool ecdsa_verify(thread const uchar msg_hash[32], thread const JacobianP
     Scalar256 u2 = scalar_mul_mod_n(sig.r, s_inv);
 
     AffinePoint G = generator_affine();
-    JacobianPoint u1G = scalar_mul(G, u1);
+    JacobianPoint u1G = scalar_mul_glv(G, u1);
 
     AffinePoint pub_aff = jacobian_to_affine(pubkey);
-    JacobianPoint u2Q = scalar_mul(pub_aff, u2);
+    JacobianPoint u2Q = scalar_mul_glv(pub_aff, u2);
 
     JacobianPoint R = jacobian_add(u1G, u2Q);
     if (R.infinity != 0) return false;
@@ -725,6 +887,34 @@ inline void tagged_hash(thread const uchar* tag, uint tag_len,
     sha256_init(ctx);
     sha256_update(ctx, tag_hash, 32);
     sha256_update(ctx, tag_hash, 32);
+    sha256_update(ctx, data, data_len);
+    sha256_final(ctx, out);
+}
+
+// BIP-340 tagged hash midstate precomputation.
+// SHA256(tag||tag) for each BIP-340 tag is exactly 64 bytes (one block).
+// These midstates are the SHA-256 internal state after compressing that block,
+// saving 2 compressions per tagged_hash call.
+constant uint BIP340_MIDSTATES[3][8] = {
+    // "BIP0340/aux"
+    {0x24dd3219U, 0x4eba7e70U, 0xca0fabb9U, 0x0fa3166dU,
+     0x3afbe4b1U, 0x4c44df97U, 0x4aac2739U, 0x249e850aU},
+    // "BIP0340/nonce"
+    {0x46615b35U, 0xf4bfbff7U, 0x9f8dc671U, 0x83627ab3U,
+     0x60217180U, 0x57358661U, 0x21a29e54U, 0x68b07b4cU},
+    // "BIP0340/challenge"
+    {0x9cecba11U, 0x23925381U, 0x11679112U, 0xd1627e0fU,
+     0x97c87550U, 0x003cc765U, 0x90f61164U, 0x33e9b66aU},
+};
+
+inline void tagged_hash_fast(int tag_idx,
+                              thread const uchar* data, uint data_len,
+                              thread uchar out[32]) {
+    SHA256Ctx ctx;
+    for (int i = 0; i < 8; i++) ctx.h[i] = BIP340_MIDSTATES[tag_idx][i];
+    ctx.buf_len = 0;
+    ctx.total_len_lo = 64;
+    ctx.total_len_hi = 0;
     sha256_update(ctx, data, data_len);
     sha256_final(ctx, out);
 }
@@ -791,8 +981,7 @@ inline bool schnorr_sign(thread const Scalar256 &priv, thread const uchar msg[32
     field_to_bytes(P_aff.x, px_bytes);
 
     uchar t_hash[32];
-    const uchar tag_aux[] = {'B','I','P','0','3','4','0','/','a','u','x'};
-    tagged_hash(tag_aux, 11, aux_rand, 32, t_hash);
+    tagged_hash_fast(0, aux_rand, 32, t_hash);
 
     uchar d_bytes[32];
     scalar_to_bytes(d, d_bytes);
@@ -805,8 +994,7 @@ inline bool schnorr_sign(thread const Scalar256 &priv, thread const uchar msg[32
     for (int i = 0; i < 32; i++) nonce_input[64+i] = msg[i];
 
     uchar rand_hash[32];
-    const uchar tag_nonce[] = {'B','I','P','0','3','4','0','/','n','o','n','c','e'};
-    tagged_hash(tag_nonce, 13, nonce_input, 96, rand_hash);
+    tagged_hash_fast(1, nonce_input, 96, rand_hash);
 
     Scalar256 k_prime = scalar_from_bytes(rand_hash);
     if (scalar256_is_zero(k_prime)) return false;
@@ -827,8 +1015,7 @@ inline bool schnorr_sign(thread const Scalar256 &priv, thread const uchar msg[32
     for (int i = 0; i < 32; i++) challenge_input[64+i] = msg[i];
 
     uchar e_hash[32];
-    const uchar tag_chal[] = {'B','I','P','0','3','4','0','/','c','h','a','l','l','e','n','g','e'};
-    tagged_hash(tag_chal, 17, challenge_input, 96, e_hash);
+    tagged_hash_fast(2, challenge_input, 96, e_hash);
     Scalar256 e = scalar_from_bytes(e_hash);
 
     Scalar256 ed = scalar_mul_mod_n(e, d);
@@ -849,15 +1036,14 @@ inline bool schnorr_verify(thread const uchar pubkey_x[32], thread const uchar m
     for (int i = 0; i < 32; i++) challenge_input[64+i] = msg[i];
 
     uchar e_hash[32];
-    const uchar tag_chal2[] = {'B','I','P','0','3','4','0','/','c','h','a','l','l','e','n','g','e'};
-    tagged_hash(tag_chal2, 17, challenge_input, 96, e_hash);
+    tagged_hash_fast(2, challenge_input, 96, e_hash);
     Scalar256 e = scalar_from_bytes(e_hash);
 
     AffinePoint G = generator_affine();
-    JacobianPoint sG = scalar_mul(G, sig.s);
+    JacobianPoint sG = scalar_mul_glv(G, sig.s);
 
     AffinePoint p_aff = jacobian_to_affine(P);
-    JacobianPoint eP = scalar_mul(p_aff, e);
+    JacobianPoint eP = scalar_mul_glv(p_aff, e);
 
     // Negate eP
     eP.y = field_negate(eP.y);
@@ -884,7 +1070,7 @@ inline bool schnorr_verify(thread const uchar pubkey_x[32], thread const uchar m
 
 inline bool ecdh_compute_raw(thread const Scalar256 &priv, thread const AffinePoint &peer,
                               thread uchar out[32]) {
-    JacobianPoint shared = scalar_mul(peer, priv);
+    JacobianPoint shared = scalar_mul_glv(peer, priv);
     if (shared.infinity != 0) return false;
     AffinePoint shared_aff = jacobian_to_affine(shared);
     field_to_bytes(shared_aff.x, out);
@@ -1028,16 +1214,16 @@ inline bool ecdsa_recover(thread const uchar msg_hash[32], thread const ECDSASig
     Scalar256 r_inv = scalar_inverse(sig.r);
 
     AffinePoint r_aff = jacobian_to_affine(Rpt);
-    JacobianPoint sR = scalar_mul(r_aff, sig.s);
+    JacobianPoint sR = scalar_mul_glv(r_aff, sig.s);
 
     AffinePoint G = generator_affine();
-    JacobianPoint zG = scalar_mul(G, z);
+    JacobianPoint zG = scalar_mul_glv(G, z);
     zG.y = field_negate(zG.y); // negate
 
     JacobianPoint sR_minus_zG = jacobian_add(sR, zG);
 
     AffinePoint diff_aff = jacobian_to_affine(sR_minus_zG);
-    Q = scalar_mul(diff_aff, r_inv);
+    Q = scalar_mul_glv(diff_aff, r_inv);
 
     if (Q.infinity != 0) return false;
     return true;
@@ -1067,7 +1253,7 @@ inline JacobianPoint msm_naive(thread const Scalar256* scalars, thread const Aff
     JacobianPoint result = point_at_infinity();
     for (int i = 0; i < n; i++) {
         if (scalar256_is_zero(scalars[i])) continue;
-        JacobianPoint tmp = scalar_mul(points[i], scalars[i]);
+        JacobianPoint tmp = scalar_mul_glv(points[i], scalars[i]);
         result = jacobian_add(result, tmp);
     }
     return result;
@@ -1169,7 +1355,7 @@ inline bool schnorr_verify(thread const Scalar256 &msg_scalar, thread const Fiel
 // ecdh_shared_secret_xonly: returns raw x coordinate as FieldElement
 inline FieldElement ecdh_shared_secret_xonly(thread const Scalar256 &priv,
                                               thread const AffinePoint &peer) {
-    JacobianPoint shared = scalar_mul(peer, priv);
+    JacobianPoint shared = scalar_mul_glv(peer, priv);
     AffinePoint shared_aff = jacobian_to_affine(shared);
     return shared_aff.x;
 }
