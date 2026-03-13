@@ -257,7 +257,6 @@ static void test_range_proof_generators() {
     CHECK(g0 != h0, "G_and_H_generators_differ");
 
     // All generators should be distinct
-    bool all_distinct = true;
     auto g1 = gens.G[1].to_compressed();
     CHECK(g0 != g1, "G0_differs_from_G1");
 }

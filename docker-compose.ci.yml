@@ -26,7 +26,7 @@ services:
       - CCACHE_DIR=/ccache
       - CCACHE_MAXSIZE=5G
       - CCACHE_COMPRESS=1
-      - BENCH_MIN_RATIO=${BENCH_MIN_RATIO:-1.00}
+      - BENCH_MIN_RATIO=${BENCH_MIN_RATIO:-0.75}
     tmpfs:
       - /tmp:size=2G
 

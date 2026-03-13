@@ -325,11 +325,13 @@ const GeneratorVectors& get_generator_vectors() {
 // ============================================================================
 
 // Helper: hash point for Fiat-Shamir transcript
+[[maybe_unused]]
 static void transcript_append_point(SHA256& ctx, const Point& p) {
     auto comp = p.to_compressed();
     ctx.update(comp.data(), 33);
 }
 
+[[maybe_unused]]
 static void transcript_append_scalar(SHA256& ctx, const Scalar& s) {
     auto bytes = s.to_bytes();
     ctx.update(bytes.data(), 32);
@@ -674,10 +676,6 @@ bool range_verify(const PedersenCommitment& commitment,
         s_coeff[0] = s_coeff[0] * x_inv_rounds[j];
 
     for (std::size_t i = 1; i < RANGE_PROOF_BITS; ++i) {
-        // Find lowest set bit that changed from i-1 to i
-        std::size_t bit = 0;
-        while (!((i >> bit) & 1)) ++bit;
-        std::size_t j = RANGE_PROOF_LOG2 - 1 - bit;
         // s[i] = s[i-1] * x_rounds[j] / x_inv_rounds[j] = s[i-1] * x_rounds[j]^2
         // But we also need to undo all lower bits that went from 1->0
         // Simpler: s[i] = s[i & (i-1)] * x_rounds[j]^2 ... actually

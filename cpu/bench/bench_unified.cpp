@@ -1711,11 +1711,13 @@ int main(int argc, char** argv) {
     secp256k1_ecdsa_signature  ls_esigs[POOL];
     unsigned char              ls_schnorr_sigs[POOL][64];
 
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wunused-result"
     for (int i = 0; i < POOL; ++i) {
         auto const h = make_hash(0xdeadbeef00ULL + static_cast<uint64_t>(i));
         std::memcpy(ls_seckeys[i], h.data(), 32);
-        secp256k1_ec_pubkey_create(ls_ctx, &ls_pubkeys[i], ls_seckeys[i]);
-        secp256k1_keypair_create(ls_ctx, &ls_keypairs[i], ls_seckeys[i]);
+        (void)secp256k1_ec_pubkey_create(ls_ctx, &ls_pubkeys[i], ls_seckeys[i]);
+        (void)secp256k1_keypair_create(ls_ctx, &ls_keypairs[i], ls_seckeys[i]);
         secp256k1_keypair_xonly_pub(ls_ctx, &ls_xonly[i], NULL, &ls_keypairs[i]);
 
         auto const mh = make_hash(0xcafebabe00ULL + static_cast<uint64_t>(i));
@@ -1751,7 +1753,7 @@ int main(int argc, char** argv) {
     idx = 0;
     const double ls_gen = bench_ns([&]() {
         secp256k1_pubkey pk;
-        secp256k1_ec_pubkey_create(ls_ctx, &pk, ls_seckeys[idx % POOL]);
+        (void)secp256k1_ec_pubkey_create(ls_ctx, &pk, ls_seckeys[idx % POOL]);
         bench::DoNotOptimize(pk); ++idx;
     }, N_KEYGEN);
 
@@ -1796,8 +1798,8 @@ int main(int argc, char** argv) {
     idx = 0;
     const double ls_recover = bench_ns([&]() {
         secp256k1_pubkey pk;
-        secp256k1_ecdsa_recover(ls_ctx, &pk, &ls_rec_sigs[idx % POOL],
-                                ls_msgs[idx % POOL]);
+        (void)secp256k1_ecdsa_recover(ls_ctx, &pk, &ls_rec_sigs[idx % POOL],
+                                      ls_msgs[idx % POOL]);
         bench::DoNotOptimize(pk); ++idx;
     }, N_VERIFY);
 #else
@@ -1809,7 +1811,7 @@ int main(int argc, char** argv) {
     idx = 0;
     const double ls_schnorr_kp = bench_ns([&]() {
         secp256k1_keypair kp;
-        secp256k1_keypair_create(ls_ctx, &kp, ls_seckeys[idx % POOL]);
+        (void)secp256k1_keypair_create(ls_ctx, &kp, ls_seckeys[idx % POOL]);
         bench::DoNotOptimize(kp); ++idx;
     }, N_KEYGEN);
 
@@ -1837,8 +1839,8 @@ int main(int argc, char** argv) {
     idx = 0;
     const double ls_kP = bench_ns([&]() {
         secp256k1_pubkey pk_copy = ls_pubkeys[idx % POOL];
-        secp256k1_ec_pubkey_tweak_mul(ls_ctx, &pk_copy,
-                                      ls_seckeys[(idx + 1) % POOL]);
+        (void)secp256k1_ec_pubkey_tweak_mul(ls_ctx, &pk_copy,
+                                             ls_seckeys[(idx + 1) % POOL]);
         bench::DoNotOptimize(pk_copy); ++idx;
     }, N_SCALAR);
 
@@ -1873,9 +1875,10 @@ int main(int argc, char** argv) {
             &ls_pubkeys[idx % POOL],
             &ls_pubkeys[(idx + 1) % POOL]
         };
-        secp256k1_ec_pubkey_combine(ls_ctx, &result, ins, 2);
+        (void)secp256k1_ec_pubkey_combine(ls_ctx, &result, ins, 2);
         bench::DoNotOptimize(result); ++idx;
     }, N_POINT);
+#pragma GCC diagnostic pop
 
     // -----------------------------------------------------------------
     //  libsecp MICRO-BENCHMARKS: internal field/scalar/point primitives

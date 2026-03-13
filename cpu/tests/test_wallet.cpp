@@ -70,7 +70,7 @@ static void hex_to_bytes(const char* hex, uint8_t* out, size_t len) {
     }
 }
 
-static std::string bytes_to_hex(const uint8_t* data, size_t len) {
+[[maybe_unused]] static std::string bytes_to_hex(const uint8_t* data, size_t len) {
     static const char hex[] = "0123456789abcdef";
     std::string result;
     result.reserve(len * 2);
