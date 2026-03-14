@@ -208,11 +208,11 @@ jobs:
           # No '|| true' -- this is a hard gate: any MSan error fails the job.
           #
           # Heavy audit tests (differential, fault_injection, fiat_crypto_vectors,
-          # debug_invariants, carry_propagation, wycheproof_ecdsa) are excluded
-          # because they exceed their CTest timeouts under MSan overhead.
-          # These tests are still verified under ASan+UBSan and Valgrind.
+          # debug_invariants, carry_propagation, batch_randomness, wycheproof_*)
+          # are excluded because they exceed their CTest timeouts under MSan
+          # overhead (~10-20x). These tests are verified under ASan+UBSan and Valgrind.
           ctest --test-dir build --output-on-failure -j"$(nproc)" \
-            -E "^(ct_sidechannel|selftest|unified_audit|differential|fault_injection|fiat_crypto_vectors|debug_invariants|carry_propagation|wycheproof_ecdsa|wycheproof_ecdh)" --timeout 7200
+            -E "^(ct_sidechannel|selftest|unified_audit|differential|fault_injection|fiat_crypto_vectors|debug_invariants|carry_propagation|batch_randomness|wycheproof_ecdsa|wycheproof_ecdh)" --timeout 7200
 
   # ── Thread Sanitizer (data races) ───────────────────────────────────────
   tsan:
