@@ -152,6 +152,7 @@ MessageSignature sign_message(const CoinParams& coin, const WalletKey& key,
 
 MessageSignature sign_hash(const CoinParams& coin, const WalletKey& key,
                            const std::uint8_t* hash32) {
+    if (!hash32) return {};
     std::array<std::uint8_t, 32> hash;
     std::memcpy(hash.data(), hash32, 32);
 

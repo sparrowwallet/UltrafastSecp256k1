@@ -150,7 +150,7 @@ jobs:
           cmake -G Ninja -S /tmp/llvm-project/runtimes -B /tmp/msan-libcxx-build \
             -DCMAKE_C_COMPILER=clang-17 \
             -DCMAKE_CXX_COMPILER=clang++-17 \
-            -DLLVM_ENABLE_RUNTIMES="libcxx;libcxxabi;libunwind" \
+            -DLLVM_ENABLE_RUNTIMES="libcxx;libcxxabi" \
             -DCMAKE_BUILD_TYPE=Release \
             -DLLVM_USE_SANITIZER=MemoryWithOrigins
           cmake --build /tmp/msan-libcxx-build -j"$(nproc)" -- cxx cxxabi
