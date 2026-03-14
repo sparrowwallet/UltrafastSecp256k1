@@ -140,7 +140,7 @@ jobs:
         uses: actions/cache@cdf6c1fa76f9f475f3d7449005a359c84ca0f306 # v5.0.3
         with:
           path: /tmp/msan-libcxx
-          key: msan-libcxx-clang17-v2
+          key: msan-libcxx-clang17-v3
 
       - name: Build MSan-instrumented libc++
         if: steps.msan-libcxx-cache.outputs.cache-hit != 'true'
@@ -155,8 +155,14 @@ jobs:
             -DLLVM_USE_SANITIZER=MemoryWithOrigins \
             -DLIBCXX_ENABLE_EXPERIMENTAL_LIBRARY=OFF
           cmake --build /tmp/msan-libcxx-build -j"$(nproc)" -- cxx cxxabi
-          # Install to a persistent path for caching
-          DESTDIR=/tmp/msan-libcxx cmake --install /tmp/msan-libcxx-build --prefix /usr
+          # Install to a persistent path for caching.
+          # LLVM 17 runtimes build ignores LIBCXX_ENABLE_EXPERIMENTAL_LIBRARY=OFF
+          # in the install manifest, so the install fails trying to copy the
+          # unbuilt libc++experimental.a.  Tolerate that error and verify the
+          # libraries we actually need are present.
+          DESTDIR=/tmp/msan-libcxx cmake --install /tmp/msan-libcxx-build --prefix /usr || true
+          test -f /tmp/msan-libcxx/usr/lib/libc++.a
+          test -f /tmp/msan-libcxx/usr/lib/libc++abi.a
           rm -rf /tmp/llvm-project /tmp/msan-libcxx-build
 
       - name: Cache ccache
