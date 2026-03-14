@@ -185,7 +185,8 @@ static void test_ecies_tamper_matrix(ufsecp_ctx* ctx) {
 
     for (auto& f : fields) {
         auto tampered = envelope;
-        tampered[f.offset] ^= 0x01; // flip one bit
+        if (f.offset < tampered.size())
+            tampered[f.offset] ^= 0x01; // flip one bit
 
         size_t pt_len = ct_len;
         std::vector<uint8_t> pt_out(pt_len);

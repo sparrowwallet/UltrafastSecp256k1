@@ -3103,7 +3103,7 @@ Point Point::dual_scalar_mul_gen_point(const Scalar& a, const Scalar& b, const P
 
         // Helper: build odd-multiple table for base point B using effective-affine
         auto build_table = [](const JacobianPoint52& B,
-                              AffinePointCompact* out, int count) {
+                              AffinePointCompact* out, std::size_t count) {
             // d = 2*B, work on isomorphic curve where d is affine
             JacobianPoint52 const d = jac52_double(B);
             FieldElement52 const C  = d.z;
@@ -3112,32 +3112,32 @@ Point Point::dual_scalar_mul_gen_point(const Scalar& a, const Scalar& b, const P
             AffinePoint52 const d_aff = {d.x, d.y};
 
             // iso[0] = phi(B) = (B.x*C^2, B.y*C^3, B.z) on iso curve
-            auto* iso = new JacobianPoint52[static_cast<std::size_t>(count)];
+            auto* iso = new JacobianPoint52[count];
             iso[0] = {B.x * C2, B.y * C3, B.z, false};
-              for (auto i = static_cast<std::size_t>(1); i < static_cast<std::size_t>(count); i++) {
+              for (std::size_t i = 1; i < count; i++) {
                 iso[i] = iso[i - 1];
                 jac52_add_mixed_inplace(iso[i], d_aff);
             }
 
             // Batch-invert effective Z = Z_iso * C
-            auto* eff_z = new FieldElement52[static_cast<std::size_t>(count)];
-            for (auto i = static_cast<std::size_t>(0); i < static_cast<std::size_t>(count); i++) {
+            auto* eff_z = new FieldElement52[count];
+            for (std::size_t i = 0; i < count; i++) {
                 eff_z[i] = iso[i].z * C;
             }
-            auto* prods = new FieldElement52[static_cast<std::size_t>(count)];
+            auto* prods = new FieldElement52[count];
             prods[0] = eff_z[0];
-            for (std::size_t i = 1; i < static_cast<std::size_t>(count); i++) {
+            for (std::size_t i = 1; i < count; i++) {
                 prods[i] = prods[i - 1] * eff_z[i];
             }
             FieldElement52 inv = prods[count - 1].inverse_safegcd();
-            auto* zs = new FieldElement52[static_cast<std::size_t>(count)];
-            for (std::size_t i = static_cast<std::size_t>(count) - 1; i > 0; --i) {
+            auto* zs = new FieldElement52[count];
+            for (std::size_t i = count - 1; i > 0; --i) {
                 zs[i] = prods[i - 1] * inv;
                 inv = inv * eff_z[i];
             }
             zs[0] = inv;
 
-            for (std::size_t i = 0; i < static_cast<std::size_t>(count); i++) {
+            for (std::size_t i = 0; i < count; i++) {
                 FieldElement52 const zinv2 = zs[i].square();
                 FieldElement52 const zinv3 = zinv2 * zs[i];
                 AffinePoint52 const aff = {iso[i].x * zinv2, iso[i].y * zinv3};

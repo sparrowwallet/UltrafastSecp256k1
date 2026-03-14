@@ -433,8 +433,8 @@ Scalar rfc6979_nonce_hedged(const Scalar& private_key,
 
 ECDSASignature ecdsa_sign(const std::array<uint8_t, 32>& msg_hash,
                           const Scalar& private_key) {
-    SECP_ASSERT_SCALAR_VALID(private_key);
     if (private_key.is_zero()) return {Scalar::zero(), Scalar::zero()};
+    SECP_ASSERT_SCALAR_VALID(private_key);
 
     // z = message hash interpreted as scalar
     auto z = Scalar::from_bytes(msg_hash);

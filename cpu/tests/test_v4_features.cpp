@@ -249,9 +249,6 @@ static void test_frost_2of3_signing() {
     auto sig = frost_aggregate(partials, nonce_comms, pkg1.group_public_key, msg);
 
     // Verify with standard schnorr_verify
-    auto gpk_x = schnorr_pubkey(Scalar::zero()); // we need x-only of group key
-    (void)gpk_x;
-    // Actually just get x-only from group key:
     auto group_x = pkg1.group_public_key.x().to_bytes();
     bool const valid = schnorr_verify(group_x, msg, sig);
     CHECK(valid, "frost_2of3_signature_valid");

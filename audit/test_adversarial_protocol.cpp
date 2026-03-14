@@ -1211,8 +1211,6 @@ static void test_hostile_btc_message() {
     ufsecp_ctx_create(&ctx);
 
     uint8_t buf[256] = {};
-    uint8_t sig[65];
-    char addr[128]; size_t addr_len = sizeof(addr);
 
     // btc_message_sign: null ctx
     char base64[128]; size_t base64_len = sizeof(base64);

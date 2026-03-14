@@ -361,7 +361,8 @@ ecies_decrypt(const Scalar& privkey,
 
     // Constant-time compare
     std::uint8_t diff = 0;
-    for (int i = 0; i < 32; ++i) diff |= expected_tag[i] ^ tag[i];
+    for (int i = 0; i < 32; ++i)
+        diff = static_cast<std::uint8_t>(diff | (expected_tag[i] ^ tag[i]));
     if (diff != 0) {
         secp256k1::detail::secure_erase(kdf.data(), 64);
         return {}; // Authentication failed
