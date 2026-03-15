@@ -611,39 +611,43 @@ def populate_source_files(cur: sqlite3.Cursor):
     return count
 
 def populate_abi_functions(cur: sqlite3.Cursor):
-    """Parse ufsecp.h for all C ABI function declarations."""
-    header = LIB_ROOT / 'include' / 'ufsecp' / 'ufsecp.h'
-    if not header.exists():
-        return 0
+    """Parse ufsecp.h and ufsecp_version.h for all C ABI function declarations."""
+    headers = [
+        LIB_ROOT / 'include' / 'ufsecp' / 'ufsecp.h',
+        LIB_ROOT / 'include' / 'ufsecp' / 'ufsecp_version.h',
+    ]
     count = 0
-    with open(header, 'r') as f:
-        lines = f.readlines()
-    
-    i = 0
-    while i < len(lines):
-        line = lines[i]
-        # Match UFSECP_API function declarations
-        m = re.match(r'UFSECP_API\s+(\w[\w\s*]*?)\s+(ufsecp_\w+)\s*\(', line)
-        if m:
-            ret_type = m.group(1).strip()
-            func_name = m.group(2)
-            # Collect full signature
-            sig = line.strip()
-            j = i + 1
-            while j < len(lines) and ';' not in sig:
-                sig += ' ' + lines[j].strip()
-                j += 1
-            sig = re.sub(r'\s+', ' ', sig).strip().rstrip(';')
-            
-            cat = categorize_abi_func(func_name)
-            layer = abi_layer(func_name)
-            
-            cur.execute("""INSERT OR IGNORE INTO c_abi_functions
-                (name, category, signature, line_no, layer)
-                VALUES (?,?,?,?,?)""",
-                (func_name, cat, sig, i+1, layer))
-            count += 1
-        i += 1
+    for header in headers:
+        if not header.exists():
+            continue
+        with open(header, 'r') as f:
+            lines = f.readlines()
+        
+        i = 0
+        while i < len(lines):
+            line = lines[i]
+            # Match UFSECP_API function declarations
+            m = re.match(r'UFSECP_API\s+(\w[\w\s*]*?)\s+(ufsecp_\w+)\s*\(', line)
+            if m:
+                ret_type = m.group(1).strip()
+                func_name = m.group(2)
+                # Collect full signature
+                sig = line.strip()
+                j = i + 1
+                while j < len(lines) and ';' not in sig:
+                    sig += ' ' + lines[j].strip()
+                    j += 1
+                sig = re.sub(r'\s+', ' ', sig).strip().rstrip(';')
+                
+                cat = categorize_abi_func(func_name)
+                layer = abi_layer(func_name)
+                
+                cur.execute("""INSERT OR IGNORE INTO c_abi_functions
+                    (name, category, signature, line_no, layer)
+                    VALUES (?,?,?,?,?)""",
+                    (func_name, cat, sig, i+1, layer))
+                count += 1
+            i += 1
     return count
 
 def populate_include_deps(cur: sqlite3.Cursor):

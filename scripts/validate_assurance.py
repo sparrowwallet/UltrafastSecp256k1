@@ -29,27 +29,31 @@ RESET = '\033[0m'
 
 
 def scan_header_functions():
-    """Extract all ufsecp_* function names from ufsecp.h."""
-    header = LIB_ROOT / 'include' / 'ufsecp' / 'ufsecp.h'
-    if not header.exists():
-        return set(), set()
-    fn_re = re.compile(r'\b(ufsecp_\w+)\s*\(')
+    """Extract all ufsecp_* function names from public headers."""
+    headers = [
+        LIB_ROOT / 'include' / 'ufsecp' / 'ufsecp.h',
+        LIB_ROOT / 'include' / 'ufsecp' / 'ufsecp_version.h',
+    ]
+    api_re = re.compile(r'UFSECP_API\s+.*?(ufsecp_\w+)\s*\(')
     all_fns = set()
     conditional_fns = set()
-    in_conditional = False
-    with open(header, 'r', errors='replace') as f:
-        for line in f:
-            stripped = line.strip()
-            if stripped.startswith('#ifdef') or stripped.startswith('#if '):
-                in_conditional = True
-            elif stripped.startswith('#endif'):
-                in_conditional = False
-            m = fn_re.search(line)
-            if m:
-                name = m.group(1)
-                all_fns.add(name)
-                if in_conditional:
-                    conditional_fns.add(name)
+    for header in headers:
+        if not header.exists():
+            continue
+        in_conditional = False
+        with open(header, 'r', errors='replace') as f:
+            for line in f:
+                stripped = line.strip()
+                if stripped.startswith('#ifdef') or stripped.startswith('#if '):
+                    in_conditional = True
+                elif stripped.startswith('#endif'):
+                    in_conditional = False
+                m = api_re.search(line)
+                if m:
+                    name = m.group(1)
+                    all_fns.add(name)
+                    if in_conditional:
+                        conditional_fns.add(name)
     return all_fns, conditional_fns
 
 

@@ -15,12 +15,19 @@
 
 ---
 
-## 1. Context Management (7 functions)
+## 1. Context Management (9 functions)
 
 | Function | Unit Test | Fuzz | Adversarial | Differential | CT Path | GPU | Ext. Vectors | Zeroization |
 |----------|-----------|------|-------------|--------------|---------|-----|-------------|-------------|
 | `ufsecp_abi_version` | Y | - | - | N/A | N/A | - | N/A | N/A |
+| `ufsecp_version` | Y | - | - | N/A | N/A | - | N/A | N/A |
+| `ufsecp_version_string` | Y | - | - | N/A | N/A | - | N/A | N/A |
 | `ufsecp_ctx_create` | Y | Y | Y (null) | N/A | N/A | - | N/A | N/A |
+| `ufsecp_ctx_clone` | Y | - | Y (null) | N/A | N/A | - | N/A | N/A |
+| `ufsecp_ctx_destroy` | Y | Y | Y (null-safe) | N/A | N/A | - | N/A | N/A |
+| `ufsecp_last_error` | Y | - | - | N/A | N/A | - | N/A | N/A |
+| `ufsecp_last_error_msg` | Y | - | - | N/A | N/A | - | N/A | N/A |
+| `ufsecp_ctx_size` | Y | - | - | N/A | N/A | - | N/A | N/A |
 | `ufsecp_ctx_clone` | Y | - | Y (null) | N/A | N/A | - | N/A | N/A |
 | `ufsecp_ctx_destroy` | Y | Y | Y (null-safe) | N/A | N/A | - | N/A | N/A |
 | `ufsecp_last_error` | Y | - | - | N/A | N/A | - | N/A | N/A |

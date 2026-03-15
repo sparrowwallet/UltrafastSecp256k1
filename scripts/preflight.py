@@ -242,16 +242,17 @@ def check_abi_surface():
     for r in rows:
         known.add(r['name'])
 
-    # Scan actual header
+    # Scan actual headers (ufsecp.h + ufsecp_version.h)
     actual = set()
-    header = LIB_ROOT / 'include' / 'ufsecp' / 'ufsecp.h'
-    if header.exists():
-        fn_re = re.compile(r'\b(ufsecp_\w+)\s*\(')
-        with open(header, 'r', errors='replace') as f:
-            for line in f:
-                m = fn_re.search(line)
-                if m:
-                    actual.add(m.group(1))
+    fn_re = re.compile(r'UFSECP_API\s+.*?(ufsecp_\w+)\s*\(')
+    for hdr_name in ('ufsecp.h', 'ufsecp_version.h'):
+        header = LIB_ROOT / 'include' / 'ufsecp' / hdr_name
+        if header.exists():
+            with open(header, 'r', errors='replace') as f:
+                for line in f:
+                    m = fn_re.search(line)
+                    if m:
+                        actual.add(m.group(1))
 
     added = actual - known
     removed = known - actual

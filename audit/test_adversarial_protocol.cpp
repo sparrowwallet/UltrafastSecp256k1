@@ -2615,42 +2615,42 @@ static void test_ffi_invalid_enums() {
     char addr_buf[128];
     size_t addr_len = sizeof(addr_buf);
 
-    // Invalid network codes for p2pkh_address
+    // Invalid network codes for addr_p2pkh
     {
         // network = -1 (negative)
-        ufsecp_error_t rc = ufsecp_p2pkh_address(ctx, pub33, -1, addr_buf, &addr_len);
+        ufsecp_error_t rc = ufsecp_addr_p2pkh(ctx, pub33, -1, addr_buf, &addr_len);
         CHECK(rc != UFSECP_OK || addr_len > 0,
               "p2pkh with network=-1 did not crash");
 
         // network = 999 (out of range)
         addr_len = sizeof(addr_buf);
-        rc = ufsecp_p2pkh_address(ctx, pub33, 999, addr_buf, &addr_len);
+        rc = ufsecp_addr_p2pkh(ctx, pub33, 999, addr_buf, &addr_len);
         CHECK(rc != UFSECP_OK || addr_len > 0,
               "p2pkh with network=999 did not crash");
     }
 
-    // Invalid network codes for p2wpkh_address
+    // Invalid network codes for addr_p2wpkh
     {
         addr_len = sizeof(addr_buf);
-        ufsecp_error_t rc = ufsecp_p2wpkh_address(ctx, pub33, -1, addr_buf, &addr_len);
+        ufsecp_error_t rc = ufsecp_addr_p2wpkh(ctx, pub33, -1, addr_buf, &addr_len);
         CHECK(rc != UFSECP_OK || addr_len > 0,
               "p2wpkh with network=-1 did not crash");
 
         addr_len = sizeof(addr_buf);
-        rc = ufsecp_p2wpkh_address(ctx, pub33, 999, addr_buf, &addr_len);
+        rc = ufsecp_addr_p2wpkh(ctx, pub33, 999, addr_buf, &addr_len);
         CHECK(rc != UFSECP_OK || addr_len > 0,
               "p2wpkh with network=999 did not crash");
     }
 
-    // Invalid network codes for p2tr_address
+    // Invalid network codes for addr_p2tr
     {
         addr_len = sizeof(addr_buf);
-        ufsecp_error_t rc = ufsecp_p2tr_address(ctx, pub33, -1, addr_buf, &addr_len);
+        ufsecp_error_t rc = ufsecp_addr_p2tr(ctx, pub33, -1, addr_buf, &addr_len);
         CHECK(rc != UFSECP_OK || addr_len > 0,
               "p2tr with network=-1 did not crash");
 
         addr_len = sizeof(addr_buf);
-        rc = ufsecp_p2tr_address(ctx, pub33, 999, addr_buf, &addr_len);
+        rc = ufsecp_addr_p2tr(ctx, pub33, 999, addr_buf, &addr_len);
         CHECK(rc != UFSECP_OK || addr_len > 0,
               "p2tr with network=999 did not crash");
     }
@@ -2677,14 +2677,14 @@ static void test_ffi_invalid_enums() {
     // INT32_MAX and INT32_MIN for network code
     {
         addr_len = sizeof(addr_buf);
-        ufsecp_error_t rc = ufsecp_p2pkh_address(ctx, pub33, 0x7FFFFFFF,
-                                                   addr_buf, &addr_len);
+        ufsecp_error_t rc = ufsecp_addr_p2pkh(ctx, pub33, 0x7FFFFFFF,
+                                               addr_buf, &addr_len);
         CHECK(rc != UFSECP_OK || addr_len > 0,
               "p2pkh with INT32_MAX network did not crash");
 
         addr_len = sizeof(addr_buf);
-        rc = ufsecp_p2pkh_address(ctx, pub33, static_cast<int>(0x80000000u),
-                                  addr_buf, &addr_len);
+        rc = ufsecp_addr_p2pkh(ctx, pub33, static_cast<int>(0x80000000u),
+                               addr_buf, &addr_len);
         CHECK(rc != UFSECP_OK || addr_len > 0,
               "p2pkh with INT32_MIN network did not crash");
     }
