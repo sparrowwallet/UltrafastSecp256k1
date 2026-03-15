@@ -107,6 +107,7 @@
 | `metal/app/metal_test.mm` | Metal | `secp256k1_metal_test`: shader correctness, compute pipeline |
 | `metal/app/bench_metal.mm` | Metal | `secp256k1_metal_bench_full`: comprehensive Metal benchmark |
 | `compat/libsecp256k1_shim/tests/shim_test.cpp` | CPU | `secp256k1_shim_test`: libsecp256k1 API compatibility shim |
+| `audit/test_gpu_abi_gate.cpp` | GPU (all) | `gpu_abi_gate`: GPU C ABI surface test -- discovery, lifecycle, NULL safety, error strings, generator_mul equivalence |
 
 ---
 

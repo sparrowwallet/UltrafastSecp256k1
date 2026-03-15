@@ -121,6 +121,19 @@ target_compile_definitions(test_abi_gate PRIVATE STANDALONE_TEST)
 add_test(NAME abi_gate COMMAND test_abi_gate)
 set_tests_properties(abi_gate PROPERTIES TIMEOUT 30)
 
+# -- GPU ABI gate (requires ufsecp with GPU impl linked) -------------------
+if(TARGET ufsecp_static)
+    add_executable(test_gpu_abi_gate test_gpu_abi_gate.cpp)
+    target_link_libraries(test_gpu_abi_gate PRIVATE ufsecp_static)
+    target_include_directories(test_gpu_abi_gate PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/../include
+        ${CMAKE_BINARY_DIR}/include/ufsecp    # ufsecp_version.h
+    )
+    target_compile_definitions(test_gpu_abi_gate PRIVATE STANDALONE_TEST)
+    add_test(NAME gpu_abi_gate COMMAND test_gpu_abi_gate)
+    set_tests_properties(gpu_abi_gate PROPERTIES TIMEOUT 60)
+endif()
+
 # -- Formal CT verification via Valgrind/MSAN (Track I5-1) ----------------
 add_executable(test_ct_verif_formal_standalone test_ct_verif_formal.cpp)
 audit_target_defaults(test_ct_verif_formal_standalone)

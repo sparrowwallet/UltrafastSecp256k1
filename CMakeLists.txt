@@ -260,6 +260,12 @@ if(SECP256K1_BUILD_EXAMPLES)
     add_subdirectory(examples)
 endif()
 
+# -- GPU Host Ops Layer (Layer 2) -------------------------------------------
+# Must be after cuda/, opencl/, metal/ so backend targets exist.
+if(SECP256K1_BUILD_CUDA OR SECP256K1_BUILD_OPENCL OR SECP256K1_BUILD_METAL)
+    add_subdirectory(gpu)
+endif()
+
 # -- Stable C ABI layer (ufsecp_*) -----------------------------------------
 # Built before audit/ so that ufsecp_static is available for fuzz tests.
 option(SECP256K1_BUILD_CABI "Build the stable ufsecp_* C ABI library" ON)

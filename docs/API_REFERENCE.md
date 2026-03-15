@@ -2132,6 +2132,44 @@ Available when built with `-DSECP256K1_BUILD_ETHEREUM=ON` (default ON).
 | `ufsecp_eth_sign` | `(ctx, msg32, privkey, r_out, s_out, v_out*, chain_id) -> error_t` | ECDSA with recovery (EIP-155 v) |
 | `ufsecp_eth_ecrecover` | `(ctx, msg32, r, s, v, addr20_out) -> error_t` | Recover address from v,r,s |
 
+<a id="c-abi-gpu"></a>
+### GPU Operations
+
+Backend-neutral GPU acceleration surface. All functions use opaque `ufsecp_gpu_ctx*` (separate from CPU `ufsecp_ctx*`). Include `<ufsecp/ufsecp_gpu.h>`.
+
+**GPU Error Codes** (100--106): `UFSECP_ERR_GPU_UNAVAILABLE` (100), `UFSECP_ERR_GPU_DEVICE` (101), `UFSECP_ERR_GPU_LAUNCH` (102), `UFSECP_ERR_GPU_MEMORY` (103), `UFSECP_ERR_GPU_UNSUPPORTED` (104), `UFSECP_ERR_GPU_BACKEND` (105), `UFSECP_ERR_GPU_QUEUE` (106).
+
+#### Discovery
+
+| Function | Signature | Description |
+|----------|-----------|-------------|
+| `ufsecp_gpu_backend_count` | `(ids_out*, max) -> uint32_t` | Number of compiled backends; optionally fills array |
+| `ufsecp_gpu_backend_name` | `(bid) -> const char*` | Human-readable backend name ("CUDA", "OpenCL", "Metal") |
+| `ufsecp_gpu_is_available` | `(bid) -> int` | 1 if backend has >= 1 usable device, 0 otherwise |
+| `ufsecp_gpu_device_count` | `(bid) -> uint32_t` | Devices visible to backend `bid` |
+| `ufsecp_gpu_device_info` | `(bid, dev, info_out*) -> error_t` | Fill `ufsecp_gpu_device_info_t` (name, memory, CUs, clock) |
+
+#### Context Lifecycle
+
+| Function | Signature | Description |
+|----------|-----------|-------------|
+| `ufsecp_gpu_ctx_create` | `(ctx_out**, bid, dev) -> error_t` | Create GPU context on backend `bid`, device `dev` |
+| `ufsecp_gpu_ctx_destroy` | `(ctx*) -> void` | Destroy context (NULL-safe) |
+| `ufsecp_gpu_last_error` | `(ctx*) -> error_t` | Last error code from `ctx` |
+| `ufsecp_gpu_last_error_msg` | `(ctx*) -> const char*` | Last error message string |
+| `ufsecp_gpu_error_str` | `(code) -> const char*` | Error code to string (CPU + GPU codes) |
+
+#### Batch Operations (First Wave)
+
+| Function | Signature | Description |
+|----------|-----------|-------------|
+| `ufsecp_gpu_generator_mul_batch` | `(ctx, scalars32[], n, pubkeys33_out[]) -> error_t` | k*G for n scalars |
+| `ufsecp_gpu_ecdsa_verify_batch` | `(ctx, msgs32[], pubs33[], sigs64[], n, results_out[]) -> error_t` | ECDSA batch verify |
+| `ufsecp_gpu_schnorr_verify_batch` | `(ctx, msgs32[], pubs_x32[], sigs64[], n, results_out[]) -> error_t` | Schnorr/BIP-340 batch verify |
+| `ufsecp_gpu_ecdh_batch` | `(ctx, privkeys32[], pubs33[], n, secrets32_out[]) -> error_t` | ECDH shared secrets (SECRET-BEARING) |
+| `ufsecp_gpu_hash160_pubkey_batch` | `(ctx, pubs33[], n, hashes20_out[]) -> error_t` | SHA-256 + RIPEMD-160 of pubkeys |
+| `ufsecp_gpu_msm` | `(ctx, scalars32[], points33[], n, result33_out) -> error_t` | Multi-scalar multiplication |
+
 ---
 
 ## Performance Tips

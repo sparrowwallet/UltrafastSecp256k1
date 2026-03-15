@@ -122,6 +122,17 @@ Each feature is rated by: implementation status, threat model coverage, test vec
 | ABI gate (version + struct size) | Y | ABI break detection | abi_gate test | - | - | N/A | Production |
 | Error codes (10 variants) | Y | All paths return correct code | FFI round-trip | - | - | N/A | Production |
 
+## GPU C ABI Layer
+
+| Feature | Status | Threat Model | Test Vectors | Fuzzed | GPU | Secret-Safe | Tier |
+|---------|--------|-------------|-------------|--------|-----|-------------|------|
+| 16 ufsecp_gpu_* functions | Y | NULL ctx/args, invalid backend, bad device | 39 assertions (gpu_abi_gate) | - | All backends | ECDH marked SECRET-BEARING | Hardened |
+| GPU error codes (100-106) | Y | Unknown code mapping | error_str coverage | - | N/A | N/A | Production |
+| Backend discovery (3 backends) | Y | No device present | Enumerate + probe | - | CUDA/OpenCL/Metal | N/A | Production |
+| generator_mul_batch | Y | NULL buffers, count=0 | 1*G == G equivalence | - | OpenCL+CUDA | N/A (public) | Hardened |
+| Batch verify (ECDSA/Schnorr) | Y | - | - | - | CUDA only | N/A (public) | Experimental |
+| ECDH/Hash160/MSM batch | Y | - | - | - | Partial | ECDH secret-bearing | Experimental |
+
 ---
 
 ## Cross-Reference

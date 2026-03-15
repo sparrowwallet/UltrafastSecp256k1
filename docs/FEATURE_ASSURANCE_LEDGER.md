@@ -462,6 +462,40 @@
 
 ---
 
+## 26. GPU C ABI (`ufsecp_gpu_*`) -- 16 functions
+
+Backend-neutral GPU acceleration surface (`ufsecp_gpu.h`). Separate opaque context (`ufsecp_gpu_ctx*`).
+
+### Discovery & Lifecycle
+
+| Function | Unit Test | Negative/NULL | Error Strings | Notes |
+|----------|-----------|---------------|---------------|-------|
+| `ufsecp_gpu_backend_count` | Y | Y (empty output) | N/A | Returns compiled backend IDs |
+| `ufsecp_gpu_backend_name` | Y | Y (invalid ID → "none") | N/A | CUDA/OpenCL/Metal/none |
+| `ufsecp_gpu_is_available` | Y | Y (invalid ID → 0) | N/A | Runtime probe |
+| `ufsecp_gpu_device_count` | Y | Y (invalid ID → 0) | N/A | Per-backend device count |
+| `ufsecp_gpu_device_info` | Y | Y (NULL info, invalid dev) | N/A | Name, memory, CUs, clock |
+| `ufsecp_gpu_ctx_create` | Y | Y (NULL ctx_out, invalid bid, bad dev) | N/A | Returns ERR_GPU_UNAVAILABLE |
+| `ufsecp_gpu_ctx_destroy` | Y | Y (NULL safe) | N/A | delete + shutdown |
+| `ufsecp_gpu_last_error` | Y | Y (NULL → ERR_NULL_ARG) | N/A | Last op result |
+| `ufsecp_gpu_last_error_msg` | Y | Y (NULL → fixed msg) | N/A | Human-readable |
+| `ufsecp_gpu_error_str` | Y | Y (unknown code → "unknown error") | Y | CPU + GPU codes |
+
+### Batch Operations (First Wave)
+
+| Function | OpenCL | CUDA | Metal | Equivalence Test | Notes |
+|----------|--------|------|-------|-----------------|-------|
+| `ufsecp_gpu_generator_mul_batch` | Y | Y | - | Y (1*G == G) | Scalar→compressed pubkey |
+| `ufsecp_gpu_ecdsa_verify_batch` | - | Y | - | - | Batch ECDSA verify |
+| `ufsecp_gpu_schnorr_verify_batch` | - | Y | - | - | BIP-340 batch verify |
+| `ufsecp_gpu_ecdh_batch` | - | - | - | - | SECRET-BEARING |
+| `ufsecp_gpu_hash160_pubkey_batch` | - | Y | - | - | SHA-256+RIPEMD-160 |
+| `ufsecp_gpu_msm` | - | - | - | - | Multi-scalar multiplication |
+
+**Test file:** `audit/test_gpu_abi_gate.cpp` (39 assertions)
+
+---
+
 ## Audit & Testing Methodology Matrix
 
 | Test Methodology | Files | Features Covered |
@@ -511,8 +545,8 @@ Files with `secure_erase` for secret data cleanup:
 
 | Metric | Count |
 |--------|-------|
-| Total `UFSECP_API` functions | 96 |
-| Functions with unit test coverage | 96 (100%) |
+| Total `UFSECP_API` functions | 112 (96 CPU + 16 GPU) |
+| Functions with unit test coverage | 112 (100%) |
 | Functions tested in adversarial protocol | 89 (93%), 186 individual checks |
 | Functions with fuzzing | ~40 (42%) |
 | Functions with external test vectors | ~35 (36%) |
@@ -521,7 +555,7 @@ Files with `secure_erase` for secret data cleanup:
 | Audit source files | 32 (.cpp files in `audit/`) |
 | GPU backends | 3 (CUDA, OpenCL, Metal) |
 | `secure_erase` call sites | 141 across 6 files |
-| CTest targets | 41 |
+| CTest targets | 42 |
 
 ### Coverage Gaps (items for future work)
 

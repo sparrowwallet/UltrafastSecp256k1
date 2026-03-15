@@ -49,6 +49,12 @@ option(UFSECP_BUILD_STATIC "Build static library" ON)
 
 set(UFSECP_IMPL_SRC "${CMAKE_CURRENT_SOURCE_DIR}/ufsecp_impl.cpp")
 
+# GPU C ABI implementation (only when gpu host layer is built)
+set(UFSECP_GPU_IMPL_SRC "")
+if(TARGET secp256k1_gpu_host)
+    set(UFSECP_GPU_IMPL_SRC "${CMAKE_CURRENT_SOURCE_DIR}/ufsecp_gpu_impl.cpp")
+endif()
+
 # Helper: configure a target with the right includes/definitions
 function(ufsecp_configure tgt)
     target_include_directories(${tgt}
@@ -82,11 +88,19 @@ function(ufsecp_configure tgt)
         VERSION   ${PROJECT_VERSION}
         SOVERSION ${PROJECT_VERSION_MAJOR}
     )
+
+    # Link GPU host ops layer if available
+    if(TARGET secp256k1_gpu_host)
+        target_link_libraries(${tgt} PRIVATE secp256k1_gpu_host)
+        target_include_directories(${tgt} PRIVATE
+            ${ULTRAFAST_ROOT}/gpu/include
+        )
+    endif()
 endfunction()
 
 # Shared library
 if(UFSECP_BUILD_SHARED)
-    add_library(ufsecp_shared SHARED ${UFSECP_IMPL_SRC})
+    add_library(ufsecp_shared SHARED ${UFSECP_IMPL_SRC} ${UFSECP_GPU_IMPL_SRC})
     set_target_properties(ufsecp_shared PROPERTIES OUTPUT_NAME ufsecp)
     ufsecp_configure(ufsecp_shared)
 
@@ -104,7 +118,7 @@ endif()
 
 # Static library (always useful for embedding)
 if(UFSECP_BUILD_STATIC)
-    add_library(ufsecp_static STATIC ${UFSECP_IMPL_SRC})
+    add_library(ufsecp_static STATIC ${UFSECP_IMPL_SRC} ${UFSECP_GPU_IMPL_SRC})
     # On Windows avoid output collision with shared import lib
     if(WIN32 AND UFSECP_BUILD_SHARED)
         set_target_properties(ufsecp_static PROPERTIES OUTPUT_NAME ufsecp_s)
