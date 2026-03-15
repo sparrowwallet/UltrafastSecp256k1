@@ -46,7 +46,9 @@ else()
         $<$<COMPILE_LANGUAGE:CUDA>:--use_fast_math>
         $<$<COMPILE_LANGUAGE:CUDA>:-Xptxas=-O3>
     )
-    set_target_properties(secp256k1_cuda_lib PROPERTIES CUDA_SEPARABLE_COMPILATION ON)
+    set_target_properties(secp256k1_cuda_lib PROPERTIES
+        CUDA_SEPARABLE_COMPILATION ON
+        POSITION_INDEPENDENT_CODE ON)
 endif()
 
 target_include_directories(secp256k1_cuda_lib PUBLIC

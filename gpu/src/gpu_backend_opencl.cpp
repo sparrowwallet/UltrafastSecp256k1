@@ -6,7 +6,10 @@
  *
  * Currently supports:
  *   - generator_mul_batch  (via batch_scalar_mul_generator + batch_jacobian_to_affine)
- *   - ECDSA / Schnorr verify, ECDH, hash160, MSM → UNSUPPORTED (no OpenCL kernels yet)
+ *   - hash160_pubkey_batch (CPU-side SIMD hash160 -- GPU hash kernel not yet wired)
+ *   - ecdh_batch           (GPU batch_scalar_mul + CPU SHA-256 finalization)
+ *   - msm                  (GPU batch_scalar_mul + CPU-side affine summation)
+ *   - ECDSA / Schnorr verify → UNSUPPORTED (needs extended kernel compilation)
  *
  * Compiled ONLY when SECP256K1_HAVE_OPENCL is set (via CMake).
  * ============================================================================ */
@@ -22,6 +25,12 @@
 
 /* -- CPU FieldElement for host-side point compression ---------------------- */
 #include "secp256k1/field.hpp"
+
+/* -- CPU SHA-256 for ECDH finalization ------------------------------------- */
+#include "secp256k1/sha256.hpp"
+
+/* -- CPU Hash160 for pubkey hashing ---------------------------------------- */
+#include "secp256k1/hash_accel.hpp"
 
 namespace secp256k1 {
 namespace gpu {
@@ -145,6 +154,7 @@ public:
         const uint8_t*, const uint8_t*, const uint8_t*,
         size_t, uint8_t*) override
     {
+        if (!is_ready()) return set_error(GpuError::Device, "context not initialised");
         return set_error(GpuError::Unsupported,
                          "ECDSA verify batch not yet available on OpenCL");
     }
@@ -153,31 +163,170 @@ public:
         const uint8_t*, const uint8_t*, const uint8_t*,
         size_t, uint8_t*) override
     {
+        if (!is_ready()) return set_error(GpuError::Device, "context not initialised");
         return set_error(GpuError::Unsupported,
                          "Schnorr verify batch not yet available on OpenCL");
     }
 
     GpuError ecdh_batch(
-        const uint8_t*, const uint8_t*,
-        size_t, uint8_t*) override
+        const uint8_t* privkeys32, const uint8_t* peer_pubkeys33,
+        size_t count, uint8_t* out_secrets32) override
     {
-        return set_error(GpuError::Unsupported,
-                         "ECDH batch not yet available on OpenCL");
+        if (!is_ready()) return set_error(GpuError::Device, "context not initialised");
+        if (count == 0) { clear_error(); return GpuError::Ok; }
+        if (!privkeys32 || !peer_pubkeys33 || !out_secrets32)
+            return set_error(GpuError::NullArg, "NULL buffer");
+
+        /* Convert private keys → Scalar, peer pubkeys → AffinePoint */
+        std::vector<secp256k1::opencl::Scalar> h_scalars(count);
+        std::vector<secp256k1::opencl::AffinePoint> h_peers(count);
+
+        for (size_t i = 0; i < count; ++i) {
+            bytes_to_scalar(privkeys32 + i * 32, &h_scalars[i]);
+            const uint8_t* pub = peer_pubkeys33 + i * 33;
+            if (!pubkey33_to_affine(pub, &h_peers[i]))
+                return set_error(GpuError::BadKey, "invalid peer pubkey");
+        }
+
+        /* GPU: batch scalar_mul(priv[i], peer[i]) → Jacobian */
+        std::vector<secp256k1::opencl::JacobianPoint> h_jac(count);
+        ctx_->batch_scalar_mul(h_scalars.data(), h_peers.data(),
+                               h_jac.data(), count);
+
+        /* GPU: Jacobian → Affine */
+        std::vector<secp256k1::opencl::AffinePoint> h_aff(count);
+        ctx_->batch_jacobian_to_affine(h_jac.data(), h_aff.data(), count);
+
+        /* CPU: SHA-256(x_bytes) → 32-byte shared secret */
+        for (size_t i = 0; i < count; ++i) {
+            std::array<uint64_t, 4> xl;
+            std::memcpy(xl.data(), h_aff[i].x.limbs, 32);
+            auto fe = secp256k1::fast::FieldElement::from_limbs(xl);
+            auto xbytes = fe.to_bytes();
+            auto digest = secp256k1::SHA256::hash(xbytes.data(), 32);
+            std::memcpy(out_secrets32 + i * 32, digest.data(), 32);
+        }
+
+        clear_error();
+        return GpuError::Ok;
     }
 
     GpuError hash160_pubkey_batch(
-        const uint8_t*, size_t, uint8_t*) override
+        const uint8_t* pubkeys33, size_t count,
+        uint8_t* out_hash160) override
     {
-        return set_error(GpuError::Unsupported,
-                         "Hash160 batch not yet available on OpenCL");
+        if (!is_ready()) return set_error(GpuError::Device, "context not initialised");
+        if (count == 0) { clear_error(); return GpuError::Ok; }
+        if (!pubkeys33 || !out_hash160)
+            return set_error(GpuError::NullArg, "NULL buffer");
+
+        /* CPU-side SIMD-accelerated Hash160 */
+        for (size_t i = 0; i < count; ++i) {
+            secp256k1::hash::hash160_33(pubkeys33 + i * 33,
+                                        out_hash160 + i * 20);
+        }
+
+        clear_error();
+        return GpuError::Ok;
     }
 
     GpuError msm(
-        const uint8_t*, const uint8_t*,
-        size_t, uint8_t*) override
+        const uint8_t* scalars32, const uint8_t* points33,
+        size_t n, uint8_t* out_result33) override
     {
-        return set_error(GpuError::Unsupported,
-                         "MSM not yet available on OpenCL");
+        if (!is_ready()) return set_error(GpuError::Device, "context not initialised");
+        if (n == 0) { clear_error(); return GpuError::Ok; }
+        if (!scalars32 || !points33 || !out_result33)
+            return set_error(GpuError::NullArg, "NULL buffer");
+
+        /* Convert inputs */
+        std::vector<secp256k1::opencl::Scalar> h_scalars(n);
+        std::vector<secp256k1::opencl::AffinePoint> h_points(n);
+        for (size_t i = 0; i < n; ++i) {
+            bytes_to_scalar(scalars32 + i * 32, &h_scalars[i]);
+            if (!pubkey33_to_affine(points33 + i * 33, &h_points[i]))
+                return set_error(GpuError::BadKey, "invalid MSM point");
+        }
+
+        /* GPU: batch scalar_mul(s[i], P[i]) */
+        std::vector<secp256k1::opencl::JacobianPoint> h_jac(n);
+        ctx_->batch_scalar_mul(h_scalars.data(), h_points.data(),
+                               h_jac.data(), n);
+
+        /* GPU: Jacobian → Affine */
+        std::vector<secp256k1::opencl::AffinePoint> h_aff(n);
+        ctx_->batch_jacobian_to_affine(h_jac.data(), h_aff.data(), n);
+
+        /* CPU: sum affine points */
+        bool have_acc = false;
+        secp256k1::fast::FieldElement acc_x, acc_y;
+
+        for (size_t i = 0; i < n; ++i) {
+            std::array<uint64_t, 4> xl, yl;
+            std::memcpy(xl.data(), h_aff[i].x.limbs, 32);
+            std::memcpy(yl.data(), h_aff[i].y.limbs, 32);
+            auto px = secp256k1::fast::FieldElement::from_limbs(xl);
+            auto py = secp256k1::fast::FieldElement::from_limbs(yl);
+
+            /* Skip point at infinity (zero x and y) */
+            auto pxb = px.to_bytes();
+            auto pyb = py.to_bytes();
+            bool is_zero = true;
+            for (int k = 0; k < 32 && is_zero; ++k)
+                if (pxb[k] || pyb[k]) is_zero = false;
+            if (is_zero) continue;
+
+            if (!have_acc) {
+                acc_x = px; acc_y = py;
+                have_acc = true;
+                continue;
+            }
+
+            /* Affine point addition: acc += (px, py) */
+            auto dx = px - acc_x;
+            auto dy = py - acc_y;
+            auto dxb = dx.to_bytes();
+            bool dx_zero = true;
+            for (int k = 0; k < 32 && dx_zero; ++k)
+                if (dxb[k]) dx_zero = false;
+
+            if (dx_zero) {
+                auto dyb = dy.to_bytes();
+                bool dy_zero = true;
+                for (int k = 0; k < 32 && dy_zero; ++k)
+                    if (dyb[k]) dy_zero = false;
+                if (!dy_zero) {
+                    /* Inverse points → result is infinity */
+                    have_acc = false;
+                    continue;
+                }
+                /* Doubling: lambda = 3*x^2 / (2*y) */
+                auto x2 = acc_x * acc_x;
+                auto num = x2 + x2 + x2;
+                auto den = acc_y + acc_y;
+                auto lam = num * den.inverse();
+                auto rx = lam * lam - acc_x - acc_x;
+                auto ry = lam * (acc_x - rx) - acc_y;
+                acc_x = rx; acc_y = ry;
+            } else {
+                auto lam = dy * dx.inverse();
+                auto rx = lam * lam - acc_x - px;
+                auto ry = lam * (acc_x - rx) - acc_y;
+                acc_x = rx; acc_y = ry;
+            }
+        }
+
+        if (!have_acc)
+            return set_error(GpuError::Arith, "MSM result is point at infinity");
+
+        /* Serialize result */
+        auto yb = acc_y.to_bytes();
+        out_result33[0] = (yb[31] & 1) ? 0x03 : 0x02;
+        auto xb = acc_x.to_bytes();
+        std::memcpy(out_result33 + 1, xb.data(), 32);
+
+        clear_error();
+        return GpuError::Ok;
     }
 
 private:
@@ -230,6 +379,37 @@ private:
         out[0] = (ybytes[31] & 1) ? 0x03 : 0x02;
         auto xbytes = cx.to_bytes();
         std::memcpy(out + 1, xbytes.data(), 32);
+    }
+
+    /** Decompress a 33-byte compressed pubkey to OpenCL AffinePoint.
+     *  Returns false if prefix is invalid.                               */
+    static bool pubkey33_to_affine(const uint8_t pub[33],
+                                   secp256k1::opencl::AffinePoint* out) {
+        uint8_t prefix = pub[0];
+        if (prefix != 0x02 && prefix != 0x03) return false;
+
+        /* x from big-endian bytes */
+        secp256k1::fast::FieldElement fe_x;
+        if (!secp256k1::fast::FieldElement::parse_bytes_strict(pub + 1, fe_x))
+            return false;
+
+        /* y^2 = x^3 + 7 */
+        auto x2 = fe_x * fe_x;
+        auto x3 = x2 * fe_x;
+        auto y2 = x3 + secp256k1::fast::FieldElement::from_uint64(7);
+        auto fe_y = y2.sqrt();
+
+        /* Choose correct parity */
+        auto yb = fe_y.to_bytes();
+        if ((yb[31] & 1) != (prefix & 1))
+            fe_y = fe_y.negate();
+
+        /* Store as LE limbs into OpenCL AffinePoint */
+        const auto& xl = fe_x.limbs();
+        const auto& yl = fe_y.limbs();
+        std::memcpy(out->x.limbs, xl.data(), 32);
+        std::memcpy(out->y.limbs, yl.data(), 32);
+        return true;
     }
 };
 

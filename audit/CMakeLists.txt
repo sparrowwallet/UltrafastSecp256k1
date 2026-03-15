@@ -132,6 +132,48 @@ if(TARGET secp256k1_gpu_host AND TARGET ufsecp_static)
     target_compile_definitions(test_gpu_abi_gate PRIVATE STANDALONE_TEST)
     add_test(NAME gpu_abi_gate COMMAND test_gpu_abi_gate)
     set_tests_properties(gpu_abi_gate PROPERTIES TIMEOUT 60)
+
+    # -- GPU ops equivalence (GPU vs CPU reference) --
+    add_executable(test_gpu_ops_equivalence test_gpu_ops_equivalence.cpp)
+    target_link_libraries(test_gpu_ops_equivalence PRIVATE ufsecp_static)
+    target_include_directories(test_gpu_ops_equivalence PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/../include
+        ${CMAKE_BINARY_DIR}/include/ufsecp
+    )
+    target_compile_definitions(test_gpu_ops_equivalence PRIVATE STANDALONE_TEST)
+    add_test(NAME gpu_ops_equivalence COMMAND test_gpu_ops_equivalence)
+    set_tests_properties(gpu_ops_equivalence PROPERTIES TIMEOUT 120)
+
+    # -- GPU host API negative tests --
+    add_executable(test_gpu_host_api_negative test_gpu_host_api_negative.cpp)
+    target_link_libraries(test_gpu_host_api_negative PRIVATE ufsecp_static)
+    target_include_directories(test_gpu_host_api_negative PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/../include
+        ${CMAKE_BINARY_DIR}/include/ufsecp
+    )
+    target_compile_definitions(test_gpu_host_api_negative PRIVATE STANDALONE_TEST)
+    add_test(NAME gpu_host_api_negative COMMAND test_gpu_host_api_negative)
+    set_tests_properties(gpu_host_api_negative PROPERTIES TIMEOUT 60)
+
+    # -- GPU backend matrix (enumerate + probe) --
+    add_executable(test_gpu_backend_matrix test_gpu_backend_matrix.cpp)
+    target_link_libraries(test_gpu_backend_matrix PRIVATE ufsecp_static)
+    target_include_directories(test_gpu_backend_matrix PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/../include
+        ${CMAKE_BINARY_DIR}/include/ufsecp
+    )
+    target_compile_definitions(test_gpu_backend_matrix PRIVATE STANDALONE_TEST)
+    add_test(NAME gpu_backend_matrix COMMAND test_gpu_backend_matrix)
+    set_tests_properties(gpu_backend_matrix PROPERTIES TIMEOUT 60)
+
+    # Disable LTO for GPU-linked targets (nvcc LTO version differs from host compiler)
+    if(SECP256K1_BUILD_CUDA)
+        set_target_properties(
+            test_gpu_abi_gate test_gpu_ops_equivalence
+            test_gpu_host_api_negative test_gpu_backend_matrix
+            PROPERTIES INTERPROCEDURAL_OPTIMIZATION FALSE
+        )
+    endif()
 endif()
 
 # -- Formal CT verification via Valgrind/MSAN (Track I5-1) ----------------
@@ -271,6 +313,14 @@ if(SECP256K1_BUILD_FUZZ_TESTS AND TARGET ufsecp_static)
     add_test(NAME fuzz_address_bip32_ffi COMMAND test_fuzz_address_bip32_ffi)
     set_tests_properties(fuzz_address_bip32_ffi PROPERTIES TIMEOUT 900)
     message(STATUS "  Address + BIP32 + FFI fuzz tests: ON")
+
+    # Disable LTO when CUDA is linked (nvcc LTO version differs from host compiler)
+    if(SECP256K1_BUILD_CUDA)
+        set_target_properties(
+            test_fuzz_parsers test_fuzz_address_bip32_ffi
+            PROPERTIES INTERPROCEDURAL_OPTIMIZATION FALSE
+        )
+    endif()
 endif()
 
 # ===========================================================================

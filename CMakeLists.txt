@@ -241,6 +241,7 @@ endif()
 # Host-side type tests always build; GPU runtime only on Apple
 if(SECP256K1_BUILD_METAL)
     if(APPLE)
+        enable_language(OBJCXX)
         find_library(_METAL_FW Metal)
         find_library(_FOUNDATION_FW Foundation)
         if(_METAL_FW AND _FOUNDATION_FW)

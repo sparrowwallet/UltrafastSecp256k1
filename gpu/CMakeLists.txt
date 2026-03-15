@@ -26,7 +26,7 @@ set(GPU_BACKEND_LIBS "")
 
 # -- CUDA backend -----------------------------------------------------------
 if(SECP256K1_BUILD_CUDA AND TARGET secp256k1_cuda_lib)
-    list(APPEND GPU_BACKEND_SOURCES src/gpu_backend_cuda.cu)
+    list(APPEND GPU_BACKEND_SOURCES src/gpu_backend_cuda.cu src/gpu_backend_cuda_host.cpp)
     list(APPEND GPU_BACKEND_DEFS SECP256K1_HAVE_CUDA=1)
     list(APPEND GPU_BACKEND_LIBS secp256k1_cuda_lib)
     message(STATUS "  GPU API: CUDA backend enabled")
@@ -108,7 +108,7 @@ if(SECP256K1_BUILD_METAL AND TARGET secp256k1_metal_lib)
     endif()
     # Compile .mm as Objective-C++
     set_source_files_properties(src/gpu_backend_metal.mm PROPERTIES
-        COMPILE_FLAGS "-x objective-c++"
+        LANGUAGE OBJCXX
     )
 endif()
 

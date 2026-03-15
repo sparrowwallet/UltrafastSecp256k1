@@ -13,6 +13,37 @@ It is intended as an engineering checklist, not a marketing page.
 
 ---
 
+## C ABI First-Wave Ops -- Per-Backend Status
+
+The C ABI layer (`ufsecp_gpu.h`) exposes 6 batch operations. Backend support varies.
+Operations returning `UFSECP_ERR_GPU_UNSUPPORTED` (104) gracefully decline.
+
+| Operation | CUDA | OpenCL | Metal | Data Class |
+|-----------|------|--------|-------|------------|
+| `generator_mul_batch` | implemented | implemented | unsupported | PUBLIC |
+| `ecdsa_verify_batch` | implemented | unsupported | unsupported | PUBLIC |
+| `schnorr_verify_batch` | implemented | unsupported | unsupported | PUBLIC |
+| `ecdh_batch` | implemented | implemented | unsupported | SECRET |
+| `hash160_pubkey_batch` | implemented | implemented | unsupported | PUBLIC |
+| `msm` | implemented | implemented | unsupported | PUBLIC |
+| **Total** | **6/6** | **4/6** | **0/6** | |
+
+### Expansion Roadmap
+
+- **OpenCL next**: ecdsa_verify_batch, schnorr_verify_batch (needs extended kernel compilation in Context)
+- **Metal**: experimental / discovery-only until MSL kernel pipeline is wired from CMake
+
+### C ABI Test Coverage
+
+| Test | Scope | Guard |
+|------|-------|-------|
+| `gpu_abi_gate` | ABI surface, error codes, discovery, lifecycle, NULL handling | GPU host + ufsecp |
+| `gpu_ops_equivalence` | GPU vs CPU reference for all 6 ops (skips UNSUPPORTED) | GPU host + ufsecp |
+| `gpu_host_api_negative` | NULL ptrs, count=0, invalid backend/device, error strings | GPU host + ufsecp |
+| `gpu_backend_matrix` | Backend enumeration, device info, per-backend op probing | GPU host + ufsecp |
+
+---
+
 ## Summary
 
 | Backend | Correctness Tests | Unified Audit | Unified Bench | Host / Integration | Notes |

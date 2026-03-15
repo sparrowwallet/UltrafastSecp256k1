@@ -104,6 +104,11 @@ if(UFSECP_BUILD_SHARED)
     set_target_properties(ufsecp_shared PROPERTIES OUTPUT_NAME ufsecp)
     ufsecp_configure(ufsecp_shared)
 
+    # Disable LTO when CUDA is linked (nvcc LTO version differs from host compiler)
+    if(SECP256K1_BUILD_CUDA)
+        set_target_properties(ufsecp_shared PROPERTIES INTERPROCEDURAL_OPTIMIZATION FALSE)
+    endif()
+
     if(WIN32)
         set_target_properties(ufsecp_shared PROPERTIES WINDOWS_EXPORT_ALL_SYMBOLS OFF)
     elseif(APPLE)
@@ -126,6 +131,10 @@ if(UFSECP_BUILD_STATIC)
         set_target_properties(ufsecp_static PROPERTIES OUTPUT_NAME ufsecp)
     endif()
     ufsecp_configure(ufsecp_static)
+
+    if(SECP256K1_BUILD_CUDA)
+        set_target_properties(ufsecp_static PROPERTIES INTERPROCEDURAL_OPTIMIZATION FALSE)
+    endif()
 endif()
 
 # Alias for parent project: `ufsecp::ufsecp`

@@ -108,6 +108,9 @@
 | `metal/app/bench_metal.mm` | Metal | `secp256k1_metal_bench_full`: comprehensive Metal benchmark |
 | `compat/libsecp256k1_shim/tests/shim_test.cpp` | CPU | `secp256k1_shim_test`: libsecp256k1 API compatibility shim |
 | `audit/test_gpu_abi_gate.cpp` | GPU (all) | `gpu_abi_gate`: GPU C ABI surface test -- discovery, lifecycle, NULL safety, error strings, generator_mul equivalence |
+| `audit/test_gpu_ops_equivalence.cpp` | GPU (all) | `gpu_ops_equivalence`: GPU vs CPU reference for all 6 first-wave ops (skips UNSUPPORTED) |
+| `audit/test_gpu_host_api_negative.cpp` | GPU (all) | `gpu_host_api_negative`: NULL ptrs, count=0 no-ops, invalid backend/device, error strings |
+| `audit/test_gpu_backend_matrix.cpp` | GPU (all) | `gpu_backend_matrix`: backend enumeration, device info sanity, per-backend op probing |
 
 ---
 
@@ -230,7 +233,7 @@
 |-----|--------|--------|
 | MuSig2 extended test vectors | Full adversarial coverage (A.4-A.7) | Reference impl vectors available via BIP-327 |
 | Multi-uarch timing tests | CT may break on specific CPUs | Need hardware test farm |
-| GPU vs CPU differential | GPU arithmetic may diverge | Partial coverage via OpenCL tests |
+| GPU vs CPU differential | GPU arithmetic may diverge | Covered by gpu_ops_equivalence (6 ops) + OpenCL/CUDA tests |
 
 ### Low Priority
 

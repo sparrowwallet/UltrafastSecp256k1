@@ -21,7 +21,11 @@
 #include "secp256k1.cuh"
 #include "ecdh.cuh"
 #include "msm.cuh"
+#include "schnorr.cuh"
 #include "gpu_compat.h"
+
+/* -- Host helpers (compiled as C++ by the host compiler) ------------------- */
+#include "../include/gpu_cuda_host_helpers.h"
 
 /* ============================================================================
  * Internal helpers
@@ -37,7 +41,50 @@
     } while (0)
 
 namespace secp256k1 {
+
+/* Kernels defined in cuda/src/secp256k1.cu (namespace secp256k1::cuda).
+   Must be declared in the same namespace so the linker finds them. */
+namespace cuda {
+extern __global__ void ecdsa_verify_batch_kernel(
+    const uint8_t* __restrict__ msg_hashes,
+    const JacobianPoint* __restrict__ public_keys,
+    const ECDSASignatureGPU* __restrict__ sigs,
+    bool*          __restrict__ results,
+    int count);
+
+extern __global__ void schnorr_verify_batch_kernel(
+    const uint8_t* __restrict__ pubkeys_x,
+    const uint8_t* __restrict__ msgs,
+    const SchnorrSignatureGPU* __restrict__ sigs,
+    bool*          __restrict__ results,
+    int count);
+} // namespace cuda
+
 namespace gpu {
+
+/* Import CUDA types (FieldElement, Scalar, JacobianPoint, etc.) and kernels
+   from the secp256k1::cuda namespace into secp256k1::gpu. */
+using namespace cuda;
+
+/* ============================================================================
+ * Thin wrapper kernels for device functions without __global__ entry points
+ * ============================================================================ */
+
+/** ECDH batch kernel: each thread computes SHA-256(0x02 || x) where
+ *  x = x-coordinate of privkey[i] * pubkey[i]. */
+__global__ void ecdh_batch_kernel(
+    const Scalar* privkeys,
+    const JacobianPoint* peer_pubs,
+    uint8_t* out_secrets,      /* count * 32 bytes */
+    bool* out_ok,
+    int count)
+{
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= count) return;
+
+    out_ok[idx] = secp256k1::cuda::ecdh_compute(
+        &privkeys[idx], &peer_pubs[idx], out_secrets + idx * 32);
+}
 
 /* ============================================================================
  * CudaBackend implementation
@@ -115,8 +162,8 @@ public:
         uint8_t* out_pubkeys33) override
     {
         if (!ready_) return set_error(GpuError::Device, "context not initialised");
-        if (!scalars32 || !out_pubkeys33) return set_error(GpuError::NullArg, "NULL buffer");
         if (count == 0) { clear_error(); return GpuError::Ok; }
+        if (!scalars32 || !out_pubkeys33) return set_error(GpuError::NullArg, "NULL buffer");
 
         /* Allocate device memory */
         Scalar* d_scalars = nullptr;
@@ -161,9 +208,9 @@ public:
         uint8_t* out_results) override
     {
         if (!ready_) return set_error(GpuError::Device, "context not initialised");
+        if (count == 0) { clear_error(); return GpuError::Ok; }
         if (!msg_hashes32 || !pubkeys33 || !sigs64 || !out_results)
             return set_error(GpuError::NullArg, "NULL buffer");
-        if (count == 0) { clear_error(); return GpuError::Ok; }
 
         /* Prepare host arrays in CUDA internal types */
         std::vector<JacobianPoint> h_pubs(count);
@@ -222,9 +269,9 @@ public:
         uint8_t* out_results) override
     {
         if (!ready_) return set_error(GpuError::Device, "context not initialised");
+        if (count == 0) { clear_error(); return GpuError::Ok; }
         if (!msg_hashes32 || !pubkeys_x32 || !sigs64 || !out_results)
             return set_error(GpuError::NullArg, "NULL buffer");
-        if (count == 0) { clear_error(); return GpuError::Ok; }
 
         /* Prepare Schnorr sigs in CUDA type */
         std::vector<SchnorrSignatureGPU> h_sigs(count);
@@ -276,11 +323,58 @@ public:
         const uint8_t* privkeys32, const uint8_t* peer_pubkeys33,
         size_t count, uint8_t* out_secrets32) override
     {
-        /* ECDH has device functions but no batch kernel. We need a thin
-           wrapper kernel. For now, return UNSUPPORTED until the kernel
-           is added in a follow-up (or we add an inline kernel here). */
-        return set_error(GpuError::Unsupported,
-                         "ECDH batch kernel not yet available on CUDA");
+        if (!ready_) return set_error(GpuError::Device, "context not initialised");
+        if (count == 0) { clear_error(); return GpuError::Ok; }
+        if (!privkeys32 || !peer_pubkeys33 || !out_secrets32)
+            return set_error(GpuError::NullArg, "NULL buffer");
+
+        /* Convert host bytes → CUDA types */
+        std::vector<Scalar> h_keys(count);
+        std::vector<JacobianPoint> h_pubs(count);
+        for (size_t i = 0; i < count; ++i) {
+            bytes_to_scalar(privkeys32 + i * 32, &h_keys[i]);
+            if (!compressed_to_jacobian_host(peer_pubkeys33 + i * 33, &h_pubs[i]))
+                h_pubs[i].infinity = true;
+        }
+
+        /* Allocate device memory */
+        Scalar*        d_keys = nullptr;
+        JacobianPoint* d_pubs = nullptr;
+        uint8_t*       d_out  = nullptr;
+        bool*          d_ok   = nullptr;
+
+        CUDA_TRY(cudaMalloc(&d_keys, count * sizeof(Scalar)));
+        CUDA_TRY(cudaMalloc(&d_pubs, count * sizeof(JacobianPoint)));
+        CUDA_TRY(cudaMalloc(&d_out, count * 32));
+        CUDA_TRY(cudaMalloc(&d_ok, count * sizeof(bool)));
+
+        CUDA_TRY(cudaMemcpy(d_keys, h_keys.data(), count * sizeof(Scalar), cudaMemcpyHostToDevice));
+        CUDA_TRY(cudaMemcpy(d_pubs, h_pubs.data(), count * sizeof(JacobianPoint), cudaMemcpyHostToDevice));
+
+        /* Launch */
+        int threads = 128;
+        int blocks  = (static_cast<int>(count) + threads - 1) / threads;
+        ecdh_batch_kernel<<<blocks, threads>>>(d_keys, d_pubs, d_out, d_ok, static_cast<int>(count));
+        CUDA_TRY(cudaGetLastError());
+        CUDA_TRY(cudaDeviceSynchronize());
+
+        /* Download results */
+        CUDA_TRY(cudaMemcpy(out_secrets32, d_out, count * 32, cudaMemcpyDeviceToHost));
+
+        /* Check for failures (peer at infinity → zero shared secret) */
+        bool* h_ok = new bool[count];
+        CUDA_TRY(cudaMemcpy(h_ok, d_ok, count * sizeof(bool), cudaMemcpyDeviceToHost));
+        for (size_t i = 0; i < count; ++i) {
+            if (!h_ok[i]) std::memset(out_secrets32 + i * 32, 0, 32);
+        }
+        delete[] h_ok;
+
+        cudaFree(d_ok);
+        cudaFree(d_out);
+        cudaFree(d_pubs);
+        cudaFree(d_keys);
+        clear_error();
+        return GpuError::Ok;
     }
 
     GpuError hash160_pubkey_batch(
@@ -288,9 +382,9 @@ public:
         uint8_t* out_hash160) override
     {
         if (!ready_) return set_error(GpuError::Device, "context not initialised");
+        if (count == 0) { clear_error(); return GpuError::Ok; }
         if (!pubkeys33 || !out_hash160)
             return set_error(GpuError::NullArg, "NULL buffer");
-        if (count == 0) { clear_error(); return GpuError::Ok; }
 
         uint8_t* d_pubs = nullptr;
         uint8_t* d_hash = nullptr;
@@ -318,10 +412,70 @@ public:
         const uint8_t* scalars32, const uint8_t* points33,
         size_t n, uint8_t* out_result33) override
     {
-        /* MSM exists as device functions (msm_naive, msm_pippenger) but not
-           as a standalone kernel with host launch. Return UNSUPPORTED. */
-        return set_error(GpuError::Unsupported,
-                         "MSM batch kernel not yet available on CUDA");
+        if (!ready_) return set_error(GpuError::Device, "context not initialised");
+        if (n == 0) { clear_error(); return GpuError::Ok; }
+        if (!scalars32 || !points33 || !out_result33)
+            return set_error(GpuError::NullArg, "NULL buffer");
+
+        /* Convert host bytes → CUDA types */
+        std::vector<Scalar> h_scalars(n);
+        std::vector<JacobianPoint> h_points(n);
+        for (size_t i = 0; i < n; ++i) {
+            bytes_to_scalar(scalars32 + i * 32, &h_scalars[i]);
+            if (!compressed_to_jacobian_host(points33 + i * 33, &h_points[i]))
+                h_points[i].infinity = true;
+        }
+
+        /* Allocate device memory for scatter phase */
+        Scalar*        d_scalars  = nullptr;
+        JacobianPoint* d_points   = nullptr;
+        JacobianPoint* d_partials = nullptr;
+
+        CUDA_TRY(cudaMalloc(&d_scalars, n * sizeof(Scalar)));
+        CUDA_TRY(cudaMalloc(&d_points, n * sizeof(JacobianPoint)));
+        CUDA_TRY(cudaMalloc(&d_partials, n * sizeof(JacobianPoint)));
+
+        CUDA_TRY(cudaMemcpy(d_scalars, h_scalars.data(), n * sizeof(Scalar), cudaMemcpyHostToDevice));
+        CUDA_TRY(cudaMemcpy(d_points, h_points.data(), n * sizeof(JacobianPoint), cudaMemcpyHostToDevice));
+
+        /* Phase 1: each thread computes scalars[i] * points[i] */
+        int threads = 128;
+        int blocks  = (static_cast<int>(n) + threads - 1) / threads;
+        msm_scatter_kernel<<<blocks, threads>>>(d_scalars, d_points, d_partials, static_cast<int>(n));
+        CUDA_TRY(cudaGetLastError());
+        CUDA_TRY(cudaDeviceSynchronize());
+
+        /* Phase 2: download partial results and sum on host via C++ helper. */
+        std::vector<JacobianPoint> h_partials(n);
+        CUDA_TRY(cudaMemcpy(h_partials.data(), d_partials, n * sizeof(JacobianPoint), cudaMemcpyDeviceToHost));
+
+        cudaFree(d_partials);
+        cudaFree(d_points);
+        cudaFree(d_scalars);
+
+        /* Marshal limbs into flat arrays for the host helper */
+        std::vector<uint64_t> jx(n * 4), jy(n * 4), jz(n * 4);
+        bool* jinf = new bool[n];
+        for (size_t i = 0; i < n; ++i) {
+            for (int j = 0; j < 4; ++j) {
+                jx[i * 4 + j] = h_partials[i].x.limbs[j];
+                jy[i * 4 + j] = h_partials[i].y.limbs[j];
+                jz[i * 4 + j] = h_partials[i].z.limbs[j];
+            }
+            jinf[i] = h_partials[i].infinity;
+        }
+
+        bool ok = cuda_host::msm_accumulate(
+            jx.data(), jy.data(), jz.data(), jinf, n, out_result33);
+        delete[] jinf;
+
+        if (!ok) {
+            std::memset(out_result33, 0, 33);
+            return set_error(GpuError::Arith, "MSM result is point at infinity");
+        }
+
+        clear_error();
+        return GpuError::Ok;
     }
 
 private:
@@ -406,84 +560,19 @@ private:
     }
 
     /** Compressed pubkey (33 bytes: prefix || x) → JacobianPoint on host.
-     *  Uses secp256k1 curve equation y^2 = x^3 + 7 to recover y. */
+     *  Uses secp256k1 curve equation y^2 = x^3 + 7 to recover y.
+     *  Delegates to gpu_backend_cuda_host.cpp (compiled by host C++ compiler). */
     static bool compressed_to_jacobian_host(const uint8_t pub[33], JacobianPoint* out) {
-        uint8_t prefix = pub[0];
-        if (prefix != 0x02 && prefix != 0x03) return false;
-
-        /* Parse x from big-endian bytes */
-        FieldElement x;
-        bytes_to_field(pub + 1, &x);
-
-        /* For host-side decompression we set z=1 (affine→Jacobian trivially).
-           Full y recovery is done by the device kernel. For ECDSA verify,
-           the kernel needs the full JacobianPoint. We store x and the parity
-           bit, and mark z=1 so the verify kernel can decompress on-device.
-
-           However, the existing verify kernel expects a fully-formed point.
-           We do the square root on host using the CPU library. */
-
-        /* Use the CPU decompression path */
-        secp256k1::fast::FieldElement cpux;
-        std::array<uint8_t, 32> xbytes;
-        std::memcpy(xbytes.data(), pub + 1, 32);
-        if (!secp256k1::fast::FieldElement::parse_bytes_strict(xbytes.data(), cpux))
+        if (!cuda_host::decompress_pubkey(pub, out->x.limbs, out->y.limbs, out->z.limbs))
             return false;
-
-        auto x2 = cpux * cpux;
-        auto x3 = x2 * cpux;
-        auto y2 = x3 + secp256k1::fast::FieldElement::from_uint64(7);
-
-        secp256k1::fast::FieldElement y;
-        if (!secp256k1::fast::FieldElement::sqrt(y2, y))
-            return false;
-
-        /* Check parity */
-        auto ybytes = y.to_bytes();
-        bool y_is_odd = (ybytes[31] & 1) != 0;
-        bool want_odd = (prefix == 0x03);
-        if (y_is_odd != want_odd) y = y.negate();
-
-        /* Convert CPU FieldElement → CUDA FieldElement (same layout: 4×uint64 LE) */
-        auto xarr = cpux.to_limbs();
-        auto yarr = y.to_limbs();
-        for (int i = 0; i < 4; ++i) {
-            out->x.limbs[i] = xarr[i];
-            out->y.limbs[i] = yarr[i];
-        }
-        out->z.limbs[0] = 1;
-        out->z.limbs[1] = 0;
-        out->z.limbs[2] = 0;
-        out->z.limbs[3] = 0;
         out->infinity = false;
         return true;
     }
 
     /** JacobianPoint → compressed 33 bytes on host.
-     *  Requires one field inversion (expensive but done on host). */
+     *  Delegates to gpu_backend_cuda_host.cpp (compiled by host C++ compiler). */
     static void jacobian_to_compressed_host(const JacobianPoint* p, uint8_t out[33]) {
-        if (p->infinity) {
-            std::memset(out, 0, 33);
-            return;
-        }
-
-        /* Convert CUDA limbs → CPU FieldElement for inversion */
-        secp256k1::fast::FieldElement cx, cy, cz;
-        cx = secp256k1::fast::FieldElement::from_limbs(p->x.limbs);
-        cy = secp256k1::fast::FieldElement::from_limbs(p->y.limbs);
-        cz = secp256k1::fast::FieldElement::from_limbs(p->z.limbs);
-
-        auto zinv  = cz.inverse();
-        auto zinv2 = zinv * zinv;
-        auto zinv3 = zinv2 * zinv;
-
-        auto ax = cx * zinv2;
-        auto ay = cy * zinv3;
-
-        auto ybytes = ay.to_bytes();
-        out[0] = (ybytes[31] & 1) ? 0x03 : 0x02;
-        auto xbytes = ax.to_bytes();
-        std::memcpy(out + 1, xbytes.data(), 32);
+        cuda_host::jacobian_to_compressed(p->x.limbs, p->y.limbs, p->z.limbs, p->infinity, out);
     }
 };
 

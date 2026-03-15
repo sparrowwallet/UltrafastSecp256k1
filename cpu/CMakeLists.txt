@@ -267,7 +267,23 @@ if(NOT TARGET ${SECP256K1_LIB_NAME})
     message(STATUS "Secp256k1: LTO check - SECP256K1_USE_LTO=${SECP256K1_USE_LTO}, Compiler=${CMAKE_CXX_COMPILER_ID}")
 
     if(SECP256K1_USE_LTO)
-        if(CMAKE_CXX_COMPILER_ID MATCHES "Clang")
+        if(SECP256K1_BUILD_CUDA)
+            # CUDA device-link objects carry nvcc LTO bytecode (e.g. v12.0)
+            # which is incompatible with the host compiler's LTO version
+            # (e.g. GCC v14.0).  INTERFACE -flto propagation would poison
+            # every downstream target that transitively links CUDA libs.
+            # Compile the library with fat LTO objects (usable without LTO
+            # at link time) but do NOT propagate -flto to consumers.
+            if(CMAKE_CXX_COMPILER_ID MATCHES "Clang")
+                target_compile_options(${SECP256K1_LIB_NAME} PRIVATE
+                    $<$<COMPILE_LANGUAGE:CXX>:-flto=thin>)
+                message(STATUS "Secp256k1: LTO compile-only (ThinLTO, CUDA build -- no INTERFACE propagation)")
+            elseif(CMAKE_CXX_COMPILER_ID MATCHES "GNU")
+                target_compile_options(${SECP256K1_LIB_NAME} PRIVATE
+                    $<$<COMPILE_LANGUAGE:CXX>:-flto -ffat-lto-objects>)
+                message(STATUS "Secp256k1: LTO compile-only (GCC fat objects, CUDA build -- no INTERFACE propagation)")
+            endif()
+        elseif(CMAKE_CXX_COMPILER_ID MATCHES "Clang")
             # Clang ThinLTO -- only for C++ sources, NOT assembly (.S).
             # Use a generator expression to exclude ASM files, because
             # CMake may invoke the system assembler (GCC cc1) which does

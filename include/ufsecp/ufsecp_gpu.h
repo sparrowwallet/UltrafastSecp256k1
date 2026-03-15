@@ -15,6 +15,27 @@
  *   6. All first-wave operations are PUBLIC-DATA ONLY (verification, hashing,
  *      generator mul). ECDH is secret-bearing and documented as such.
  *
+ * ## Feature maturity
+ *
+ *   This header defines the first-wave GPU API surface. Backend support
+ *   per-operation varies:
+ *
+ *     CUDA   -- all 6 first-wave ops implemented
+ *     OpenCL -- 4/6 ops (generator_mul, ecdh, hash160, msm); ECDSA/Schnorr
+ *               verify return UNSUPPORTED (needs extended kernel compilation)
+ *     Metal  -- device discovery / lifecycle only; all ops return UNSUPPORTED
+ *
+ *   Operations that a backend does not implement return
+ *   UFSECP_ERR_GPU_UNSUPPORTED (104). Callers MUST handle this gracefully.
+ *   Backend coverage will expand over subsequent releases.
+ *
+ *   Guarantees:
+ *     - Discovery + lifecycle functions work on all compiled backends.
+ *     - Per-item results for batch ops are well-defined even on partial failure.
+ *     - ECDH is the only secret-bearing GPU operation. All others are public-data.
+ *     - ABI layout (function signatures, strides, error codes) is stable.
+ *     - Backend additions do not break existing calling code.
+ *
  * ## Memory
  *
  *   Caller owns all input/output buffers. Library manages device memory

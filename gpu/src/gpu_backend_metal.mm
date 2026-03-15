@@ -1,16 +1,13 @@
 /* ============================================================================
- * UltrafastSecp256k1 -- Metal Backend Bridge
+ * UltrafastSecp256k1 -- Metal Backend Bridge (EXPERIMENTAL)
  * ============================================================================
  * Implements gpu::GpuBackend for Apple Metal.
  * Wraps the existing secp256k1::metal::MetalRuntime class.
  *
- * Metal is a thin shader runtime -- kernels are compiled from .metal/.metallib
- * files and dispatched via MetalRuntime. Pre-baked batch operations don't
- * exist yet in the Metal layer, so most ops return UNSUPPORTED.
- *
- * Currently supports:
- *   - generator_mul_batch (if scalar_mul_batch pipeline is loaded)
- *   - Everything else → UNSUPPORTED
+ * STATUS: Experimental / discovery-only.
+ * Device discovery and lifecycle (init, device_info) work.
+ * All 6 first-wave batch ops return UNSUPPORTED -- the MSL kernel → metallib
+ * → pipeline dispatch path is not yet wired from CMake.
  *
  * Compiled ONLY when SECP256K1_HAVE_METAL is set (via CMake).
  * Must be compiled as Objective-C++ (.mm) on macOS.
@@ -111,10 +108,7 @@ public:
         const uint8_t* scalars32, size_t count,
         uint8_t* out_pubkeys33) override
     {
-        /* Metal generator_mul_batch requires loading the metallib and
-           dispatching the scalar_mul_batch kernel. Until the MSL shader
-           integration is wired up from CMake (kernel compile → metallib →
-           pipeline), return UNSUPPORTED. */
+        if (!is_ready()) return set_error(GpuError::Device, "context not initialised");
         (void)scalars32; (void)count; (void)out_pubkeys33;
         return set_error(GpuError::Unsupported,
                          "generator_mul_batch not yet wired for Metal");
@@ -124,6 +118,7 @@ public:
         const uint8_t*, const uint8_t*, const uint8_t*,
         size_t, uint8_t*) override
     {
+        if (!is_ready()) return set_error(GpuError::Device, "context not initialised");
         return set_error(GpuError::Unsupported,
                          "ECDSA verify batch not yet available on Metal");
     }
@@ -132,6 +127,7 @@ public:
         const uint8_t*, const uint8_t*, const uint8_t*,
         size_t, uint8_t*) override
     {
+        if (!is_ready()) return set_error(GpuError::Device, "context not initialised");
         return set_error(GpuError::Unsupported,
                          "Schnorr verify batch not yet available on Metal");
     }
@@ -140,6 +136,7 @@ public:
         const uint8_t*, const uint8_t*,
         size_t, uint8_t*) override
     {
+        if (!is_ready()) return set_error(GpuError::Device, "context not initialised");
         return set_error(GpuError::Unsupported,
                          "ECDH batch not yet available on Metal");
     }
@@ -147,6 +144,7 @@ public:
     GpuError hash160_pubkey_batch(
         const uint8_t*, size_t, uint8_t*) override
     {
+        if (!is_ready()) return set_error(GpuError::Device, "context not initialised");
         return set_error(GpuError::Unsupported,
                          "Hash160 batch not yet available on Metal");
     }
@@ -155,6 +153,7 @@ public:
         const uint8_t*, const uint8_t*,
         size_t, uint8_t*) override
     {
+        if (!is_ready()) return set_error(GpuError::Device, "context not initialised");
         return set_error(GpuError::Unsupported,
                          "MSM not yet available on Metal");
     }

@@ -401,6 +401,22 @@ DIFFERENTIAL_MULTIPLIER=100 ./build/cpu/test_cross_libsecp256k1  # 1.3M checks
 
 ---
 
+## GPU C ABI Audit Coverage
+
+| Test | Scope | Source |
+|------|-------|--------|
+| `gpu_abi_gate` | ABI surface, error codes, discovery, lifecycle, NULL safety | `audit/test_gpu_abi_gate.cpp` |
+| `gpu_ops_equivalence` | GPU vs CPU reference: all 6 ops (gen_mul, ecdsa, schnorr, ecdh, hash160, msm) | `audit/test_gpu_ops_equivalence.cpp` |
+| `gpu_host_api_negative` | NULL ptrs, count=0, invalid backend/device, error strings | `audit/test_gpu_host_api_negative.cpp` |
+| `gpu_backend_matrix` | Backend enumeration, device info, per-backend op probing | `audit/test_gpu_backend_matrix.cpp` |
+
+Backend-specific internal audit runners:
+- CUDA: `cuda/src/gpu_audit_runner.cu` (27 modules)
+- OpenCL: `opencl/src/opencl_audit_runner.cpp` (27 modules)
+- Metal: `metal/src/metal_audit_runner.mm` (27 modules)
+
+---
+
 *Generated: 2026-02-25*
 *Invariant source: [INVARIANTS.md](INVARIANTS.md)*
 *This document is auto-updatable via `scripts/generate_traceability.sh`*
