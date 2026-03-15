@@ -129,3 +129,30 @@ jobs:
             -Dsonar.cfamily.compile-commands=${{ env.BUILD_WRAPPER_OUT_DIR }}/compile_commands.json
             -Dsonar.cfamily.llvm-cov.reportPath=build/sonar/llvm-cov-report.txt
             -Dsonar.host.url=https://sonarcloud.io
+
+      - name: Quality Gate diagnostic
+        if: always()
+        env:
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+        run: |
+          # Wait for the CE task to finish processing the uploaded report
+          TASK_ID=$(grep ceTaskId .scannerwork/report-task.txt | cut -d= -f2)
+          echo "CE Task ID: $TASK_ID"
+          for i in $(seq 1 60); do
+            TASK_JSON=$(curl -s -H "Authorization: Bearer $SONAR_TOKEN" \
+              "https://sonarcloud.io/api/ce/task?id=$TASK_ID&additionalFields=warnings")
+            STATUS=$(echo "$TASK_JSON" | jq -r '.task.status // "UNKNOWN"')
+            echo "  Attempt $i: status=$STATUS"
+            if [ "$STATUS" = "SUCCESS" ] || [ "$STATUS" = "FAILED" ]; then
+              ANALYSIS_ID=$(echo "$TASK_JSON" | jq -r '.task.analysisId // empty')
+              echo "Analysis ID: $ANALYSIS_ID"
+              # Try quality gate by analysis ID
+              if [ -n "$ANALYSIS_ID" ]; then
+                curl -s -H "Authorization: Bearer $SONAR_TOKEN" \
+                  "https://sonarcloud.io/api/qualitygates/project_status?analysisId=$ANALYSIS_ID" \
+                  | jq '.' 2>/dev/null || echo "(quality gate query blocked by free plan)"
+              fi
+              break
+            fi
+            sleep 5
+          done

@@ -5,6 +5,114 @@ All notable changes to UltrafastSecp256k1 are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased] (dev branch)
+
+> **Development: post-v3.22.0** | Unified Wallet API, multi-chain address formats, message signing
+
+### Added
+
+- **BIP-39 Mnemonic Seed Phrases** (`bip39.hpp`/`bip39.cpp`) -- entropy-to-mnemonic conversion
+  (12/15/18/21/24 words), mnemonic validation (word count, membership, checksum), seed derivation
+  via PBKDF2-HMAC-SHA512 (2048 rounds), mnemonic-to-entropy roundtrip. OS CSPRNG entropy source.
+  2048-word English wordlist from official BIP-39 specification. 57 tests across 8 test functions.
+  Registered in `run_selftest` (module 10/25) and `unified_audit_runner` (protocol_security).
+- **Zero-Knowledge Proof Layer** (`zk.hpp`/`zk.cpp`) -- non-interactive Schnorr knowledge proofs,
+  DLEQ (discrete log equality) proofs, and Bulletproof range proofs (64-bit). All proving
+  operations use CT layer (constant-time); verification uses FAST layer (public data).
+  Fiat-Shamir via tagged SHA-256. Nothing-up-my-sleeve generators (no trusted setup).
+- **ZK Batch Operations** -- `batch_range_verify()` for efficient multi-proof verification,
+  `batch_commit()` for Pedersen commitment generation.
+- **MSM-optimized Bulletproof verifier** -- multi-scalar multiplication (Pippenger) merges
+  144 points into a single MSM; Montgomery batch inversion for s_coeff (1 inv + 126 muls vs
+  64 inversions). 1.93x speedup (5,079 -> 2,634 us).
+- **GPU ZK kernels** -- Pedersen commitment (`pedersen.cuh`) and ZK proof primitives (`zk.cuh`)
+  for CUDA backend.
+- **GPU CT ZK proving** (`ct_zk.cuh`) -- constant-time knowledge proof and DLEQ proof
+  on CUDA, using the full CT scalar multiplication layer. Deterministic nonce derivation
+  with SHA-256 tagged hash and XOR hedging. Batch kernels for both operations.
+- **OpenCL ZK proving/verification** (`secp256k1_zk.cl`) -- knowledge proof, DLEQ proof,
+  batch prove/verify kernels. Uses fast-path wNAF-5 scalar multiplication.
+- **Metal ZK proving/verification** (`secp256k1_zk.h`, kernels 19-22) -- knowledge proof,
+  DLEQ proof with batch kernels. Uses branchless `affine_select` scalar multiplication.
+- **GPU ZK test coverage** -- `test_ct_smoke.cu` expanded to 9 tests: CT knowledge prove+verify
+  and CT DLEQ prove+verify round-trips verified on GPU (RTX 5060 Ti, Blackwell SM 12.0).
+- **ZK Benchmarks** in `bench_unified` Section 8.5: Pedersen commit, Knowledge prove/verify,
+  DLEQ prove/verify, Bulletproof range prove/verify with throughput numbers.
+- **24 ZK tests** in `test_zk.cpp`: knowledge proof, DLEQ, Bulletproof range proof correctness,
+  soundness, serialization, batch verification, edge cases.
+- **Unified Wallet API** (`wallet.hpp`/`wallet.cpp`) -- chain-agnostic key management, address
+  generation, message signing, and public key recovery. Single `wallet::` namespace works
+  identically across Bitcoin, Ethereum, Tron, and all 28 supported coins.
+- **Bitcoin message signing** (`message_signing.hpp`/`message_signing.cpp`) -- BIP-137/Electrum
+  compatible: `bitcoin_message_hash()`, `bitcoin_sign_message()`, `bitcoin_verify_message()`,
+  `bitcoin_recover_message()`, `bitcoin_sig_to_base64()`, `bitcoin_sig_from_base64()`.
+- **P2SH-P2WPKH** (nested/wrapped SegWit) address generation -- `address_p2sh_p2wpkh()`,
+  `coin_address_p2sh_p2wpkh()`, `wallet::get_address_p2sh_p2wpkh()`. Produces `3...` addresses
+  for backward-compatible SegWit (BIP-49).
+- **P2SH** (pay-to-script-hash) address primitive -- `address_p2sh()`, `coin_address_p2sh()`
+  from raw 20-byte script hash.
+- **P2WSH** (witness script hash) address primitive -- `address_p2wsh()` from 32-byte witness
+  script hash (SegWit v0, `bc1q...` 32-byte program).
+- **CashAddr encoding** (Bitcoin Cash BIP-0185) -- `cashaddr_encode()`, `address_cashaddr()`,
+  `coin_address_cashaddr()`, `wallet::get_address_cashaddr()`. Produces `bitcoincash:q...` addresses.
+- **Tron (TRX) coin descriptor** -- coin_type=195, `TRON_BASE58` encoding (Keccak-256 hash +
+  `0x41` prefix + Base58Check). 28th coin in registry.
+- **5 wallet address helpers** -- `get_address_p2pkh()`, `get_address_p2wpkh()`,
+  `get_address_p2sh_p2wpkh()`, `get_address_p2tr()`, `get_address_cashaddr()`.
+- **`chain_id` field** in `CoinParams` for EIP-155 signing (Ethereum=1, BSC=56, Polygon=137, etc.).
+- **19 new tests** -- 12 in `test_coins.cpp` (P2SH-P2WPKH, CashAddr, P2SH, Tron), 7 in
+  `test_wallet.cpp` (key management, signing, address formats, recovery).
+
+### Fixed
+
+- **CUDA `pedersen.cuh`** -- fixed `.d[]` -> `.limbs[]` member access on `ScalarData`/`FieldElementData`
+  (7+ occurrences), removed calls to non-existent `field_normalize()`, removed duplicate
+  `field_sqrt()` definition (already in `secp256k1.cuh`). These bugs existed since file creation
+  but were never triggered because no test included `pedersen.cuh` before.
+- **CUDA `zk.cuh`** -- fixed `.d[]` -> `.limbs[]` on `Scalar` and `FieldElement` in
+  `knowledge_verify_device`, `dleq_verify_device`, and `range_verify_inner`. Fixed undefined
+  `SCALAR_ONE` constant with inline initializer.
+
+### Changed
+
+- `coin_address()` CASHADDR dispatch now correctly routes to `coin_address_cashaddr()` --
+  Bitcoin Cash addresses generate via CashAddr instead of falling through to Base58Check.
+- All 28 coins now generate addresses correctly (was 27; BCH fixed, Tron added).
+
+---
+
+## [3.22.0] - 2026-03-10
+
+> **Minor release: v3.21.1 -> v3.22.0** | Modular Ethereum layer | ABI extension (backward compatible)
+> New feature: full Ethereum signing/recovery support with conditional build
+
+### Added
+
+- **Modular Ethereum layer** -- EIP-191, EIP-155, ecrecover, personal_sign with conditional
+  CMake option `SECP256K1_BUILD_ETHEREUM` (default ON). Bitcoin-only builds exclude all
+  Ethereum code via `-DSECP256K1_BUILD_ETHEREUM=OFF`. (#144)
+- **eth_signing.hpp/.cpp** -- `eip191_hash()`, `eth_personal_sign()`, `eth_sign_hash()`,
+  `ecrecover()`, `eth_personal_verify()` with EIP-155 chain ID encoding (v = 35+2*chainId+recid).
+- **C ABI Ethereum functions** -- 6 new `ufsecp_*` functions: `ufsecp_keccak256`,
+  `ufsecp_eth_address`, `ufsecp_eth_address_checksummed`, `ufsecp_eth_personal_hash`,
+  `ufsecp_eth_sign`, `ufsecp_eth_ecrecover`. All guarded by `#ifdef SECP256K1_BUILD_ETHEREUM`.
+- **Ethereum test suite** -- 32 tests across 7 groups (EIP-155 encoding, EIP-191 hash,
+  eth_sign_hash, ecrecover, personal_sign+verify, multi-chain, Keccak-256 vectors).
+  Registered as standalone target + `run_selftest` module.
+- **Ethereum benchmarks** -- 8 benchmarks in `bench_unified` Section 6.5: keccak256, ethereum_address,
+  eip191_hash, eth_sign_hash, ecdsa_sign_recoverable, ecrecover, eth_personal_sign, eip55_checksum.
+- **libsecp256k1 recovery comparison** -- enabled `ENABLE_MODULE_RECOVERY=1` in libsecp_provider;
+  added sign_recoverable + recover benchmarks with 3-column apple-to-apple comparison rows.
+- **Ethereum audit module** -- registered in `unified_audit_runner` under `protocol_security` section
+  with conditional compilation guard.
+
+### Changed
+
+- **coin_address.cpp** -- EIP-55 dispatch wrapped with `#ifdef SECP256K1_BUILD_ETHEREUM` guard;
+  returns empty string when Ethereum module not built.
+- **test_coins.cpp** -- All Ethereum-specific tests (Keccak-256, EIP-55, BIP-44 Ethereum paths)
+  wrapped with `#ifdef SECP256K1_BUILD_ETHEREUM` for clean Bitcoin-only builds.
+
 ## [3.21.1] - 2026-03-09
 
 > **Patch release: v3.21.0 -> v3.21.1** | Bug fixes, CI hardening, Metal audit | ABI compatible

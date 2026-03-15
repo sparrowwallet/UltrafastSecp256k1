@@ -11,7 +11,7 @@
 
 /* libsecp256k1 module configuration -- match bitcoin-core defaults */
 #define ENABLE_MODULE_ECDH 0
-#define ENABLE_MODULE_RECOVERY 0
+#define ENABLE_MODULE_RECOVERY 1
 #define ENABLE_MODULE_EXTRAKEYS 1
 #define ENABLE_MODULE_SCHNORRSIG 1
 #define ENABLE_MODULE_MUSIG 0

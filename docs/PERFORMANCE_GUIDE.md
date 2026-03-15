@@ -158,6 +158,8 @@ GPU is beneficial for **embarrassingly parallel** workloads:
 | 1 scalar mul | 25 us | 225 ns + launch overhead | Slower |
 | 1K scalar muls | 25 ms | 0.3 ms | 83x |
 | 1M scalar muls | 25 s | 0.25 s | 100x |
+| 4K ZK knowledge proofs | 99.7 ms | 1.08 ms | 92x |
+| 4K DLEQ proofs | 173.8 ms | 2.77 ms | 63x |
 
 **Rule of thumb**: GPU wins when batch size > 1,000 operations.
 
@@ -249,6 +251,23 @@ auto plan = KPlan::from_scalar(k, 6);  // use w=6 for this call
 | ARM64 (Cortex-A55) | 130.6 us | 129.5 us | -0.9% |
 | x86-64 (i5-14400F) | 16.7 us | 16.8 us | +0.9% |
 
+### ZK Proof Performance
+
+| Operation | Time | Throughput | Bottleneck |
+|-----------|------|------------|------------|
+| Pedersen Commit | 33 us | 30.3K op/s | Two scalar multiplications |
+| Knowledge Prove | 20 us | 49.3K op/s | CT nonce generation + scalar mul |
+| DLEQ Prove | 40 us | 25.0K op/s | Two CT scalar multiplications (both bases) |
+| Range Prove (64b) | 13.5 ms | 74 op/s | 128 scalar muls for vector commitments |
+| Range Verify (64b) | 2.6 ms | 380 op/s | 144-point MSM (Pippenger) |
+
+**Optimization tips:**
+- Range verification uses MSM (Pippenger) for 144 points -- batch multiple proofs with
+  `batch_range_verify()` for amortized verification cost.
+- Generator vectors are cached globally after first computation -- no repeated setup overhead.
+- Montgomery batch inversion in the verifier replaces 64 field inversions with 1 inversion
+  + 126 multiplications.
+
 ### Stack Usage
 
 | Operation | Stack (approx) |
@@ -257,6 +276,8 @@ auto plan = KPlan::from_scalar(k, 6);  // use w=6 for this call
 | Scalar mul | 2 KB |
 | ECDSA sign | 4 KB |
 | FROST sign | 8 KB |
+| ZK Range prove | 12 KB |
+| ZK Range verify | 16 KB |
 | Multi-scalar (N=100) | 16 KB |
 
 Embedded targets (ESP32, STM32) should ensure sufficient stack allocation.
@@ -362,6 +383,8 @@ cmake -S . -B build-profile -DCMAKE_BUILD_TYPE=RelWithDebInfo
 | Generator mul | < 6 us | > 15 us |
 | Scalar mul | < 30 us | > 80 us |
 | ECDSA sign | < 35 us | > 100 us |
+| ZK Knowledge prove | < 25 us | > 50 us |
+| ZK Range verify | < 3,000 us | > 6,000 us |
 | Cache miss rate | < 2% | > 10% |
 | Branch misprediction | < 1% | > 5% |
 

@@ -155,11 +155,36 @@ struct Context::Impl {
     std::string last_error;
     DeviceConfig config;
 
-    // Scratch buffers for temporary storage
-    std::unique_ptr<Buffer> scratch_a;
-    std::unique_ptr<Buffer> scratch_b;
+    // Cached GPU buffers for hot-path batch operations (grow-only, reused across calls)
+    cl_mem cache_smg_scalars = nullptr;  // batch_scalar_mul_generator input
+    cl_mem cache_smg_results = nullptr;  // batch_scalar_mul_generator output
+    std::size_t cache_smg_count = 0;     // current capacity in elements
+
+    cl_mem cache_sm_scalars = nullptr;   // batch_scalar_mul input
+    cl_mem cache_sm_points = nullptr;    // batch_scalar_mul input
+    cl_mem cache_sm_results = nullptr;   // batch_scalar_mul output
+    std::size_t cache_sm_count = 0;
+
+    cl_mem cache_fi_input = nullptr;     // batch_field_inv input
+    cl_mem cache_fi_output = nullptr;    // batch_field_inv output
+    std::size_t cache_fi_count = 0;
+
+    cl_mem cache_j2a_input = nullptr;    // batch_jacobian_to_affine input
+    cl_mem cache_j2a_output = nullptr;   // batch_jacobian_to_affine output
+    std::size_t cache_j2a_count = 0;
 
     ~Impl() {
+        // Release cached buffers
+        if (cache_smg_scalars) clReleaseMemObject(cache_smg_scalars);
+        if (cache_smg_results) clReleaseMemObject(cache_smg_results);
+        if (cache_sm_scalars) clReleaseMemObject(cache_sm_scalars);
+        if (cache_sm_points) clReleaseMemObject(cache_sm_points);
+        if (cache_sm_results) clReleaseMemObject(cache_sm_results);
+        if (cache_fi_input) clReleaseMemObject(cache_fi_input);
+        if (cache_fi_output) clReleaseMemObject(cache_fi_output);
+        if (cache_j2a_input) clReleaseMemObject(cache_j2a_input);
+        if (cache_j2a_output) clReleaseMemObject(cache_j2a_output);
+
         // Release kernels
         if (kernel_field_add) clReleaseKernel(kernel_field_add);
         if (kernel_field_sub) clReleaseKernel(kernel_field_sub);
@@ -607,7 +632,7 @@ inline void field_sqr_impl(FieldElement* r, const FieldElement* a) {
 }
 
 inline void field_sqr_n_impl(FieldElement* r, int n) {
-    for (int i = 0; i < n; i++) { FieldElement tmp = *r; field_sqr_impl(r, &tmp); }
+    for (int i = 0; i < n; i++) field_sqr_impl(r, r);
 }
 
 inline void field_inv_impl(FieldElement* r, const FieldElement* a) {
@@ -784,99 +809,263 @@ inline void point_add_impl(JacobianPoint* r, const JacobianPoint* p, const Jacob
 }
 
 // =============================================================================
-// Field negation: r = -a mod p  (delegates to PTX-optimized field_sub)
+// Field negation: r = p - a (direct, avoids creating zero + field_sub overhead)
 // =============================================================================
 inline void field_neg_impl(FieldElement* r, const FieldElement* a) {
-    FieldElement zero;
-    zero.limbs[0]=0; zero.limbs[1]=0; zero.limbs[2]=0; zero.limbs[3]=0;
-    field_sub_impl(r, &zero, a);
+    ulong a0=a->limbs[0],a1=a->limbs[1],a2=a->limbs[2],a3=a->limbs[3];
+    if ((a0|a1|a2|a3) == 0) { r->limbs[0]=0;r->limbs[1]=0;r->limbs[2]=0;r->limbs[3]=0; return; }
+#ifdef __NV_CL_C_VERSION
+    ulong d0,d1,d2,d3;
+    asm volatile("sub.cc.u64 %0,%4,%8;\n\t" "subc.cc.u64 %1,%5,%9;\n\t"
+        "subc.cc.u64 %2,%6,%10;\n\t" "subc.u64 %3,%7,%11;\n\t"
+        :"=l"(d0),"=l"(d1),"=l"(d2),"=l"(d3)
+        :"l"((ulong)SECP256K1_P0),"l"((ulong)SECP256K1_P1),"l"((ulong)SECP256K1_P2),"l"((ulong)SECP256K1_P3),
+         "l"(a0),"l"(a1),"l"(a2),"l"(a3));
+    r->limbs[0]=d0; r->limbs[1]=d1; r->limbs[2]=d2; r->limbs[3]=d3;
+#else
+    ulong borrow = 0;
+    r->limbs[0] = sub_with_borrow(SECP256K1_P0, a0, 0, &borrow);
+    r->limbs[1] = sub_with_borrow(SECP256K1_P1, a1, borrow, &borrow);
+    r->limbs[2] = sub_with_borrow(SECP256K1_P2, a2, borrow, &borrow);
+    r->limbs[3] = sub_with_borrow(SECP256K1_P3, a3, borrow, &borrow);
+#endif
 }
 
-// =============================================================================
-// Scalar helpers for wNAF encoding (plain integer arithmetic, no mod-order)
-// =============================================================================
 inline int scalar_is_zero_cl(const Scalar* s) {
     return (s->limbs[0] | s->limbs[1] | s->limbs[2] | s->limbs[3]) == 0;
 }
 
-inline void scalar_add_u64_cl(Scalar* a, ulong val) {
-    ulong s = a->limbs[0] + val;
-    ulong c = (s < a->limbs[0]) ? 1UL : 0UL;
-    a->limbs[0] = s;
-    s = a->limbs[1] + c; c = (s < a->limbs[1]) ? 1UL : 0UL;
-    a->limbs[1] = s;
-    s = a->limbs[2] + c; c = (s < a->limbs[2]) ? 1UL : 0UL;
-    a->limbs[2] = s;
-    a->limbs[3] += c;
+// ============================================================================
+// GLV Endomorphism + Shamir's wNAF Scalar Multiplication
+// ============================================================================
+
+// Curve order n (LE 64-bit)
+#define ORDER_N0 0xBFD25E8CD0364141UL
+#define ORDER_N1 0xBAAEDCE6AF48A03BUL
+#define ORDER_N2 0xFFFFFFFFFFFFFFFEUL
+#define ORDER_N3 0xFFFFFFFFFFFFFFFFUL
+
+// NC = 2^256 - n (for scalar reduction)
+#define NC0 0x402DA1732FC9BEBFUL
+#define NC1 0x4551231950B75FC4UL
+#define NC2 0x1UL
+
+// GLV endomorphism: beta^3 = 1 mod p, lambda^3 = 1 mod n
+#define GLV_BETA0 0xC1396C28719501EEUL
+#define GLV_BETA1 0x9CF0497512F58995UL
+#define GLV_BETA2 0x6E64479EAC3434E9UL
+#define GLV_BETA3 0x7AE96A2B657C0710UL
+
+// Decomposition lattice vectors (LE)
+#define GLV_G1_0 0xE893209A45DBB031UL
+#define GLV_G1_1 0x3DAA8A1471E8CA7FUL
+#define GLV_G1_2 0xE86C90E49284EB15UL
+#define GLV_G1_3 0x3086D221A7D46BCDUL
+#define GLV_G2_0 0x1571B4AE8AC47F71UL
+#define GLV_G2_1 0x221208AC9DF506C6UL
+#define GLV_G2_2 0x6F547FA90ABFE4C4UL
+#define GLV_G2_3 0xE4437ED6010E8828UL
+#define GLV_MB1_0 0x6F547FA90ABFE4C3UL
+#define GLV_MB1_1 0xE4437ED6010E8828UL
+#define GLV_MB2_0 0xD765CDA83DB1562CUL
+#define GLV_MB2_1 0x8A280AC50774346DUL
+#define GLV_MB2_2 0xFFFFFFFFFFFFFFFEUL
+#define GLV_MB2_3 0xFFFFFFFFFFFFFFFFUL
+
+// Conditional subtract n (branchless)
+inline void scalar_cond_sub_n_cl(Scalar* r) {
+    ulong n[4] = { ORDER_N0, ORDER_N1, ORDER_N2, ORDER_N3 };
+    ulong borrow = 0, tmp[4];
+    for (int i = 0; i < 4; i++) tmp[i] = sub_with_borrow(r->limbs[i], n[i], borrow, &borrow);
+    ulong mask = (borrow == 0) ? ~0UL : 0UL;
+    for (int i = 0; i < 4; i++) r->limbs[i] = (tmp[i] & mask) | (r->limbs[i] & ~mask);
 }
 
-inline void scalar_sub_u64_cl(Scalar* a, ulong val) {
-    ulong d = a->limbs[0] - val;
-    ulong b = (a->limbs[0] < val) ? 1UL : 0UL;
-    a->limbs[0] = d;
-    d = a->limbs[1] - b; b = (a->limbs[1] < b) ? 1UL : 0UL;
-    a->limbs[1] = d;
-    d = a->limbs[2] - b; b = (a->limbs[2] < b) ? 1UL : 0UL;
-    a->limbs[2] = d;
-    a->limbs[3] -= b;
+inline void scalar_add_mod_n_cl(const Scalar* a, const Scalar* b, Scalar* r) {
+    ulong carry = 0;
+    for (int i = 0; i < 4; i++) r->limbs[i] = add_with_carry(a->limbs[i], b->limbs[i], carry, &carry);
+    if (carry) {
+        ulong n[4] = { ORDER_N0, ORDER_N1, ORDER_N2, ORDER_N3 };
+        ulong borrow = 0;
+        for (int i = 0; i < 4; i++) r->limbs[i] = sub_with_borrow(r->limbs[i], n[i], borrow, &borrow);
+    } else { scalar_cond_sub_n_cl(r); }
 }
 
-inline void scalar_shr1_cl(Scalar* s) {
-    s->limbs[0] = (s->limbs[0] >> 1) | (s->limbs[1] << 63);
-    s->limbs[1] = (s->limbs[1] >> 1) | (s->limbs[2] << 63);
-    s->limbs[2] = (s->limbs[2] >> 1) | (s->limbs[3] << 63);
-    s->limbs[3] = s->limbs[3] >> 1;
-}
-
-// wNAF encoding (window width 5): digits in {-15,...,15}, ~51 non-zero digits
-inline int scalar_to_wnaf_cl(const Scalar* k, int* wnaf) {
-    Scalar temp = *k;
-    int len = 0;
-    while (!scalar_is_zero_cl(&temp) && len < 260) {
-        if (temp.limbs[0] & 1UL) {
-            int digit = (int)(temp.limbs[0] & 31UL);
-            if (digit >= 16) {
-                digit -= 32;
-                scalar_add_u64_cl(&temp, (ulong)(-digit));
-            } else {
-                scalar_sub_u64_cl(&temp, (ulong)digit);
-            }
-            wnaf[len] = digit;
-        } else {
-            wnaf[len] = 0;
-        }
-        scalar_shr1_cl(&temp);
-        len++;
+inline void scalar_sub_mod_n_cl(const Scalar* a, const Scalar* b, Scalar* r) {
+    ulong borrow = 0;
+    for (int i = 0; i < 4; i++) r->limbs[i] = sub_with_borrow(a->limbs[i], b->limbs[i], borrow, &borrow);
+    if (borrow) {
+        ulong n[4] = { ORDER_N0, ORDER_N1, ORDER_N2, ORDER_N3 };
+        ulong carry = 0;
+        for (int i = 0; i < 4; i++) r->limbs[i] = add_with_carry(r->limbs[i], n[i], carry, &carry);
     }
-    return len;
 }
 
-// wNAF scalar multiplication core: precompute table [P,3P,...,15P], scan MSB->LSB
-inline void scalar_mul_wnaf(JacobianPoint* r, const Scalar* k, const JacobianPoint* base_jac) {
-    // wNAF encode
-    int wnaf[260];
-    int wnaf_len = scalar_to_wnaf_cl(k, wnaf);
+inline void scalar_negate_cl(const Scalar* a, Scalar* r) {
+    ulong n[4] = { ORDER_N0, ORDER_N1, ORDER_N2, ORDER_N3 };
+    int is_zero = scalar_is_zero_cl(a);
+    ulong borrow = 0;
+    for (int i = 0; i < 4; i++) r->limbs[i] = sub_with_borrow(n[i], a->limbs[i], borrow, &borrow);
+    if (is_zero) { r->limbs[0]=0; r->limbs[1]=0; r->limbs[2]=0; r->limbs[3]=0; }
+}
 
-    // Precompute odd multiples: table[i] = (2i+1)*base
-    JacobianPoint table[8];
-    JacobianPoint dbl;
-    table[0] = *base_jac;
-    point_double_impl(&dbl, base_jac);
-    for (int i = 1; i < 8; i++)
-        point_add_impl(&table[i], &table[i-1], &dbl);
-
-    // Scan from MSB
-    point_set_infinity(r);
-    for (int i = wnaf_len - 1; i >= 0; --i) {
-        point_double_impl(r, r);
-        int digit = wnaf[i];
-        if (digit > 0) {
-            point_add_impl(r, r, &table[(digit - 1) >> 1]);
-        } else if (digit < 0) {
-            JacobianPoint neg = table[(-digit - 1) >> 1];
-            field_neg_impl(&neg.y, &neg.y);
-            point_add_impl(r, r, &neg);
+// Scalar mul mod n (schoolbook 4x4 + NC reduction)
+inline void scalar_mul_mod_n_cl(const Scalar* a, const Scalar* b, Scalar* r) {
+    ulong NC[3] = { NC0, NC1, NC2 };
+    ulong prod[8] = {0,0,0,0,0,0,0,0};
+    for (int i = 0; i < 4; i++) {
+        ulong carry = 0;
+        for (int j = 0; j < 4; j++) {
+            ulong2 full = mul64_full(a->limbs[i], b->limbs[j]);
+            ulong s = prod[i+j] + full.x; ulong c1 = (s < prod[i+j]) ? 1UL : 0UL;
+            s += carry; ulong c2 = (s < carry) ? 1UL : 0UL;
+            prod[i+j] = s; carry = full.y + c1 + c2;
         }
+        prod[i+4] = carry;
+    }
+    ulong acc[7] = {prod[0],prod[1],prod[2],prod[3],0,0,0};
+    for (int i = 0; i < 4; i++) {
+        if (prod[4+i] == 0) continue;
+        ulong carry = 0;
+        for (int j = 0; j < 3; j++) {
+            ulong2 full = mul64_full(prod[4+i], NC[j]);
+            ulong s = acc[i+j] + full.x; ulong c1 = (s < acc[i+j]) ? 1UL : 0UL;
+            s += carry; ulong c2 = (s < carry) ? 1UL : 0UL;
+            acc[i+j] = s; carry = full.y + c1 + c2;
+        }
+        for (int k = i+3; k < 7 && carry; k++) { ulong s = acc[k]+carry; carry=(s<acc[k])?1UL:0UL; acc[k]=s; }
+    }
+    ulong res[5] = {acc[0],acc[1],acc[2],acc[3],0};
+    for (int i = 0; i < 3; i++) {
+        if (acc[4+i] == 0) continue;
+        ulong carry = 0;
+        for (int j = 0; j < 3 && (i+j) < 5; j++) {
+            ulong2 full = mul64_full(acc[4+i], NC[j]);
+            ulong s = res[i+j]+full.x; ulong c1=(s<res[i+j])?1UL:0UL;
+            s += carry; ulong c2=(s<carry)?1UL:0UL;
+            res[i+j] = s; carry = full.y+c1+c2;
+        }
+        for (int k=i+3; k<5&&carry; k++) { ulong s=res[k]+carry; carry=(s<res[k])?1UL:0UL; res[k]=s; }
+    }
+    r->limbs[0]=res[0]; r->limbs[1]=res[1]; r->limbs[2]=res[2]; r->limbs[3]=res[3];
+    if (res[4]) {
+        ulong carry = 0;
+        for (int j = 0; j < 3; j++) {
+            ulong2 full = mul64_full(res[4], NC[j]);
+            ulong s = r->limbs[j]+full.x; ulong c1=(s<r->limbs[j])?1UL:0UL;
+            s += carry; ulong c2=(s<carry)?1UL:0UL;
+            r->limbs[j] = s; carry = full.y+c1+c2;
+        }
+        r->limbs[3] += carry;
+    }
+    scalar_cond_sub_n_cl(r); scalar_cond_sub_n_cl(r); scalar_cond_sub_n_cl(r);
+}
+
+// Scalar bit length (uses clz intrinsic -- single instruction on GPU)
+inline int scalar_bitlen_cl(const Scalar* s) {
+    for (int i = 3; i >= 0; i--) {
+        if (s->limbs[i] != 0) return i * 64 + 64 - (int)clz(s->limbs[i]);
+    }
+    return 0;
+}
+
+// (a * b) >> 384 with rounding (for GLV decomposition)
+inline void mul_shift_384_cl(const ulong a[4], const ulong b[4], ulong result[4]) {
+    ulong prod[8] = {0,0,0,0,0,0,0,0};
+    for (int i = 0; i < 4; i++) {
+        ulong carry = 0;
+        for (int j = 0; j < 4; j++) {
+            ulong2 full = mul64_full(a[i], b[j]);
+            ulong s = prod[i+j]+full.x; ulong c1=(s<prod[i+j])?1UL:0UL;
+            s += carry; ulong c2=(s<carry)?1UL:0UL;
+            prod[i+j] = s; carry = full.y+c1+c2;
+        }
+        prod[i+4] = carry;
+    }
+    result[0] = prod[6]; result[1] = prod[7]; result[2] = 0; result[3] = 0;
+    if (prod[5] >> 63) { result[0]++; if (result[0] == 0) result[1]++; }
+}
+
+// GLV decomposition: k = k1 + k2*lambda mod n, |k1|,|k2| ~ 128 bits
+inline void glv_decompose_cl(const Scalar* k, Scalar* k1, Scalar* k2, int* k1_neg, int* k2_neg) {
+    ulong g1[4] = { GLV_G1_0, GLV_G1_1, GLV_G1_2, GLV_G1_3 };
+    ulong g2[4] = { GLV_G2_0, GLV_G2_1, GLV_G2_2, GLV_G2_3 };
+    ulong c1_l[4], c2_l[4];
+    mul_shift_384_cl(k->limbs, g1, c1_l);
+    mul_shift_384_cl(k->limbs, g2, c2_l);
+    Scalar c1, c2;
+    for (int i=0;i<4;i++){c1.limbs[i]=c1_l[i]; c2.limbs[i]=c2_l[i];}
+
+    Scalar mb1, mb2;
+    mb1.limbs[0]=GLV_MB1_0; mb1.limbs[1]=GLV_MB1_1; mb1.limbs[2]=0; mb1.limbs[3]=0;
+    mb2.limbs[0]=GLV_MB2_0; mb2.limbs[1]=GLV_MB2_1; mb2.limbs[2]=GLV_MB2_2; mb2.limbs[3]=GLV_MB2_3;
+
+    Scalar t1, t2, k2_mod;
+    scalar_mul_mod_n_cl(&c1, &mb1, &t1);
+    scalar_mul_mod_n_cl(&c2, &mb2, &t2);
+    scalar_add_mod_n_cl(&t1, &t2, &k2_mod);
+
+    Scalar k2_neg_val;
+    scalar_negate_cl(&k2_mod, &k2_neg_val);
+    int k2_is_neg = (scalar_bitlen_cl(&k2_neg_val) < scalar_bitlen_cl(&k2_mod));
+    Scalar k2_abs = k2_is_neg ? k2_neg_val : k2_mod;
+
+    Scalar k2_signed;
+    if (k2_is_neg) scalar_negate_cl(&k2_abs, &k2_signed);
+    else k2_signed = k2_abs;
+
+    Scalar lambda_s;
+    lambda_s.limbs[0]=0xDF02967C1B23BD72UL; lambda_s.limbs[1]=0x122E22EA20816678UL;
+    lambda_s.limbs[2]=0xA5261C028812645AUL; lambda_s.limbs[3]=0x5363AD4CC05C30E0UL;
+    Scalar lk2;
+    scalar_mul_mod_n_cl(&lambda_s, &k2_signed, &lk2);
+    Scalar k1_mod;
+    scalar_sub_mod_n_cl(k, &lk2, &k1_mod);
+
+    Scalar k1_neg_val;
+    scalar_negate_cl(&k1_mod, &k1_neg_val);
+    int k1_is_neg = (scalar_bitlen_cl(&k1_neg_val) < scalar_bitlen_cl(&k1_mod));
+    Scalar k1_abs = k1_is_neg ? k1_neg_val : k1_mod;
+
+    *k1 = k1_abs; *k2 = k2_abs;
+    *k1_neg = k1_is_neg; *k2_neg = k2_is_neg;
+}
+
+// GLV + interleaved binary scalar multiplication: k*P
+// GPU-optimized: NO tables, two affine bases, mixed additions, minimal registers (~92)
+// SIMT-aware: two independent if-blocks (not else-if) for optimal warp divergence
+inline void scalar_mul_glv_cl(JacobianPoint* r, const Scalar* k, const AffinePoint* base) {
+    if (scalar_is_zero_cl(k)) { point_set_infinity(r); return; }
+
+    Scalar k1, k2; int k1_neg, k2_neg;
+    glv_decompose_cl(k, &k1, &k2, &k1_neg, &k2_neg);
+
+    // Two affine bases: P and phi(P) = (beta*P.x, (+/-)P.y)
+    AffinePoint P = *base;
+    if (k1_neg) field_neg_impl(&P.y, &P.y);
+
+    FieldElement beta;
+    beta.limbs[0]=GLV_BETA0; beta.limbs[1]=GLV_BETA1;
+    beta.limbs[2]=GLV_BETA2; beta.limbs[3]=GLV_BETA3;
+
+    AffinePoint phi_P;
+    field_mul_impl(&phi_P.x, &P.x, &beta);
+    if (k1_neg != k2_neg) field_neg_impl(&phi_P.y, &P.y);
+    else phi_P.y = P.y;
+
+    // Find max bit length of k1, k2
+    int bl1 = scalar_bitlen_cl(&k1);
+    int bl2 = scalar_bitlen_cl(&k2);
+    int max_bit = (bl1 > bl2) ? bl1 : bl2;
+
+    // Interleaved binary double-and-add with mixed additions
+    point_set_infinity(r);
+    for (int i = max_bit - 1; i >= 0; --i) {
+        if (!point_is_infinity(r)) point_double_impl(r, r);
+        int b1 = (int)((k1.limbs[i >> 6] >> (i & 63)) & 1UL);
+        int b2 = (int)((k2.limbs[i >> 6] >> (i & 63)) & 1UL);
+        if (b1) point_add_mixed_impl(r, r, &P);
+        if (b2) point_add_mixed_impl(r, r, &phi_P);
     }
 }
 
@@ -891,18 +1080,72 @@ inline void scalar_mul_wnaf(JacobianPoint* r, const Scalar* k, const JacobianPoi
 
 inline void get_generator(AffinePoint* g) { g->x.limbs[0]=GX0; g->x.limbs[1]=GX1; g->x.limbs[2]=GX2; g->x.limbs[3]=GX3; g->y.limbs[0]=GY0; g->y.limbs[1]=GY1; g->y.limbs[2]=GY2; g->y.limbs[3]=GY3; }
 
+// Precomputed generator multiples: get_gen_entry(pt, idx) returns (idx+1)*G
+// Using inline function instead of __constant array for OpenCL compiler compatibility
+inline void get_gen_entry(AffinePoint* pt, int idx) {
+    switch(idx) {
+    case 0: pt->x.limbs[0]=0x59f2815b16f81798UL;pt->x.limbs[1]=0x029bfcdb2dce28d9UL;pt->x.limbs[2]=0x55a06295ce870b07UL;pt->x.limbs[3]=0x79be667ef9dcbbacUL;pt->y.limbs[0]=0x9c47d08ffb10d4b8UL;pt->y.limbs[1]=0xfd17b448a6855419UL;pt->y.limbs[2]=0x5da4fbfc0e1108a8UL;pt->y.limbs[3]=0x483ada7726a3c465UL;break;
+    case 1: pt->x.limbs[0]=0xabac09b95c709ee5UL;pt->x.limbs[1]=0x5c778e4b8cef3ca7UL;pt->x.limbs[2]=0x3045406e95c07cd8UL;pt->x.limbs[3]=0xc6047f9441ed7d6dUL;pt->y.limbs[0]=0x236431a950cfe52aUL;pt->y.limbs[1]=0xf7f632653266d0e1UL;pt->y.limbs[2]=0xa3c58419466ceaeeUL;pt->y.limbs[3]=0x1ae168fea63dc339UL;break;
+    case 2: pt->x.limbs[0]=0x8601f113bce036f9UL;pt->x.limbs[1]=0xb531c845836f99b0UL;pt->x.limbs[2]=0x49344f85f89d5229UL;pt->x.limbs[3]=0xf9308a019258c310UL;pt->y.limbs[0]=0x6cb9fd7584b8e672UL;pt->y.limbs[1]=0x6500a99934c2231bUL;pt->y.limbs[2]=0x0fe337e62a37f356UL;pt->y.limbs[3]=0x388f7b0f632de814UL;break;
+    case 3: pt->x.limbs[0]=0x74fa94abe8c4cd13UL;pt->x.limbs[1]=0xcc6c13900ee07584UL;pt->x.limbs[2]=0x581e4904930b1404UL;pt->x.limbs[3]=0xe493dbf1c10d80f3UL;pt->y.limbs[0]=0xcfe97bdc47739922UL;pt->y.limbs[1]=0xd967ae33bfbdfe40UL;pt->y.limbs[2]=0x5642e2098ea51448UL;pt->y.limbs[3]=0x51ed993ea0d455b7UL;break;
+    case 4: pt->x.limbs[0]=0xcba8d569b240efe4UL;pt->x.limbs[1]=0xe88b84bddc619ab7UL;pt->x.limbs[2]=0x55b4a7250a5c5128UL;pt->x.limbs[3]=0x2f8bde4d1a072093UL;pt->y.limbs[0]=0xdca87d3aa6ac62d6UL;pt->y.limbs[1]=0xf788271bab0d6840UL;pt->y.limbs[2]=0xd4dba9dda6c9c426UL;pt->y.limbs[3]=0xd8ac222636e5e3d6UL;break;
+    case 5: pt->x.limbs[0]=0x2f057a1460297556UL;pt->x.limbs[1]=0x82f6472f8568a18bUL;pt->x.limbs[2]=0x20453a14355235d3UL;pt->x.limbs[3]=0xfff97bd5755eeea4UL;pt->y.limbs[0]=0x3c870c36b075f297UL;pt->y.limbs[1]=0xde80f0f6518fe4a0UL;pt->y.limbs[2]=0xf3be96017f45c560UL;pt->y.limbs[3]=0xae12777aacfbb620UL;break;
+    case 6: pt->x.limbs[0]=0xe92bddedcac4f9bcUL;pt->x.limbs[1]=0x3d419b7e0330e39cUL;pt->x.limbs[2]=0xa398f365f2ea7a0eUL;pt->x.limbs[3]=0x5cbdf0646e5db4eaUL;pt->y.limbs[0]=0xa5082628087264daUL;pt->y.limbs[1]=0xa813d0b813fde7b5UL;pt->y.limbs[2]=0xa3178d6d861a54dbUL;pt->y.limbs[3]=0x6aebca40ba255960UL;break;
+    case 7: pt->x.limbs[0]=0x67784ef3e10a2a01UL;pt->x.limbs[1]=0x0a1bdd05e5af888aUL;pt->x.limbs[2]=0xaff3843fb70f3c2fUL;pt->x.limbs[3]=0x2f01e5e15cca351dUL;pt->y.limbs[0]=0xb5da2cb76cbde904UL;pt->y.limbs[1]=0xc2e213d6ba5b7617UL;pt->y.limbs[2]=0x293d082a132d13b4UL;pt->y.limbs[3]=0x5c4da8a741539949UL;break;
+    case 8: pt->x.limbs[0]=0xc35f110dfc27ccbeUL;pt->x.limbs[1]=0xe09796974c57e714UL;pt->x.limbs[2]=0x09ad178a9f559abdUL;pt->x.limbs[3]=0xacd484e2f0c7f653UL;pt->y.limbs[0]=0x05cc262ac64f9c37UL;pt->y.limbs[1]=0xadd888a4375f8e0fUL;pt->y.limbs[2]=0x64380971763b61e9UL;pt->y.limbs[3]=0xcc338921b0a7d9fdUL;break;
+    case 9: pt->x.limbs[0]=0x52a68e2a47e247c7UL;pt->x.limbs[1]=0x3442d49b1943c2b7UL;pt->x.limbs[2]=0x35477c7b1ae6ae5dUL;pt->x.limbs[3]=0xa0434d9e47f3c862UL;pt->y.limbs[0]=0x3cbee53b037368d7UL;pt->y.limbs[1]=0x6f794c2ed877a159UL;pt->y.limbs[2]=0xa3b6c7e693a24c69UL;pt->y.limbs[3]=0x893aba425419bc27UL;break;
+    case 10: pt->x.limbs[0]=0xbbec17895da008cbUL;pt->x.limbs[1]=0x5649980be5c17891UL;pt->x.limbs[2]=0x5ef4246b70c65aacUL;pt->x.limbs[3]=0x774ae7f858a9411eUL;pt->y.limbs[0]=0x301d74c9c953c61bUL;pt->y.limbs[1]=0x372db1e2dff9d6a8UL;pt->y.limbs[2]=0x0243dd56d7b7b365UL;pt->y.limbs[3]=0xd984a032eb6b5e19UL;break;
+    case 11: pt->x.limbs[0]=0xc5b0f47070afe85aUL;pt->x.limbs[1]=0x687cf4419620095bUL;pt->x.limbs[2]=0x15c38f004d734633UL;pt->x.limbs[3]=0xd01115d548e7561bUL;pt->y.limbs[0]=0x6b051b13f4062327UL;pt->y.limbs[1]=0x79238c5dd9a86d52UL;pt->y.limbs[2]=0xa8b64537e17bd815UL;pt->y.limbs[3]=0xa9f34ffdc815e0d7UL;break;
+    case 12: pt->x.limbs[0]=0xdeeddf8f19405aa8UL;pt->x.limbs[1]=0xb075fbc6610e58cdUL;pt->x.limbs[2]=0xc7d1d205c3748651UL;pt->x.limbs[3]=0xf28773c2d975288bUL;pt->y.limbs[0]=0x29b5cb52db03ed81UL;pt->y.limbs[1]=0x3a1a06da521fa91fUL;pt->y.limbs[2]=0x758212eb65cdaf47UL;pt->y.limbs[3]=0x0ab0902e8d880a89UL;break;
+    case 13: pt->x.limbs[0]=0xe49b241a60e823e4UL;pt->x.limbs[1]=0x26aa7b63678949e6UL;pt->x.limbs[2]=0xfd64e67f07d38e32UL;pt->x.limbs[3]=0x499fdf9e895e719cUL;pt->y.limbs[0]=0xc65f40d403a13f5bUL;pt->y.limbs[1]=0x464279c27a3f95bcUL;pt->y.limbs[2]=0x90f044e4a7b3d464UL;pt->y.limbs[3]=0xcac2f6c4b54e8551UL;break;
+    default: pt->x.limbs[0]=0x44adbcf8e27e080eUL;pt->x.limbs[1]=0x31e5946f3c85f79eUL;pt->x.limbs[2]=0x5a465ae3095ff411UL;pt->x.limbs[3]=0xd7924d4f7d43ea96UL;pt->y.limbs[0]=0xc504dc9ff6a26b58UL;pt->y.limbs[1]=0xea40af2bd896d3a5UL;pt->y.limbs[2]=0x83842ec228cc6defUL;pt->y.limbs[3]=0x581e2872a86c72a6UL;break;
+    }
+}
+
+inline int get_window_4bit(const Scalar* s, int pos) {
+    int bp = pos * 4, li = bp >> 6, sh = bp & 63;
+    ulong v = s->limbs[li] >> sh;
+    if (sh > 60 && li < 3) v |= s->limbs[li+1] << (64 - sh);
+    return (int)(v & 0xFUL);
+}
+
 __kernel void scalar_mul_generator(__global const Scalar* scalars, __global JacobianPoint* results, uint count) {
     uint gid = get_global_id(0); if (gid >= count) return;
     Scalar k = scalars[gid];
     JacobianPoint R;
     if ((k.limbs[0]|k.limbs[1]|k.limbs[2]|k.limbs[3]) == 0) { point_set_infinity(&R); results[gid] = R; return; }
+
+    Scalar k1, k2; int k1_neg, k2_neg;
+    glv_decompose_cl(&k, &k1, &k2, &k1_neg, &k2_neg);
+
+    FieldElement beta;
+    beta.limbs[0]=GLV_BETA0; beta.limbs[1]=GLV_BETA1;
+    beta.limbs[2]=GLV_BETA2; beta.limbs[3]=GLV_BETA3;
+
+    // Compute actual number of 4-bit windows needed
+    int bl1 = scalar_bitlen_cl(&k1);
+    int bl2 = scalar_bitlen_cl(&k2);
+    int max_bits = (bl1 > bl2) ? bl1 : bl2;
+    int num_windows = (max_bits + 3) / 4;
+
     point_set_infinity(&R);
-    AffinePoint G; get_generator(&G);
-    int started = 0;
-    for (int limb = 3; limb >= 0; limb--) {
-        for (int bit = 63; bit >= 0; bit--) {
-            if (started) point_double_impl(&R, &R);
-            if ((k.limbs[limb] >> bit) & 1) { if (!started) { R.x = G.x; R.y = G.y; R.z.limbs[0]=1; R.z.limbs[1]=0; R.z.limbs[2]=0; R.z.limbs[3]=0; R.infinity=0; started=1; } else { point_add_mixed_impl(&R, &R, &G); } }
+    for (int w = num_windows - 1; w >= 0; --w) {
+        if (!point_is_infinity(&R)) {
+            point_double_impl(&R, &R); point_double_impl(&R, &R);
+            point_double_impl(&R, &R); point_double_impl(&R, &R);
+        }
+        int w1 = get_window_4bit(&k1, w);
+        if (w1) {
+            AffinePoint pt; get_gen_entry(&pt, w1 - 1);
+            if (k1_neg) field_neg_impl(&pt.y, &pt.y);
+            point_add_mixed_impl(&R, &R, &pt);
+        }
+        int w2 = get_window_4bit(&k2, w);
+        if (w2) {
+            AffinePoint pt; get_gen_entry(&pt, w2 - 1);
+            field_mul_impl(&pt.x, &pt.x, &beta);
+            if (k2_neg) field_neg_impl(&pt.y, &pt.y);
+            point_add_mixed_impl(&R, &R, &pt);
         }
     }
     results[gid] = R;
@@ -922,17 +1165,7 @@ __kernel void point_add(__global const JacobianPoint* p, __global const Jacobian
 
 inline void scalar_mul_impl(JacobianPoint* r, const Scalar* k, const AffinePoint* p) {
     if ((k->limbs[0]|k->limbs[1]|k->limbs[2]|k->limbs[3]) == 0) { point_set_infinity(r); return; }
-    point_set_infinity(r);
-    int started = 0;
-    for (int limb = 3; limb >= 0; limb--) {
-        for (int bit = 63; bit >= 0; bit--) {
-            if (started) point_double_impl(r, r);
-            if ((k->limbs[limb] >> bit) & 1) {
-                if (!started) { r->x = p->x; r->y = p->y; r->z.limbs[0]=1; r->z.limbs[1]=0; r->z.limbs[2]=0; r->z.limbs[3]=0; r->infinity=0; started=1; }
-                else { point_add_mixed_impl(r, r, p); }
-            }
-        }
-    }
+    scalar_mul_glv_cl(r, k, p);
 }
 
 __kernel void scalar_mul(__global const Scalar* scalars, __global const AffinePoint* points, __global JacobianPoint* results, uint count) {
@@ -1627,14 +1860,24 @@ void Context::batch_scalar_mul_generator(const Scalar* scalars, JacobianPoint* r
 
     cl_int err;
 
-    cl_mem buf_scalars = clCreateBuffer(impl_->context, CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR,
-                                         count * sizeof(Scalar), (void*)scalars, &err);
-    cl_mem buf_results = clCreateBuffer(impl_->context, CL_MEM_WRITE_ONLY,
-                                         count * sizeof(JacobianPoint), nullptr, &err);
+    // Grow-only cached buffers: reuse if capacity is sufficient, else reallocate
+    if (count > impl_->cache_smg_count) {
+        if (impl_->cache_smg_scalars) clReleaseMemObject(impl_->cache_smg_scalars);
+        if (impl_->cache_smg_results) clReleaseMemObject(impl_->cache_smg_results);
+        impl_->cache_smg_scalars = clCreateBuffer(impl_->context, CL_MEM_READ_ONLY,
+                                                   count * sizeof(Scalar), nullptr, &err);
+        impl_->cache_smg_results = clCreateBuffer(impl_->context, CL_MEM_WRITE_ONLY,
+                                                   count * sizeof(JacobianPoint), nullptr, &err);
+        impl_->cache_smg_count = count;
+    }
+
+    // Upload scalars (async)
+    clEnqueueWriteBuffer(impl_->queue, impl_->cache_smg_scalars, CL_FALSE, 0,
+                         count * sizeof(Scalar), scalars, 0, nullptr, nullptr);
 
     cl_uint cnt = static_cast<cl_uint>(count);
-    clSetKernelArg(impl_->kernel_scalar_mul_generator, 0, sizeof(cl_mem), &buf_scalars);
-    clSetKernelArg(impl_->kernel_scalar_mul_generator, 1, sizeof(cl_mem), &buf_results);
+    clSetKernelArg(impl_->kernel_scalar_mul_generator, 0, sizeof(cl_mem), &impl_->cache_smg_scalars);
+    clSetKernelArg(impl_->kernel_scalar_mul_generator, 1, sizeof(cl_mem), &impl_->cache_smg_results);
     clSetKernelArg(impl_->kernel_scalar_mul_generator, 2, sizeof(cl_uint), &cnt);
 
     // Calculate work group size
@@ -1647,11 +1890,8 @@ void Context::batch_scalar_mul_generator(const Scalar* scalars, JacobianPoint* r
 
     clEnqueueNDRangeKernel(impl_->queue, impl_->kernel_scalar_mul_generator, 1, nullptr,
                            &global_size, &local_size, 0, nullptr, nullptr);
-    clEnqueueReadBuffer(impl_->queue, buf_results, CL_TRUE, 0,
+    clEnqueueReadBuffer(impl_->queue, impl_->cache_smg_results, CL_TRUE, 0,
                         count * sizeof(JacobianPoint), results, 0, nullptr, nullptr);
-
-    clReleaseMemObject(buf_scalars);
-    clReleaseMemObject(buf_results);
 }
 
 void Context::batch_scalar_mul(const Scalar* scalars, const AffinePoint* points,
@@ -1660,17 +1900,29 @@ void Context::batch_scalar_mul(const Scalar* scalars, const AffinePoint* points,
 
     cl_int err;
 
-    cl_mem buf_scalars = clCreateBuffer(impl_->context, CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR,
-                                         count * sizeof(Scalar), (void*)scalars, &err);
-    cl_mem buf_points = clCreateBuffer(impl_->context, CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR,
-                                        count * sizeof(AffinePoint), (void*)points, &err);
-    cl_mem buf_results = clCreateBuffer(impl_->context, CL_MEM_WRITE_ONLY,
-                                         count * sizeof(JacobianPoint), nullptr, &err);
+    // Grow-only cached buffers
+    if (count > impl_->cache_sm_count) {
+        if (impl_->cache_sm_scalars) clReleaseMemObject(impl_->cache_sm_scalars);
+        if (impl_->cache_sm_points) clReleaseMemObject(impl_->cache_sm_points);
+        if (impl_->cache_sm_results) clReleaseMemObject(impl_->cache_sm_results);
+        impl_->cache_sm_scalars = clCreateBuffer(impl_->context, CL_MEM_READ_ONLY,
+                                                  count * sizeof(Scalar), nullptr, &err);
+        impl_->cache_sm_points = clCreateBuffer(impl_->context, CL_MEM_READ_ONLY,
+                                                 count * sizeof(AffinePoint), nullptr, &err);
+        impl_->cache_sm_results = clCreateBuffer(impl_->context, CL_MEM_WRITE_ONLY,
+                                                  count * sizeof(JacobianPoint), nullptr, &err);
+        impl_->cache_sm_count = count;
+    }
+
+    clEnqueueWriteBuffer(impl_->queue, impl_->cache_sm_scalars, CL_FALSE, 0,
+                         count * sizeof(Scalar), scalars, 0, nullptr, nullptr);
+    clEnqueueWriteBuffer(impl_->queue, impl_->cache_sm_points, CL_FALSE, 0,
+                         count * sizeof(AffinePoint), points, 0, nullptr, nullptr);
 
     cl_uint cnt = static_cast<cl_uint>(count);
-    clSetKernelArg(impl_->kernel_scalar_mul, 0, sizeof(cl_mem), &buf_scalars);
-    clSetKernelArg(impl_->kernel_scalar_mul, 1, sizeof(cl_mem), &buf_points);
-    clSetKernelArg(impl_->kernel_scalar_mul, 2, sizeof(cl_mem), &buf_results);
+    clSetKernelArg(impl_->kernel_scalar_mul, 0, sizeof(cl_mem), &impl_->cache_sm_scalars);
+    clSetKernelArg(impl_->kernel_scalar_mul, 1, sizeof(cl_mem), &impl_->cache_sm_points);
+    clSetKernelArg(impl_->kernel_scalar_mul, 2, sizeof(cl_mem), &impl_->cache_sm_results);
     clSetKernelArg(impl_->kernel_scalar_mul, 3, sizeof(cl_uint), &cnt);
 
     std::size_t local_size = std::min(static_cast<std::size_t>(256), impl_->device_info.max_work_group_size);
@@ -1678,12 +1930,8 @@ void Context::batch_scalar_mul(const Scalar* scalars, const AffinePoint* points,
 
     clEnqueueNDRangeKernel(impl_->queue, impl_->kernel_scalar_mul, 1, nullptr,
                            &global_size, &local_size, 0, nullptr, nullptr);
-    clEnqueueReadBuffer(impl_->queue, buf_results, CL_TRUE, 0,
+    clEnqueueReadBuffer(impl_->queue, impl_->cache_sm_results, CL_TRUE, 0,
                         count * sizeof(JacobianPoint), results, 0, nullptr, nullptr);
-
-    clReleaseMemObject(buf_scalars);
-    clReleaseMemObject(buf_points);
-    clReleaseMemObject(buf_results);
 }
 
 void Context::batch_field_inv(const FieldElement* inputs, FieldElement* outputs, std::size_t count) {
@@ -1691,14 +1939,23 @@ void Context::batch_field_inv(const FieldElement* inputs, FieldElement* outputs,
 
     cl_int err;
 
-    cl_mem buf_in = clCreateBuffer(impl_->context, CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR,
-                                    count * sizeof(FieldElement), (void*)inputs, &err);
-    cl_mem buf_out = clCreateBuffer(impl_->context, CL_MEM_WRITE_ONLY,
-                                     count * sizeof(FieldElement), nullptr, &err);
+    // Grow-only cached buffers
+    if (count > impl_->cache_fi_count) {
+        if (impl_->cache_fi_input) clReleaseMemObject(impl_->cache_fi_input);
+        if (impl_->cache_fi_output) clReleaseMemObject(impl_->cache_fi_output);
+        impl_->cache_fi_input = clCreateBuffer(impl_->context, CL_MEM_READ_ONLY,
+                                                count * sizeof(FieldElement), nullptr, &err);
+        impl_->cache_fi_output = clCreateBuffer(impl_->context, CL_MEM_WRITE_ONLY,
+                                                 count * sizeof(FieldElement), nullptr, &err);
+        impl_->cache_fi_count = count;
+    }
+
+    clEnqueueWriteBuffer(impl_->queue, impl_->cache_fi_input, CL_FALSE, 0,
+                         count * sizeof(FieldElement), inputs, 0, nullptr, nullptr);
 
     cl_uint cnt = static_cast<cl_uint>(count);
-    clSetKernelArg(impl_->kernel_field_inv, 0, sizeof(cl_mem), &buf_in);
-    clSetKernelArg(impl_->kernel_field_inv, 1, sizeof(cl_mem), &buf_out);
+    clSetKernelArg(impl_->kernel_field_inv, 0, sizeof(cl_mem), &impl_->cache_fi_input);
+    clSetKernelArg(impl_->kernel_field_inv, 1, sizeof(cl_mem), &impl_->cache_fi_output);
     clSetKernelArg(impl_->kernel_field_inv, 2, sizeof(cl_uint), &cnt);
 
     std::size_t local_size = std::min(static_cast<std::size_t>(256), impl_->device_info.max_work_group_size);
@@ -1706,11 +1963,8 @@ void Context::batch_field_inv(const FieldElement* inputs, FieldElement* outputs,
 
     clEnqueueNDRangeKernel(impl_->queue, impl_->kernel_field_inv, 1, nullptr,
                            &global_size, &local_size, 0, nullptr, nullptr);
-    clEnqueueReadBuffer(impl_->queue, buf_out, CL_TRUE, 0,
+    clEnqueueReadBuffer(impl_->queue, impl_->cache_fi_output, CL_TRUE, 0,
                         count * sizeof(FieldElement), outputs, 0, nullptr, nullptr);
-
-    clReleaseMemObject(buf_in);
-    clReleaseMemObject(buf_out);
 }
 
 void Context::batch_jacobian_to_affine(const JacobianPoint* jacobians, AffinePoint* affines, std::size_t count) {
@@ -1718,14 +1972,23 @@ void Context::batch_jacobian_to_affine(const JacobianPoint* jacobians, AffinePoi
 
     cl_int err;
 
-    cl_mem buf_jac = clCreateBuffer(impl_->context, CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR,
-                                     count * sizeof(JacobianPoint), (void*)jacobians, &err);
-    cl_mem buf_aff = clCreateBuffer(impl_->context, CL_MEM_WRITE_ONLY,
-                                     count * sizeof(AffinePoint), nullptr, &err);
+    // Grow-only cached buffers
+    if (count > impl_->cache_j2a_count) {
+        if (impl_->cache_j2a_input) clReleaseMemObject(impl_->cache_j2a_input);
+        if (impl_->cache_j2a_output) clReleaseMemObject(impl_->cache_j2a_output);
+        impl_->cache_j2a_input = clCreateBuffer(impl_->context, CL_MEM_READ_ONLY,
+                                                  count * sizeof(JacobianPoint), nullptr, &err);
+        impl_->cache_j2a_output = clCreateBuffer(impl_->context, CL_MEM_WRITE_ONLY,
+                                                   count * sizeof(AffinePoint), nullptr, &err);
+        impl_->cache_j2a_count = count;
+    }
+
+    clEnqueueWriteBuffer(impl_->queue, impl_->cache_j2a_input, CL_FALSE, 0,
+                         count * sizeof(JacobianPoint), jacobians, 0, nullptr, nullptr);
 
     cl_uint cnt = static_cast<cl_uint>(count);
-    clSetKernelArg(impl_->kernel_batch_jacobian_to_affine, 0, sizeof(cl_mem), &buf_jac);
-    clSetKernelArg(impl_->kernel_batch_jacobian_to_affine, 1, sizeof(cl_mem), &buf_aff);
+    clSetKernelArg(impl_->kernel_batch_jacobian_to_affine, 0, sizeof(cl_mem), &impl_->cache_j2a_input);
+    clSetKernelArg(impl_->kernel_batch_jacobian_to_affine, 1, sizeof(cl_mem), &impl_->cache_j2a_output);
     clSetKernelArg(impl_->kernel_batch_jacobian_to_affine, 2, sizeof(cl_uint), &cnt);
 
     std::size_t local_size = std::min(static_cast<std::size_t>(256), impl_->device_info.max_work_group_size);
@@ -1733,11 +1996,8 @@ void Context::batch_jacobian_to_affine(const JacobianPoint* jacobians, AffinePoi
 
     clEnqueueNDRangeKernel(impl_->queue, impl_->kernel_batch_jacobian_to_affine, 1, nullptr,
                            &global_size, &local_size, 0, nullptr, nullptr);
-    clEnqueueReadBuffer(impl_->queue, buf_aff, CL_TRUE, 0,
+    clEnqueueReadBuffer(impl_->queue, impl_->cache_j2a_output, CL_TRUE, 0,
                         count * sizeof(AffinePoint), affines, 0, nullptr, nullptr);
-
-    clReleaseMemObject(buf_jac);
-    clReleaseMemObject(buf_aff);
 }
 
 void Context::async_batch_scalar_mul_generator(const Scalar* scalars, JacobianPoint* results, std::size_t count) {

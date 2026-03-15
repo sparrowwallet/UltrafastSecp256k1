@@ -12,27 +12,28 @@ test modules and produces a structured JSON + TXT audit report. It covers
 cryptographic correctness, constant-time behavior, cross-platform KATs
 (Known Answer Tests), fault injection, differential testing, and more.
 
-### What It Tests (49 modules, 8 sections)
+### What It Tests (50 modules, 9 sections)
 
 | Section | Modules | Focus |
 |---------|---------|-------|
 | 1. Core Arithmetic | 5 | Field mul, square, add, inversion, carry propagation |
 | 2. ECC Operations | 5 | Point add, double, scalar mul, generator mul, properties |
 | 3. Signing & Verification | 5 | ECDSA, Schnorr, RFC 6979 vectors, BIP-340 vectors, BIP-340 strict |
-| 4. Advanced Protocols | 5 | ECDH, key recovery, taproot, MuSig2, BIP-32 |
+| 4. Advanced Protocols | 6 | ECDH, key recovery, taproot, MuSig2, BIP-32, BIP-39 |
 | 5. Batch & SIMD | 3 | Batch (affine, multi-scalar), SIMD batch |
 | 6. Safety & Robustness | 8 | CT equivalence, fault injection, debug invariants, ABI gate, differential |
 | 7. Cross-Platform | 4 | Fiat-crypto vectors, cross-platform KAT, exhaustive small-group, comprehensive |
 | 8. Side-Channel | 2 | CT mode verification, dudect smoke test |
+| 9. Zero-Knowledge | 3 | Knowledge proof, DLEQ proof, Bulletproof (prove + verify) |
 
 ### Platform Support Matrix
 
 | Platform | Modules Run | Expected Result |
 |----------|------------|----------------|
-| x86-64 (any OS) | 49 | 48/49 PASS (1 advisory: dudect smoke) |
-| RISC-V 64 (real HW) | 49 | 48/49 PASS (1 advisory: dudect smoke) |
-| ARM64 (Linux/Android) | 49 | 48/49 PASS (1 advisory: dudect smoke) |
-| ESP32-S3 (ESP-IDF) | 41 | 40/40 PASS (8 skipped: platform-incompatible) |
+| x86-64 (any OS) | 50 | 49/50 PASS (1 advisory: dudect smoke) |
+| RISC-V 64 (real HW) | 50 | 49/50 PASS (1 advisory: dudect smoke) |
+| ARM64 (Linux/Android) | 50 | 49/50 PASS (1 advisory: dudect smoke) |
+| ESP32-S3 (ESP-IDF) | 42 | 41/42 PASS (8 skipped: platform-incompatible) |
 
 The **dudect smoke** module is always advisory -- it performs a statistical
 side-channel timing test that may show variance on real hardware without

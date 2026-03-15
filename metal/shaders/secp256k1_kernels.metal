@@ -30,6 +30,7 @@
 #include "secp256k1_bloom.h"
 #include "secp256k1_extended.h"
 #include "secp256k1_hash160.h"
+#include "secp256k1_zk.h"
 
 using namespace metal;
 
@@ -729,5 +730,321 @@ kernel void ecdsa_bench(
 
     // Verify
     results[tid] = ecdsa_verify(msg, pub_aff, r_sig, s_sig) ? 1u : 0u;
+}
+
+// =============================================================================
+// Kernel 19: ZK Knowledge Proof -- Batch Prove
+// =============================================================================
+
+kernel void zk_knowledge_prove_batch(
+    device const uchar *secrets        [[buffer(0)]],
+    device const uchar *pubkeys        [[buffer(1)]],
+    device const uchar *messages       [[buffer(2)]],
+    device const uchar *aux_rands      [[buffer(3)]],
+    device uchar *proof_rx_out         [[buffer(4)]],
+    device uchar *proof_s_out          [[buffer(5)]],
+    device uint *results               [[buffer(6)]],
+    constant uint &count               [[buffer(7)]],
+    uint tid [[thread_position_in_grid]]
+) {
+    if (tid >= count) return;
+
+    Scalar256 sec = scalar_from_bytes(secrets + tid * 32);
+    JacobianPoint pk = scalar_mul_generator_windowed(sec);
+
+    uchar msg[32], aux[32];
+    for (int i = 0; i < 32; ++i) { msg[i] = messages[tid * 32 + i]; aux[i] = aux_rands[tid * 32 + i]; }
+
+    AffinePoint G = generator_affine();
+    ZKKnowledgeProof proof;
+    bool ok = zk_knowledge_prove(sec, pk, G, msg, aux, proof);
+
+    for (int i = 0; i < 32; ++i) proof_rx_out[tid * 32 + i] = proof.rx[i];
+    uchar s_bytes[32];
+    scalar_to_bytes(proof.s, s_bytes);
+    for (int i = 0; i < 32; ++i) proof_s_out[tid * 32 + i] = s_bytes[i];
+    results[tid] = ok ? 1u : 0u;
+}
+
+// =============================================================================
+// Kernel 20: ZK Knowledge Proof -- Batch Verify
+// =============================================================================
+
+kernel void zk_knowledge_verify_batch(
+    device const uchar *proof_rx_in    [[buffer(0)]],
+    device const uchar *proof_s_in     [[buffer(1)]],
+    device const uchar *pubkeys        [[buffer(2)]],
+    device const uchar *messages       [[buffer(3)]],
+    device uint *results               [[buffer(4)]],
+    constant uint &count               [[buffer(5)]],
+    uint tid [[thread_position_in_grid]]
+) {
+    if (tid >= count) return;
+
+    ZKKnowledgeProof proof;
+    for (int i = 0; i < 32; ++i) proof.rx[i] = proof_rx_in[tid * 32 + i];
+    uchar s_bytes[32];
+    for (int i = 0; i < 32; ++i) s_bytes[i] = proof_s_in[tid * 32 + i];
+    proof.s = scalar_from_bytes(s_bytes);
+
+    Scalar256 pk_scalar = scalar_from_bytes(pubkeys + tid * 32);
+    JacobianPoint pk = scalar_mul_generator_windowed(pk_scalar);
+
+    uchar msg[32];
+    for (int i = 0; i < 32; ++i) msg[i] = messages[tid * 32 + i];
+
+    AffinePoint G = generator_affine();
+    results[tid] = zk_knowledge_verify(proof, pk, G, msg) ? 1u : 0u;
+}
+
+// =============================================================================
+// Kernel 21: ZK DLEQ Proof -- Batch Prove
+// =============================================================================
+
+kernel void zk_dleq_prove_batch(
+    device const uchar *secrets        [[buffer(0)]],
+    device const uchar *aux_rands      [[buffer(1)]],
+    device uchar *proof_e_out          [[buffer(2)]],
+    device uchar *proof_s_out          [[buffer(3)]],
+    device uint *results               [[buffer(4)]],
+    constant uint &count               [[buffer(5)]],
+    uint tid [[thread_position_in_grid]]
+) {
+    if (tid >= count) return;
+
+    Scalar256 sec = scalar_from_bytes(secrets + tid * 32);
+    uchar aux[32];
+    for (int i = 0; i < 32; ++i) aux[i] = aux_rands[tid * 32 + i];
+
+    AffinePoint G = generator_affine();
+    // H = second generator (deterministic derivation)
+    uchar h_tag[] = {'Z','K','/','d','l','e','q','/','H'};
+    uchar h_hash[32];
+    tagged_hash(h_tag, 9, h_tag, 9, h_hash);
+    JacobianPoint H_jac;
+    lift_x(h_hash, H_jac);
+    AffinePoint H = jacobian_to_affine(H_jac);
+
+    JacobianPoint P = scalar_mul(G, sec);
+    JacobianPoint Q = scalar_mul(H, sec);
+
+    ZKDLEQProof proof;
+    bool ok = zk_dleq_prove(sec, G, H, P, Q, aux, proof);
+
+    uchar e_bytes[32], s_bytes[32];
+    scalar_to_bytes(proof.e, e_bytes);
+    scalar_to_bytes(proof.s, s_bytes);
+    for (int i = 0; i < 32; ++i) { proof_e_out[tid * 32 + i] = e_bytes[i]; proof_s_out[tid * 32 + i] = s_bytes[i]; }
+    results[tid] = ok ? 1u : 0u;
+}
+
+// =============================================================================
+// Kernel 22: ZK DLEQ Proof -- Batch Verify
+// =============================================================================
+
+kernel void zk_dleq_verify_batch(
+    device const uchar *proof_e_in     [[buffer(0)]],
+    device const uchar *proof_s_in     [[buffer(1)]],
+    device const uchar *pubkeys_P      [[buffer(2)]],
+    device const uchar *pubkeys_Q      [[buffer(3)]],
+    device uint *results               [[buffer(4)]],
+    constant uint &count               [[buffer(5)]],
+    uint tid [[thread_position_in_grid]]
+) {
+    if (tid >= count) return;
+
+    ZKDLEQProof proof;
+    uchar e_bytes[32], s_bytes[32];
+    for (int i = 0; i < 32; ++i) { e_bytes[i] = proof_e_in[tid * 32 + i]; s_bytes[i] = proof_s_in[tid * 32 + i]; }
+    proof.e = scalar_from_bytes(e_bytes);
+    proof.s = scalar_from_bytes(s_bytes);
+
+    AffinePoint G = generator_affine();
+    uchar h_tag[] = {'Z','K','/','d','l','e','q','/','H'};
+    uchar h_hash[32];
+    tagged_hash(h_tag, 9, h_tag, 9, h_hash);
+    JacobianPoint H_jac;
+    lift_x(h_hash, H_jac);
+    AffinePoint H = jacobian_to_affine(H_jac);
+
+    // Reconstruct P and Q from pubkey bytes
+    JacobianPoint P, Q;
+    lift_x(pubkeys_P + tid * 32, P);
+    lift_x(pubkeys_Q + tid * 32, Q);
+
+    results[tid] = zk_dleq_verify(proof, G, H, P, Q) ? 1u : 0u;
+}
+
+// =============================================================================
+// Kernel 23: Bulletproof Init (generator computation)
+// =============================================================================
+
+kernel void bulletproof_init_kernel(
+    device AffinePoint *bp_G           [[buffer(0)]],
+    device AffinePoint *bp_H           [[buffer(1)]],
+    device ZKTagMidstate *bp_ip_midstate [[buffer(2)]],
+    uint tid [[thread_position_in_grid]]
+) {
+    if (tid != 0) return;
+
+    // Compute "Bulletproof/ip" midstate
+    {
+        uchar tag[14] = {'B','u','l','l','e','t','p','r','o','o','f','/','i','p'};
+        uchar tag_hash[32];
+        SHA256Ctx ctx; sha256_init(ctx);
+        sha256_update(ctx, tag, 14);
+        sha256_final(ctx, tag_hash);
+        sha256_init(ctx);
+        sha256_update(ctx, tag_hash, 32);
+        sha256_update(ctx, tag_hash, 32);
+        for (int i = 0; i < 8; i++) bp_ip_midstate[0].h[i] = ctx.h[i];
+    }
+
+    // Compute "Bulletproof/gen" midstate
+    ZKTagMidstate gen_midstate;
+    {
+        uchar tag[15] = {'B','u','l','l','e','t','p','r','o','o','f','/','g','e','n'};
+        uchar tag_hash[32];
+        SHA256Ctx ctx; sha256_init(ctx);
+        sha256_update(ctx, tag, 15);
+        sha256_final(ctx, tag_hash);
+        sha256_init(ctx);
+        sha256_update(ctx, tag_hash, 32);
+        sha256_update(ctx, tag_hash, 32);
+        for (int i = 0; i < 8; i++) gen_midstate.h[i] = ctx.h[i];
+    }
+
+    // Generate 64 G_i and 64 H_i
+    for (int i = 0; i < 64; i++) {
+        uchar buf[5];
+        buf[1] = (uchar)(i & 0xFF);
+        buf[2] = (uchar)((i >> 8) & 0xFF);
+        buf[3] = (uchar)((i >> 16) & 0xFF);
+        buf[4] = (uchar)((i >> 24) & 0xFF);
+
+        uchar hash[32];
+
+        // G_i
+        buf[0] = 'G';
+        zk_tagged_hash_midstate(gen_midstate, buf, 5, hash);
+        FieldElement gx = field_from_bytes(hash);
+        bp_G[i] = hash_to_point_increment(gx);
+
+        // H_i
+        buf[0] = 'H';
+        zk_tagged_hash_midstate(gen_midstate, buf, 5, hash);
+        FieldElement hx = field_from_bytes(hash);
+        bp_H[i] = hash_to_point_increment(hx);
+    }
+}
+
+// =============================================================================
+// Kernel 24: Bulletproof Batch Verify
+// =============================================================================
+
+kernel void bulletproof_verify_batch(
+    device const RangeProofGPU *proofs     [[buffer(0)]],
+    device const AffinePoint *commitments  [[buffer(1)]],
+    device const AffinePoint *H_gen        [[buffer(2)]],
+    device const AffinePoint *bp_G         [[buffer(3)]],
+    device const AffinePoint *bp_H         [[buffer(4)]],
+    device const ZKTagMidstate *bp_ip_midstate [[buffer(5)]],
+    device uint *results                   [[buffer(6)]],
+    constant uint &count                   [[buffer(7)]],
+    uint tid [[thread_position_in_grid]]
+) {
+    if (tid >= count) return;
+
+    RangeProofGPU proof = proofs[tid];
+    AffinePoint commit = commitments[tid];
+    AffinePoint h_ped = H_gen[0];
+    ZKTagMidstate ip_mid = bp_ip_midstate[0];
+
+    results[tid] = range_verify_full(proof, commit, h_ped,
+                                      bp_G, bp_H, ip_mid) ? 1u : 0u;
+}
+
+// =============================================================================
+// Kernel 25: Range Proof Polynomial Check (batch)
+// =============================================================================
+
+kernel void range_proof_poly_batch(
+    device const RangeProofPolyGPU *proofs   [[buffer(0)]],
+    device const AffinePoint *commitments    [[buffer(1)]],
+    device const AffinePoint *H_gen          [[buffer(2)]],
+    device uint *results                     [[buffer(3)]],
+    constant uint &count                     [[buffer(4)]],
+    uint tid [[thread_position_in_grid]]
+) {
+    if (tid >= count) return;
+
+    RangeProofPolyGPU proof = proofs[tid];
+    AffinePoint commit = commitments[tid];
+    AffinePoint h_ped = H_gen[0];
+
+    results[tid] = range_proof_poly_check(proof, commit, h_ped) ? 1u : 0u;
+}
+
+// =============================================================================
+// Kernel 26: Pedersen Commit Batch
+// =============================================================================
+
+kernel void pedersen_commit_batch(
+    device const uchar *values_in          [[buffer(0)]],
+    device const uchar *blindings_in       [[buffer(1)]],
+    device const AffinePoint *H_gen        [[buffer(2)]],
+    device uchar *commitments_out          [[buffer(3)]],
+    constant uint &count                   [[buffer(4)]],
+    uint tid [[thread_position_in_grid]]
+) {
+    if (tid >= count) return;
+
+    Scalar256 val = scalar_from_bytes(values_in + tid * 32);
+    Scalar256 blind = scalar_from_bytes(blindings_in + tid * 32);
+    AffinePoint h_ped = H_gen[0];
+
+    JacobianPoint result = pedersen_commit(val, blind, h_ped);
+
+    // Convert Jacobian to affine and output as bytes (x || y, 64 bytes)
+    AffinePoint aff = jacobian_to_affine(result);
+    field_to_bytes(aff.x, commitments_out + tid * 64);
+    field_to_bytes(aff.y, commitments_out + tid * 64 + 32);
+}
+
+// =============================================================================
+// Kernel 27: Pedersen Verify Sum (homomorphic)
+// =============================================================================
+
+kernel void pedersen_verify_sum(
+    device const AffinePoint *pos          [[buffer(0)]],
+    constant uint &n_pos                   [[buffer(1)]],
+    device const AffinePoint *neg          [[buffer(2)]],
+    constant uint &n_neg                   [[buffer(3)]],
+    device uint *result                    [[buffer(4)]],
+    uint tid [[thread_position_in_grid]]
+) {
+    if (tid != 0) return;
+
+    JacobianPoint sum = point_at_infinity();
+
+    for (uint i = 0; i < n_pos; ++i) {
+        sum = jacobian_add_mixed(sum, pos[i]);
+    }
+
+    for (uint i = 0; i < n_neg; ++i) {
+        AffinePoint neg_pt = neg[i];
+        neg_pt.y = field_negate(neg_pt.y);
+        sum = jacobian_add_mixed(sum, neg_pt);
+    }
+
+    // Check if sum is infinity (Z == 0)
+    if (sum.infinity) { result[0] = 1u; return; }
+
+    uchar z_bytes[32];
+    field_to_bytes(sum.z, z_bytes);
+    uint z_zero = 1u;
+    for (int i = 0; i < 32; i++)
+        if (z_bytes[i] != 0) z_zero = 0u;
+    result[0] = z_zero;
 }
 

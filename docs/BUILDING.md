@@ -80,6 +80,33 @@ cmake -S . -B build -G Ninja \
 cmake --build build -j
 ```
 
+### Canonical GPU Audit Build
+
+Use the preset-based path below when you want the GPU C ABI tests to appear in
+`ctest` and produce the reproducible "49-test" GPU-enabled validation run.
+
+```bash
+# Configure + build the canonical CUDA audit tree
+cmake --preset cuda-audit-5060ti
+cmake --build --preset cuda-audit-5060ti -j
+
+# Verify the GPU audit tests are present
+ctest --test-dir build/cuda-release-5060ti -N
+
+# Run the GPU ABI + equivalence audit slice
+ctest --preset cuda-audit-5060ti
+```
+
+Expected additional tests in a GPU-enabled build:
+
+- `gpu_abi_gate`
+- `gpu_ops_equivalence`
+- `gpu_host_api_negative`
+- `gpu_backend_matrix`
+
+If these tests do not appear, the build is still CPU-only and the GPU host layer
+was not configured into the active build tree.
+
 ---
 
 ## Build Options
@@ -96,6 +123,7 @@ cmake --build build -j
 | `SECP256K1_USE_LTO` | ON | Link-Time Optimization |
 | `SECP256K1_SPEED_FIRST` | OFF | Aggressive speed optimizations |
 | `SECP256K1_GLV_WINDOW_WIDTH` | platform | GLV window width (4-7); default 5 on x86/ARM/RISC-V, 4 on ESP32/WASM |
+| `SECP256K1_BUILD_ETHEREUM` | ON | Ethereum/EVM signing layer (Keccak-256, EIP-155, ecrecover). OFF for Bitcoin-only builds |
 | `SECP256K1_INSTALL` | ON | Generate install target |
 
 ### RISC-V Specific
@@ -660,4 +688,3 @@ docker run --rm ultrafastsecp256k1 ctest --output-on-failure
 ## Version
 
 Current version is read from `VERSION.txt` at configure time.
-

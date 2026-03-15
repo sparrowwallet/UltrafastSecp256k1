@@ -2,9 +2,9 @@ name: Security Audit
 
 on:
   push:
-    branches: [main]
+    branches: [main, dev]
   pull_request:
-    branches: [main]
+    branches: [main, dev]
   schedule:
     # Weekly Monday 06:00 UTC — catch new CVEs
     - cron: '0 6 * * 1'
@@ -132,7 +132,38 @@ jobs:
       - name: Install toolchain
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y --no-install-recommends clang-17 lld-17 ninja-build ccache
+          sudo apt-get install -y --no-install-recommends \
+            clang-17 lld-17 ninja-build ccache libc++-17-dev libc++abi-17-dev
+
+      - name: Cache MSan-instrumented libc++
+        id: msan-libcxx-cache
+        uses: actions/cache@cdf6c1fa76f9f475f3d7449005a359c84ca0f306 # v5.0.3
+        with:
+          path: /tmp/msan-libcxx
+          key: msan-libcxx-clang17-v3
+
+      - name: Build MSan-instrumented libc++
+        if: steps.msan-libcxx-cache.outputs.cache-hit != 'true'
+        run: |
+          git clone --depth 1 --branch llvmorg-17.0.6 \
+            https://github.com/llvm/llvm-project.git /tmp/llvm-project
+          cmake -G Ninja -S /tmp/llvm-project/runtimes -B /tmp/msan-libcxx-build \
+            -DCMAKE_C_COMPILER=clang-17 \
+            -DCMAKE_CXX_COMPILER=clang++-17 \
+            -DLLVM_ENABLE_RUNTIMES="libcxx;libcxxabi" \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DLLVM_USE_SANITIZER=MemoryWithOrigins \
+            -DLIBCXX_ENABLE_EXPERIMENTAL_LIBRARY=OFF
+          cmake --build /tmp/msan-libcxx-build -j"$(nproc)" -- cxx cxxabi
+          # Install to a persistent path for caching.
+          # LLVM 17 runtimes build ignores LIBCXX_ENABLE_EXPERIMENTAL_LIBRARY=OFF
+          # in the install manifest, so the install fails trying to copy the
+          # unbuilt libc++experimental.a.  Tolerate that error and verify the
+          # libraries we actually need are present.
+          DESTDIR=/tmp/msan-libcxx cmake --install /tmp/msan-libcxx-build --prefix /usr || true
+          test -f /tmp/msan-libcxx/usr/lib/libc++.a
+          test -f /tmp/msan-libcxx/usr/lib/libc++abi.a
+          rm -rf /tmp/llvm-project /tmp/msan-libcxx-build
 
       - name: Cache ccache
         uses: actions/cache@cdf6c1fa76f9f475f3d7449005a359c84ca0f306 # v5.0.3
@@ -149,6 +180,8 @@ jobs:
           ccache -z
 
       - name: Configure with MSan
+        env:
+          MSAN_LIBCXX: /tmp/msan-libcxx/usr
         run: |
           cmake -S . -B build -G Ninja \
             -DCMAKE_BUILD_TYPE=Debug \
@@ -157,8 +190,8 @@ jobs:
             -DCMAKE_C_COMPILER_LAUNCHER=ccache \
             -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
             -DSECP256K1_MARCH=x86-64-v3 \
-            -DCMAKE_CXX_FLAGS="-fsanitize=memory -fno-omit-frame-pointer -fsanitize-memory-track-origins=2" \
-            -DCMAKE_EXE_LINKER_FLAGS="-fsanitize=memory" \
+            -DCMAKE_CXX_FLAGS="-fsanitize=memory -fno-omit-frame-pointer -fsanitize-memory-track-origins=2 -stdlib=libc++ -nostdinc++ -isystem ${MSAN_LIBCXX}/include/c++/v1" \
+            -DCMAKE_EXE_LINKER_FLAGS="-fsanitize=memory -stdlib=libc++ -L${MSAN_LIBCXX}/lib -lc++abi -Wl,-rpath,${MSAN_LIBCXX}/lib" \
             -DSECP256K1_USE_ASM=OFF \
             -DSECP256K1_BUILD_TESTS=ON
 
@@ -169,12 +202,16 @@ jobs:
         env:
           MSAN_OPTIONS: halt_on_error=1:print_stacktrace=1
         run: |
-          # MSan + no-ASM + Debug + origin-tracking makes precompute table
-          # build extremely slow; many tests timeout.  halt_on_error=1 will
-          # print real MSan errors in the log (visible for debugging).
-          # Tolerate CTest exit code since timeouts are expected.
+          # MSan + no-ASM + Debug + origin-tracking is slow (~10-20x overhead).
+          # Exclude known-slow tests; generous timeout for the rest.
+          # halt_on_error=1 ensures MSan violations produce non-zero exit.
+          # No '|| true' -- this is a hard gate: any MSan error fails the job.
+          #
+          # Heavy audit tests are excluded because they exceed their CTest
+          # timeouts under MSan overhead (~10-20x). These tests are verified
+          # under ASan+UBSan and Valgrind instead.
           ctest --test-dir build --output-on-failure -j"$(nproc)" \
-            -E "^(ct_sidechannel|selftest|unified_audit)" --timeout 3600 || true
+            -E "^(ct_sidechannel|selftest|unified_audit|differential|fault_injection|fiat_crypto_vectors|debug_invariants|carry_propagation|batch_randomness|wycheproof_ecdsa|wycheproof_ecdh|cross_platform_kat|audit_fuzz|ct_verif_formal|ecies_regression|adversarial_protocol)" --timeout 7200
 
   # ── Thread Sanitizer (data races) ───────────────────────────────────────
   tsan:

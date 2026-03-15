@@ -244,21 +244,25 @@ static void test_bip32_il_geq_n() {
     bool all_ok = true;
     for (uint32_t i = 0; i < 10; ++i) {
         auto [child, cok] = master.derive_child(i);
+        (void)child;
         if (!cok) { all_ok = false; break; }
     }
     CHECK(all_ok, "BIP-32 derive 10 children all succeed");
 
     // Hardened derivation
     auto [hchild, hok] = master.derive_hardened(0);
+    (void)hchild;
     CHECK(hok, "BIP-32 hardened child index=0 succeeds");
 
     // Seed too short (< 16 bytes)
     auto [bad_master, bad_ok] = bip32_master_key(seed, 15);
+    (void)bad_master;
     CHECK(!bad_ok, "BIP-32 rejects seed < 16 bytes");
 
     // Seed too long (> 64 bytes)
     uint8_t long_seed[65] = {};
     auto [bad_master2, bad_ok2] = bip32_master_key(long_seed, 65);
+    (void)bad_master2;
     CHECK(!bad_ok2, "BIP-32 rejects seed > 64 bytes");
 }
 

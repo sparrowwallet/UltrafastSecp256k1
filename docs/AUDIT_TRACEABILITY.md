@@ -1,6 +1,6 @@
 # Audit Traceability Matrix
 
-**UltrafastSecp256k1 v3.14.0** -- Evidence-Based Correctness & Security Mapping
+**UltrafastSecp256k1 v3.22.0** -- Evidence-Based Correctness & Security Mapping
 
 > This document maps every mathematical invariant to its implementation code,
 > validation method, and specific test location. It is the primary artifact for
@@ -141,10 +141,13 @@ Each row in this matrix links:
 | **M3** | Nonce aggregation deterministic | `cpu/musig2.hpp` | Same-input reproducibility | `test_musig2_frost.cpp` | [OK] |
 | **M4** | 2/3/5-of-N signing | `cpu/musig2.hpp` | Multi-threshold simulation | `test_musig2_frost.cpp` suites 4-6 | [OK] |
 | **M5** | Invalid partial sig detected | `cpu/musig2.hpp` | Fault injection | `test_musig2_frost_advanced.cpp` suite 5 | [OK] |
-| **M6** | Rogue-key attack detected | `cpu/musig2.hpp` | Wagner-style simulation | `test_musig2_frost_advanced.cpp` suites 1-2 | [OK] |
-| **M7** | Nonce reuse detected | `cpu/musig2.hpp` | Cross-message detection | `test_musig2_frost_advanced.cpp` suites 3-4 | [OK] |
+| **M6** | Rogue-key attack detected | `cpu/musig2.hpp` | Wagner-style simulation | `test_musig2_frost_advanced.cpp` suites 1-2, `test_adversarial_protocol.cpp` A.4 | [OK] |
+| **M7** | Nonce reuse detected | `cpu/musig2.hpp` | Cross-message detection | `test_musig2_frost_advanced.cpp` suites 3-4, `test_adversarial_protocol.cpp` A.1 | [OK] |
+| **M8** | Transcript mutation detected | `cpu/musig2.hpp` | Corrupt keyagg blob between steps | `test_adversarial_protocol.cpp` A.5 | [OK] |
+| **M9** | Signer ordering mismatch detected | `cpu/musig2.hpp` | Sign with wrong index | `test_adversarial_protocol.cpp` A.6 | [OK] |
+| **M10** | Malicious aggregator detected | `cpu/musig2.hpp` | Tampered aggnonce | `test_adversarial_protocol.cpp` A.7 | [OK] |
 
-**MuSig2 Subtotal: 7/7 [OK]**
+**MuSig2 Subtotal: 10/10 [OK]**
 
 ---
 
@@ -160,9 +163,11 @@ Each row in this matrix links:
 | **FR6** | Lagrange coefficients correct | `cpu/frost.hpp` | Secret reconstruction | `test_musig2_frost.cpp` | [OK] |
 | **FR7** | Malicious DKG share detected | `cpu/frost.hpp` | Commitment verification | `test_musig2_frost_advanced.cpp` suites 6-7 | [OK] |
 | **FR8** | Invalid partial sig detected | `cpu/frost.hpp` | Rejection test | `test_musig2_frost_advanced.cpp` | [OK] |
-| **FR9** | Below-threshold subset fails | `cpu/frost.hpp` | 1-of-3 attempt -> fail | `test_musig2_frost_advanced.cpp` | [OK] |
+| **FR9** | Below-threshold subset fails | `cpu/frost.hpp` | 1-of-3 attempt -> fail | `test_musig2_frost_advanced.cpp`, `test_adversarial_protocol.cpp` B.1 | [OK] |
+| **FR10** | Malicious coordinator detected | `cpu/frost.hpp` | Inconsistent commit sets | `test_adversarial_protocol.cpp` B.4 | [OK] |
+| **FR11** | Duplicate nonce commitments handled | `cpu/frost.hpp` | Submit same nonce twice | `test_adversarial_protocol.cpp` B.5 | [OK] |
 
-**FROST Subtotal: 9/9 [OK]**
+**FROST Subtotal: 11/11 [OK]**
 
 ---
 
@@ -254,6 +259,23 @@ Each row in this matrix links:
 
 ---
 
+## 15. ECIES Hardening
+
+| ID | Invariant | Implementation | Validation | Test Location | Status |
+|----|-----------|---------------|------------|---------------|--------|
+| **EC1** | Encrypt->decrypt round-trip (1, 13, 32 byte plaintexts) | `cpu/src/ecies.cpp` | KAT with 3 sizes, wrong-key rejection | `test_ecies_regression.cpp` -> `test_ecies_roundtrip_kat()` | [OK] |
+| **EC2** | Parity tamper: flip 0x02/0x03 on ephemeral pubkey -> decrypt fails | `cpu/src/ecies.cpp` | Deterministic bit-flip | `test_ecies_regression.cpp` -> `test_ecies_parity_tamper()` | [OK] |
+| **EC3** | Invalid prefix (0x00, 0x04, 0xFF) -> clean error | `cpu/src/ecies.cpp` | 3 bad prefix checks | `test_ecies_regression.cpp` -> `test_ecies_invalid_prefix()` | [OK] |
+| **EC4** | Truncated envelope (0-81 bytes) -> clean error, no crash | `cpu/src/ecies.cpp` | 6 truncated sizes | `test_ecies_regression.cpp` -> `test_ecies_truncated_envelope()` | [OK] |
+| **EC5** | Single-bit tamper in any field (pubkey/IV/ct/HMAC) -> decrypt fails | `cpu/src/ecies.cpp` | Tamper matrix: 4 fields x bit-flip | `test_ecies_regression.cpp` -> `test_ecies_tamper_matrix()` | [OK] |
+| **EC6** | ABI prefix rejection: 6 bad prefixes x 5 endpoints -> consistent ERR | `include/ufsecp/ufsecp_impl.cpp` | 30 ABI boundary checks | `test_ecies_regression.cpp` -> `test_abi_prefix_rejection()` | [OK] |
+| **EC7** | Pubkey parser consistency: malformed x-coords -> same error across all parsers | `include/ufsecp/ufsecp_impl.cpp` | 3 malformed coords x 3 functions | `test_ecies_regression.cpp` -> `test_pubkey_parser_consistency()` | [OK] |
+| **EC8** | RNG fail-closed: blocked `getrandom` -> process SIGABRT (no silent fallback) | `cpu/src/random.cpp` | fork + seccomp filter (Linux x86-64) | `test_ecies_regression.cpp` -> `test_rng_fail_closed()` | [OK] |
+
+**ECIES Subtotal: 8/8 [OK]**
+
+---
+
 ## Cross-Cutting Evidence
 
 ### Differential Testing (Gold Standard)
@@ -292,6 +314,7 @@ All core arithmetic operations are tested on boundary values:
 | Address encoder fuzz | `test_fuzz_address_bip32_ffi.cpp` | 10K per suite | Suites 1-4 |
 | BIP32 path fuzz | `test_fuzz_address_bip32_ffi.cpp` | 10K per suite | Suites 5-7 |
 | FFI boundary fuzz | `test_fuzz_address_bip32_ffi.cpp` | 10K per suite | Suites 8-13 |
+| ECIES regression | `test_ecies_regression.cpp` | 85 tests | Categories A-H |
 
 ### Negative Testing (Adversarial Inputs)
 
@@ -306,6 +329,19 @@ All core arithmetic operations are tested on boundary values:
 | Message bit-flip | 1-bit change in msg -> verify fails | `audit_security.cpp` -> `test_message_bitflip()` |
 | Nonce determinism | Same (msg, sk) -> same nonce | `audit_security.cpp` -> `test_nonce_determinism()` |
 | Zeroization | Secret memory zeroed after use | `audit_security.cpp` -> `test_zeroization()` |
+| MuSig2 rogue-key | 0xFF / zero / duplicate xonly keys | `test_adversarial_protocol.cpp` A.4 |
+| MuSig2 transcript mutation | Corrupt keyagg blob between steps | `test_adversarial_protocol.cpp` A.5 |
+| MuSig2 signer ordering | Wrong signer index | `test_adversarial_protocol.cpp` A.6 |
+| MuSig2 malicious aggregator | Tampered aggnonce | `test_adversarial_protocol.cpp` A.7 |
+| FROST malicious coordinator | Inconsistent commit sets to signers | `test_adversarial_protocol.cpp` B.4 |
+| FROST duplicate nonce | Same commitment submitted twice | `test_adversarial_protocol.cpp` B.5 |
+| Adaptor transcript mismatch | Sign msg1, verify msg2 -> reject | `test_adversarial_protocol.cpp` D.5 |
+| Adaptor extraction misuse | Extract from unrelated sig pair | `test_adversarial_protocol.cpp` D.6 |
+| DLEQ malformed proof | 6 corruption strategies + zero proof | `test_adversarial_protocol.cpp` E.4 |
+| DLEQ wrong generators | Swap G/H, swap P/Q, different G'/H' | `test_adversarial_protocol.cpp` E.5 |
+| FFI undersized buffers | DER, WIF, BIP-39 with tiny output buffers | `test_adversarial_protocol.cpp` G.18 |
+| FFI overlapping buffers | Input==output aliasing | `test_adversarial_protocol.cpp` G.19 |
+| FFI malformed counts | n=0 for combine, batch, multi_scalar_mul | `test_adversarial_protocol.cpp` G.20 |
 
 ---
 
@@ -319,15 +355,16 @@ All core arithmetic operations are tested on boundary values:
 | GLV (G) | 4 | 4 | 0 | 0 |
 | ECDSA (E) | 8 | 8 | 0 | 0 |
 | Schnorr (B) | 6 | 6 | 0 | 0 |
-| MuSig2 (M) | 7 | 7 | 0 | 0 |
-| FROST (FR) | 9 | 9 | 0 | 0 |
+| MuSig2 (M) | 10 | 10 | 0 | 0 |
+| FROST (FR) | 11 | 11 | 0 | 0 |
 | BIP-32 (H) | 7 | 7 | 0 | 0 |
 | Address (A) | 6 | 6 | 0 | 0 |
 | C ABI (C) | 7 | 6 | 1 | 0 |
 | CT (CT) | 6 | 4 | 2 | 0 |
 | Batch (BP) | 3 | 3 | 0 | 0 |
 | Parsing (SP) | 5 | 5 | 0 | 0 |
-| **Total** | **108** | **105** | **3** | **0** |
+| ECIES (EC) | 8 | 8 | 0 | 0 |
+| **Total** | **122** | **119** | **3** | **0** |
 
 **Partial items** (3):
 - **C7**: Thread-safety (TSan in CI, but no dedicated multi-threaded stress test)
@@ -361,6 +398,22 @@ DIFFERENTIAL_MULTIPLIER=100 ./build/cpu/test_cross_libsecp256k1  # 1.3M checks
 ./build/cpu/test_ct_sidechannel        # full mode (~30 min)
 ./build/cpu/test_ct_sidechannel_smoke  # smoke mode (~2 min)
 ```
+
+---
+
+## GPU C ABI Audit Coverage
+
+| Test | Scope | Source |
+|------|-------|--------|
+| `gpu_abi_gate` | ABI surface, error codes, discovery, lifecycle, NULL safety | `audit/test_gpu_abi_gate.cpp` |
+| `gpu_ops_equivalence` | GPU vs CPU reference: all 6 ops (gen_mul, ecdsa, schnorr, ecdh, hash160, msm) | `audit/test_gpu_ops_equivalence.cpp` |
+| `gpu_host_api_negative` | NULL ptrs, count=0, invalid backend/device, error strings | `audit/test_gpu_host_api_negative.cpp` |
+| `gpu_backend_matrix` | Backend enumeration, device info, per-backend op probing | `audit/test_gpu_backend_matrix.cpp` |
+
+Backend-specific internal audit runners:
+- CUDA: `cuda/src/gpu_audit_runner.cu` (27 modules)
+- OpenCL: `opencl/src/opencl_audit_runner.cpp` (27 modules)
+- Metal: `metal/src/metal_audit_runner.mm` (27 modules)
 
 ---
 

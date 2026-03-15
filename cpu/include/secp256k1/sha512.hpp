@@ -66,23 +66,34 @@ public:
 
     digest_type finalize() noexcept {
         std::uint64_t const bit_len = total_ * 8;
-        auto pad = static_cast<std::uint8_t>(0x80);
-        // cppcheck-suppress objectIndex
-        update(&pad, 1);
 
-        // Pad to 112 mod 128
-        while (buf_len_ != 112) {
-            std::uint8_t zero = 0;
-            // cppcheck-suppress objectIndex
-            update(&zero, 1);
+        // -- Direct in-place padding (no per-byte update() calls) ---------
+        // buf_len_ is invariantly [0,127] after update() processes full blocks.
+        // Explicit bounds check satisfies static analysis (Sonar cpp:S3519).
+        if (buf_len_ >= 128) buf_len_ = 0;
+        std::size_t const pos = buf_len_;
+        buf_len_ = pos + 1;
+        buf_[pos] = 0x80;
+
+        if (buf_len_ > 112) {
+            // No room for 16-byte length -- pad, compress, start fresh block
+            if (buf_len_ < 128) {
+                std::memset(buf_ + buf_len_, 0, 128 - buf_len_);
+            }
+            compress(buf_);
+            buf_len_ = 0;
         }
 
-        // Append 128-bit length (we only use lower 64 bits)
-        std::uint8_t len_buf[16]{};
+        // Zero-pad to byte 112
+        std::memset(buf_ + buf_len_, 0, 112 - buf_len_);
+
+        // Append 128-bit length big-endian at bytes 112..127
+        // Upper 64 bits are zero (we only track lower 64 bits of length)
+        std::memset(buf_ + 112, 0, 8);
         for (std::size_t i = 0; i < 8; ++i) {
-            len_buf[8 + 7 - i] = static_cast<std::uint8_t>(bit_len >> (i * 8));
+            buf_[120 + 7 - i] = static_cast<std::uint8_t>(bit_len >> (i * 8));
         }
-        update(len_buf, 16);
+        compress(buf_);
 
         digest_type d{};
         for (std::size_t i = 0; i < 8; ++i) {

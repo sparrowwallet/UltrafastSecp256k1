@@ -31,21 +31,24 @@ set(SECP256K1_SOURCES
     src/multiscalar.cpp  # Multi-scalar multiplication (Strauss/Shamir)
     src/batch_verify.cpp # Batch ECDSA/Schnorr verification
     src/bip32.cpp        # BIP-32 HD key derivation
+    src/bip39.cpp        # BIP-39 mnemonic seed phrases
     src/musig2.cpp       # MuSig2 multi-signatures (BIP-327)
     src/ecdh.cpp         # ECDH key exchange
+    src/ecies.cpp        # ECIES encryption (AES-256-CTR + HMAC-SHA256)
     src/recovery.cpp     # ECDSA public key recovery
     src/taproot.cpp      # Taproot (BIP-341/342) key tweaking
     src/batch_add_affine.cpp  # Affine batch addition for sequential ECC search
     src/hash_accel.cpp    # Accelerated SHA-256 (SHA-NI) + RIPEMD-160 + Hash160
     src/pedersen.cpp      # Pedersen commitments (homomorphic)
+    src/zk.cpp            # ZK proofs (knowledge, DLEQ, Bulletproofs)
     src/frost.cpp         # FROST threshold signatures (t-of-n)
     src/adaptor.cpp       # Adaptor signatures (Schnorr + ECDSA)
     src/address.cpp       # Address generation + BIP-352 Silent Payments
-    # Coins layer -- multi-coin infrastructure
-    src/keccak256.cpp     # Keccak-256 hash (Ethereum address derivation)
-    src/coin_address.cpp  # Unified per-coin address generation
-    src/ethereum.cpp      # Ethereum EIP-55 checksummed addresses
-    src/coin_hd.cpp       # BIP-44 coin-type HD derivation
+    # Coins layer -- core infrastructure (always built)
+    src/coin_address.cpp    # Unified per-coin address generation
+    src/coin_hd.cpp         # BIP-44 coin-type HD derivation
+    src/message_signing.cpp # Bitcoin message signing (BIP-137)
+    src/wallet.cpp          # Unified multi-chain wallet API facade
     # Advanced algorithms -- Pippenger MSM + Comb generator multiplication
     src/pippenger.cpp        # Pippenger bucket method MSM (n > 128)
     src/ecmult_gen_comb.cpp  # Lim-Lee comb method for fast k*G
@@ -237,6 +240,18 @@ else()
     add_compile_definitions(SECP256K1_NO_ASM=1)
 endif()
 
+# Ethereum module sources (conditional: -DSECP256K1_BUILD_ETHEREUM=ON/OFF)
+if(SECP256K1_BUILD_ETHEREUM)
+    list(APPEND SECP256K1_SOURCES
+        src/keccak256.cpp     # Keccak-256 hash (Ethereum-compatible, 0x01 padding)
+        src/ethereum.cpp      # Ethereum EIP-55 checksummed addresses
+        src/eth_signing.cpp   # EIP-191, EIP-155, ecrecover
+    )
+    message(STATUS "Secp256k1: Ethereum module: ON (Keccak-256, EIP-55, EIP-191/155, ecrecover)")
+else()
+    message(STATUS "Secp256k1: Ethereum module: OFF (Bitcoin-only build)")
+endif()
+
 if(NOT TARGET ${SECP256K1_LIB_NAME})
     add_library(${SECP256K1_LIB_NAME} STATIC ${SECP256K1_SOURCES})
     add_library(secp256k1::fast ALIAS ${SECP256K1_LIB_NAME})
@@ -252,7 +267,23 @@ if(NOT TARGET ${SECP256K1_LIB_NAME})
     message(STATUS "Secp256k1: LTO check - SECP256K1_USE_LTO=${SECP256K1_USE_LTO}, Compiler=${CMAKE_CXX_COMPILER_ID}")
 
     if(SECP256K1_USE_LTO)
-        if(CMAKE_CXX_COMPILER_ID MATCHES "Clang")
+        if(SECP256K1_BUILD_CUDA)
+            # CUDA device-link objects carry nvcc LTO bytecode (e.g. v12.0)
+            # which is incompatible with the host compiler's LTO version
+            # (e.g. GCC v14.0).  INTERFACE -flto propagation would poison
+            # every downstream target that transitively links CUDA libs.
+            # Compile the library with fat LTO objects (usable without LTO
+            # at link time) but do NOT propagate -flto to consumers.
+            if(CMAKE_CXX_COMPILER_ID MATCHES "Clang")
+                target_compile_options(${SECP256K1_LIB_NAME} PRIVATE
+                    $<$<COMPILE_LANGUAGE:CXX>:-flto=thin>)
+                message(STATUS "Secp256k1: LTO compile-only (ThinLTO, CUDA build -- no INTERFACE propagation)")
+            elseif(CMAKE_CXX_COMPILER_ID MATCHES "GNU")
+                target_compile_options(${SECP256K1_LIB_NAME} PRIVATE
+                    $<$<COMPILE_LANGUAGE:CXX>:-flto -ffat-lto-objects>)
+                message(STATUS "Secp256k1: LTO compile-only (GCC fat objects, CUDA build -- no INTERFACE propagation)")
+            endif()
+        elseif(CMAKE_CXX_COMPILER_ID MATCHES "Clang")
             # Clang ThinLTO -- only for C++ sources, NOT assembly (.S).
             # Use a generator expression to exclude ASM files, because
             # CMake may invoke the system assembler (GCC cc1) which does
@@ -384,6 +415,14 @@ target_compile_definitions(${SECP256K1_LIB_NAME}
         $<$<CONFIG:Release>:NDEBUG>    # Remove assertions only in Release
         $<$<CXX_COMPILER_ID:MSVC>:SECP256K1_NO_INT128=1>  # MSVC has no __int128
 )
+
+# Platform CSPRNG libraries (ECIES + BIP-39)
+if(WIN32)
+    target_link_libraries(${SECP256K1_LIB_NAME} PUBLIC bcrypt)
+elseif(APPLE)
+    find_library(SECURITY_FRAMEWORK Security REQUIRED)
+    target_link_libraries(${SECP256K1_LIB_NAME} PUBLIC ${SECURITY_FRAMEWORK})
+endif()
 
 # Optional inline assembly support (x64 only)
 if(SECP256K1_HAS_ASM)
@@ -730,6 +769,7 @@ if(BUILD_TESTING)
         tests/test_multiscalar_batch.cpp
         tests/test_bip32.cpp
         tests/test_bip32_vectors.cpp
+        tests/test_bip39.cpp
         tests/test_musig2.cpp
         tests/test_ecdh_recovery_taproot.cpp
         tests/test_edge_cases.cpp
@@ -832,6 +872,14 @@ if(BUILD_TESTING)
     target_compile_definitions(test_bip32_vectors_standalone PRIVATE STANDALONE_TEST)
     add_test(NAME bip32_vectors COMMAND test_bip32_vectors_standalone)
 
+    # Standalone BIP-39 mnemonic seed phrase tests
+    add_executable(test_bip39_standalone
+        tests/test_bip39.cpp
+    )
+    target_link_libraries(test_bip39_standalone PRIVATE ${SECP256K1_LIB_NAME})
+    target_compile_definitions(test_bip39_standalone PRIVATE STANDALONE_TEST)
+    add_test(NAME bip39 COMMAND test_bip39_standalone)
+
     # Standalone RFC 6979 ECDSA test vectors
     add_executable(test_rfc6979_vectors_standalone
         tests/test_rfc6979_vectors.cpp
@@ -870,6 +918,34 @@ if(BUILD_TESTING)
     target_compile_definitions(test_edge_cases_standalone PRIVATE STANDALONE_TEST)
     add_test(NAME edge_cases COMMAND test_edge_cases_standalone)
 
+    # -- Ethereum signing layer tests (conditional) ---------------------------
+    if(SECP256K1_BUILD_ETHEREUM)
+        # Add to run_selftest sources
+        target_sources(run_selftest PRIVATE tests/test_ethereum.cpp)
+
+        # Standalone Ethereum test
+        add_executable(test_ethereum_standalone
+            tests/test_ethereum.cpp
+        )
+        target_link_libraries(test_ethereum_standalone PRIVATE ${SECP256K1_LIB_NAME})
+        target_compile_definitions(test_ethereum_standalone PRIVATE STANDALONE_TEST)
+        add_test(NAME ethereum COMMAND test_ethereum_standalone)
+    endif()
+
+    # -- ZK Proof Layer tests (knowledge, DLEQ, Bulletproofs) --
+    target_sources(run_selftest PRIVATE tests/test_zk.cpp)
+    add_executable(test_zk_standalone tests/test_zk.cpp)
+    target_link_libraries(test_zk_standalone PRIVATE ${SECP256K1_LIB_NAME})
+    target_compile_definitions(test_zk_standalone PRIVATE STANDALONE_TEST)
+    add_test(NAME zk_proofs COMMAND test_zk_standalone)
+
+    # -- Unified Wallet API tests (always built, has internal Ethereum guards)
+    target_sources(run_selftest PRIVATE tests/test_wallet.cpp)
+    add_executable(test_wallet_standalone tests/test_wallet.cpp)
+    target_link_libraries(test_wallet_standalone PRIVATE ${SECP256K1_LIB_NAME})
+    target_compile_definitions(test_wallet_standalone PRIVATE STANDALONE_TEST)
+    add_test(NAME wallet COMMAND test_wallet_standalone)
+
     # -- CTest labels for core library tests --------------------------------
     # Label all core tests so they can be run as a group:
     #   ctest --test-dir <build> -L core
@@ -883,6 +959,10 @@ if(BUILD_TESTING)
     if(NOT (MSVC AND NOT CMAKE_CXX_COMPILER_ID MATCHES "Clang"))
         list(APPEND CORE_TESTS field_52)
     endif()
+    if(SECP256K1_BUILD_ETHEREUM)
+        list(APPEND CORE_TESTS ethereum)
+    endif()
+    list(APPEND CORE_TESTS wallet zk_proofs)
     set_tests_properties(${CORE_TESTS} PROPERTIES LABELS "core")
 
     # -- Audit infrastructure lives in audit/ ------------------------------

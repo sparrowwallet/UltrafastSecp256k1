@@ -90,6 +90,10 @@ add_library(secp256k1_opencl STATIC
     src/opencl_selftest.cpp
 )
 
+set_target_properties(secp256k1_opencl PROPERTIES
+    POSITION_INDEPENDENT_CODE ON
+)
+
 target_include_directories(secp256k1_opencl
     PUBLIC
         $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>

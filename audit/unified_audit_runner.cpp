@@ -71,6 +71,7 @@ int test_ecdsa_schnorr_run();
 int test_multiscalar_batch_run();
 int test_bip32_run();
 int test_bip32_vectors_run();
+int test_bip39_run();
 int test_musig2_run();
 int test_ecdh_recovery_taproot_run();
 int test_edge_cases_run();
@@ -109,6 +110,8 @@ int test_musig2_bip327_vectors_run();
 // Forward declarations -- Cross-ABI / FFI round-trip tests
 // ============================================================================
 int test_ffi_round_trip_run();
+int test_adversarial_protocol_run();
+int test_ecies_regression_run();
 
 // ============================================================================
 // Forward declarations -- adversarial / fuzz tests
@@ -153,6 +156,13 @@ int test_field_26_main();   // 10x26 lazy-reduction
 // Forward declarations -- diagnostics
 // ============================================================================
 int diag_scalar_mul_run();
+
+// ============================================================================
+// Forward declarations -- Ethereum (conditional)
+// ============================================================================
+#ifdef SECP256K1_BUILD_ETHEREUM
+int test_ethereum_run();
+#endif
 
 // ============================================================================
 // Report section IDs -- 8 audit categories
@@ -265,6 +275,7 @@ static const AuditModule ALL_MODULES[] = {
     // ===================================================================
     { "ecdsa_schnorr",     "ECDSA + Schnorr",                             "protocol_security", test_ecdsa_schnorr_run, false },
     { "bip32",             "BIP-32 HD derivation",                        "protocol_security", test_bip32_run, false },
+    { "bip39",             "BIP-39 mnemonic seed phrases",                "protocol_security", test_bip39_run, false },
     { "musig2",            "MuSig2",                                       "protocol_security", test_musig2_run, false },
     { "ecdh_recovery",     "ECDH + recovery + taproot",                   "protocol_security", test_ecdh_recovery_taproot_run, false },
     { "v4_features",       "v4 (Pedersen/FROST/etc)",                     "protocol_security", test_v4_features_run, false },
@@ -273,6 +284,9 @@ static const AuditModule ALL_MODULES[] = {
     { "musig2_frost_adv",  "MuSig2 + FROST advanced/adversar",           "protocol_security", test_musig2_frost_advanced_run, false },
     { "audit_integration", "Integration (ECDH/batch/cross-proto)",        "protocol_security", audit_integration_run, false },
     { "batch_randomness",  "Batch verify weight randomness audit",        "protocol_security", test_batch_randomness_run, false },
+#ifdef SECP256K1_BUILD_ETHEREUM
+    { "ethereum",          "Ethereum signing layer (EIP-191/155/ecrecover)","protocol_security", test_ethereum_run, false },
+#endif
 
     // ===================================================================
     // Section 7: ABI & Memory Safety (zeroization, hardening)
@@ -281,6 +295,8 @@ static const AuditModule ALL_MODULES[] = {
     { "debug_invariants",  "Debug invariant assertions",                   "memory_safety",  test_debug_invariants_run, false },
     { "abi_gate",          "ABI version gate (compile-time)",              "memory_safety",  test_abi_gate_run, false },
     { "ffi_round_trip",    "Cross-ABI/FFI round-trip (ufsecp C API)",     "memory_safety",  test_ffi_round_trip_run, false },
+    { "adversarial_proto", "Adversarial protocol & FFI hostile-caller",   "fuzzing",         test_adversarial_protocol_run, false },
+    { "ecies_regression",  "ECIES regression + C ABI prefix enforce",   "fuzzing",         test_ecies_regression_run, false },
 
     // ===================================================================
     // Section 8: Performance Validation & Regression
@@ -745,7 +761,7 @@ static void write_sarif_report(const char* path,
         } else if (std::strcmp(r.section, "memory_safety") == 0) {
             uri = "audit/test_abi_gate.cpp";
         } else if (std::strcmp(r.section, "performance") == 0) {
-            uri = "cpu/tests/bench_comprehensive.cpp";
+            uri = "cpu/bench/bench_unified.cpp";
         }
 
         (void)std::fprintf(f, "        {\n");

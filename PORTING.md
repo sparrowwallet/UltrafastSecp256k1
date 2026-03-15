@@ -47,7 +47,7 @@ UltrafastSecp256k1 is designed for portability. The core library is pure C++20 w
 
 5. **Run benchmarks** -- compare against portable C++ baseline:
    ```bash
-   ./bench_comprehensive
+   ./bench_unified --quick
    ```
 
 6. **Add CI job** in `.github/workflows/ci.yml` (cross-compilation or native runner).

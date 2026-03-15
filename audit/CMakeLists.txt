@@ -121,6 +121,61 @@ target_compile_definitions(test_abi_gate PRIVATE STANDALONE_TEST)
 add_test(NAME abi_gate COMMAND test_abi_gate)
 set_tests_properties(abi_gate PROPERTIES TIMEOUT 30)
 
+# -- GPU ABI gate (requires GPU host layer + ufsecp with GPU impl) ----------
+if(TARGET secp256k1_gpu_host AND TARGET ufsecp_static)
+    add_executable(test_gpu_abi_gate test_gpu_abi_gate.cpp)
+    target_link_libraries(test_gpu_abi_gate PRIVATE ufsecp_static)
+    target_include_directories(test_gpu_abi_gate PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/../include
+        ${CMAKE_BINARY_DIR}/include/ufsecp    # ufsecp_version.h
+    )
+    target_compile_definitions(test_gpu_abi_gate PRIVATE STANDALONE_TEST)
+    add_test(NAME gpu_abi_gate COMMAND test_gpu_abi_gate)
+    set_tests_properties(gpu_abi_gate PROPERTIES TIMEOUT 60)
+
+    # -- GPU ops equivalence (GPU vs CPU reference) --
+    add_executable(test_gpu_ops_equivalence test_gpu_ops_equivalence.cpp)
+    target_link_libraries(test_gpu_ops_equivalence PRIVATE ufsecp_static)
+    target_include_directories(test_gpu_ops_equivalence PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/../include
+        ${CMAKE_BINARY_DIR}/include/ufsecp
+    )
+    target_compile_definitions(test_gpu_ops_equivalence PRIVATE STANDALONE_TEST)
+    add_test(NAME gpu_ops_equivalence COMMAND test_gpu_ops_equivalence)
+    set_tests_properties(gpu_ops_equivalence PROPERTIES TIMEOUT 120)
+
+    # -- GPU host API negative tests --
+    add_executable(test_gpu_host_api_negative test_gpu_host_api_negative.cpp)
+    target_link_libraries(test_gpu_host_api_negative PRIVATE ufsecp_static)
+    target_include_directories(test_gpu_host_api_negative PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/../include
+        ${CMAKE_BINARY_DIR}/include/ufsecp
+    )
+    target_compile_definitions(test_gpu_host_api_negative PRIVATE STANDALONE_TEST)
+    add_test(NAME gpu_host_api_negative COMMAND test_gpu_host_api_negative)
+    set_tests_properties(gpu_host_api_negative PROPERTIES TIMEOUT 60)
+
+    # -- GPU backend matrix (enumerate + probe) --
+    add_executable(test_gpu_backend_matrix test_gpu_backend_matrix.cpp)
+    target_link_libraries(test_gpu_backend_matrix PRIVATE ufsecp_static)
+    target_include_directories(test_gpu_backend_matrix PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/../include
+        ${CMAKE_BINARY_DIR}/include/ufsecp
+    )
+    target_compile_definitions(test_gpu_backend_matrix PRIVATE STANDALONE_TEST)
+    add_test(NAME gpu_backend_matrix COMMAND test_gpu_backend_matrix)
+    set_tests_properties(gpu_backend_matrix PROPERTIES TIMEOUT 60)
+
+    # Disable LTO for GPU-linked targets (nvcc LTO version differs from host compiler)
+    if(SECP256K1_BUILD_CUDA)
+        set_target_properties(
+            test_gpu_abi_gate test_gpu_ops_equivalence
+            test_gpu_host_api_negative test_gpu_backend_matrix
+            PROPERTIES INTERPROCEDURAL_OPTIMIZATION FALSE
+        )
+    endif()
+endif()
+
 # -- Formal CT verification via Valgrind/MSAN (Track I5-1) ----------------
 add_executable(test_ct_verif_formal_standalone test_ct_verif_formal.cpp)
 audit_target_defaults(test_ct_verif_formal_standalone)
@@ -140,6 +195,31 @@ add_executable(test_audit_fuzz_standalone audit_fuzz.cpp)
 audit_target_defaults(test_audit_fuzz_standalone)
 add_test(NAME audit_fuzz COMMAND test_audit_fuzz_standalone)
 set_tests_properties(audit_fuzz PROPERTIES TIMEOUT 600)
+
+# -- Adversarial protocol & FFI hostile-caller tests -----------------------
+add_executable(test_adversarial_protocol_standalone test_adversarial_protocol.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/../include/ufsecp/ufsecp_impl.cpp)
+audit_target_defaults(test_adversarial_protocol_standalone)
+target_include_directories(test_adversarial_protocol_standalone PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/../include
+    ${CMAKE_BINARY_DIR}/include
+)
+target_compile_definitions(test_adversarial_protocol_standalone PRIVATE UFSECP_BUILDING)
+add_test(NAME adversarial_protocol COMMAND test_adversarial_protocol_standalone)
+set_tests_properties(adversarial_protocol PROPERTIES TIMEOUT 600)
+
+# -- ECIES regression + C ABI prefix enforcement ----------------------------
+add_executable(test_ecies_regression_standalone test_ecies_regression.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/../include/ufsecp/ufsecp_impl.cpp)
+audit_target_defaults(test_ecies_regression_standalone)
+target_include_directories(test_ecies_regression_standalone PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/../include
+    ${CMAKE_BINARY_DIR}/include
+)
+target_compile_definitions(test_ecies_regression_standalone PRIVATE
+    UFSECP_BUILDING STANDALONE_ECIES_REGRESSION)
+add_test(NAME ecies_regression COMMAND test_ecies_regression_standalone)
+set_tests_properties(ecies_regression PROPERTIES TIMEOUT 120 LABELS "audit")
 
 # -- Diagnostic: ct::scalar_mul step-by-step comparison --------------------
 add_executable(diag_scalar_mul ${CPU_TESTS_DIR}/diag_scalar_mul.cpp)
@@ -233,6 +313,14 @@ if(SECP256K1_BUILD_FUZZ_TESTS AND TARGET ufsecp_static)
     add_test(NAME fuzz_address_bip32_ffi COMMAND test_fuzz_address_bip32_ffi)
     set_tests_properties(fuzz_address_bip32_ffi PROPERTIES TIMEOUT 900)
     message(STATUS "  Address + BIP32 + FFI fuzz tests: ON")
+
+    # Disable LTO when CUDA is linked (nvcc LTO version differs from host compiler)
+    if(SECP256K1_BUILD_CUDA)
+        set_target_properties(
+            test_fuzz_parsers test_fuzz_address_bip32_ffi
+            PROPERTIES INTERPROCEDURAL_OPTIMIZATION FALSE
+        )
+    endif()
 endif()
 
 # ===========================================================================
@@ -311,6 +399,7 @@ add_executable(unified_audit_runner
     ${CPU_TESTS_DIR}/test_multiscalar_batch.cpp
     ${CPU_TESTS_DIR}/test_bip32.cpp
     ${CPU_TESTS_DIR}/test_bip32_vectors.cpp
+    ${CPU_TESTS_DIR}/test_bip39.cpp
     ${CPU_TESTS_DIR}/test_musig2.cpp
     ${CPU_TESTS_DIR}/test_ecdh_recovery_taproot.cpp
     ${CPU_TESTS_DIR}/test_edge_cases.cpp
@@ -348,6 +437,8 @@ add_executable(unified_audit_runner
     test_frost_kat.cpp
     test_musig2_bip327_vectors.cpp
     test_ffi_round_trip.cpp
+    test_adversarial_protocol.cpp
+    test_ecies_regression.cpp
     audit_fuzz.cpp
     test_fuzz_parsers.cpp
     test_fuzz_address_bip32_ffi.cpp
@@ -369,6 +460,10 @@ add_executable(unified_audit_runner
 # Conditionally add 5x52 field test (requires __uint128_t; skip on MSVC)
 if(NOT (MSVC AND NOT CMAKE_CXX_COMPILER_ID MATCHES "Clang"))
     target_sources(unified_audit_runner PRIVATE ${CPU_TESTS_DIR}/test_field_52.cpp)
+endif()
+# Conditionally add Ethereum layer tests
+if(SECP256K1_BUILD_ETHEREUM)
+    target_sources(unified_audit_runner PRIVATE ${CPU_TESTS_DIR}/test_ethereum.cpp)
 endif()
 target_link_libraries(unified_audit_runner PRIVATE fastsecp256k1)
 target_include_directories(unified_audit_runner PRIVATE
@@ -444,6 +539,7 @@ set_tests_properties(
     wycheproof_ecdsa wycheproof_ecdh
     batch_randomness
     ct_verif_formal fiat_crypto_linkage
+    adversarial_protocol
     unified_audit
     PROPERTIES LABELS "audit"
 )

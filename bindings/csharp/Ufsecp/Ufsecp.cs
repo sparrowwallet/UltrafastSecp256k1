@@ -7,6 +7,7 @@
 //   using var ctx = new Ufsecp();
 //   byte[] pub = ctx.PubkeyCreate(privkey);
 
+#nullable enable
 using System;
 using System.Runtime.InteropServices;
 using System.Text;

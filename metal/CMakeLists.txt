@@ -171,6 +171,7 @@ if(METAL_COMPILER)
             ${SHADER_DIR}/secp256k1_extended.h
             ${SHADER_DIR}/secp256k1_hash160.h
             ${SHADER_DIR}/secp256k1_affine.h
+            ${SHADER_DIR}/secp256k1_zk.h
         COMMENT "[Metal] Compiling secp256k1_kernels.metal -> .air"
     )
 

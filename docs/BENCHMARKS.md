@@ -6,18 +6,55 @@ Benchmark results for UltrafastSecp256k1 across all supported platforms.
 
 ## Summary
 
-| Platform | Field Mul | Generator Mul | Scalar Mul | ECDSA Verify | vs libsecp |
-|----------|-----------|---------------|------------|-------------|------------|
-| **x86-64 (i5-14400F, GCC 14)** | **12.8 ns** | **6.7 us** | **17.6 us** | **21.3 us** | **1.09x** |
-| x86-64 (Clang 21, Win) | 17 ns (5x52) | 5 us | 25 us | -- | -- |
-| RISC-V 64 (SiFive U74, Clang 21) | 176 ns | 40.2 us | 150.5 us | **181.8 us** | **1.13x** |
-| ARM64 (RK3588, A76) | 74 ns | 14 us | 131 us | -- | -- |
-| ESP32-S3 (LX7, 240 MHz) | 7,458 ns | 2,483 us | -- | -- | -- |
-| ESP32 (LX6, 240 MHz) | 6,993 ns | 6,203 us | -- | -- | -- |
-| STM32F103 (CM3, 72 MHz) | 15,331 ns | 37,982 us | -- | -- | -- |
-| CUDA (RTX 5060 Ti) | 0.2 ns | 217.7 ns | 225.8 ns | -- | -- |
-| OpenCL (RTX 5060 Ti) | 0.2 ns | 295.1 ns | -- | -- | -- |
-| Metal (Apple M3 Pro) | 1.9 ns | 3.00 us | 2.94 us | -- | -- |
+| Platform | Field Mul | Generator Mul | Scalar Mul | ECDSA Verify | ZK Prove | vs libsecp |
+|----------|-----------|---------------|------------|-------------|----------|------------|
+| **x86-64 (i5-14400F, Clang 19)** | **12.8 ns** | **6.7 us** | **17.6 us** | **21.3 us** | **24.3 us** | **1.09x** |
+| x86-64 (Clang 21, Win) | 17 ns (5x52) | 5 us | 25 us | -- | -- | -- |
+| RISC-V 64 (SiFive U74, Clang 21) | 176 ns | 40.2 us | 150.5 us | **181.8 us** | -- | **1.13x** |
+| ARM64 (RK3588, A76) | 74 ns | 14 us | 131 us | -- | -- | -- |
+| ESP32-S3 (LX7, 240 MHz) | 7,458 ns | 2,483 us | -- | -- | -- | -- |
+| ESP32 (LX6, 240 MHz) | 6,993 ns | 6,203 us | -- | -- | -- | -- |
+| STM32F103 (CM3, 72 MHz) | 15,331 ns | 37,982 us | -- | -- | -- | -- |
+| CUDA (RTX 5060 Ti) | 0.2 ns | 217.7 ns | 225.8 ns | -- | **263.7 ns** | -- |
+| OpenCL (RTX 5060 Ti) | 0.2 ns | 295.1 ns | -- | -- | -- | -- |
+| Metal (Apple M3 Pro) | 1.9 ns | 3.00 us | 2.94 us | -- | -- | -- |
+
+---
+
+## Real-World Flow Coverage
+
+`bench_unified` also measures higher-level wallet and protocol flows so the
+benchmark suite reflects product-shaped workloads, not only primitive-level ECC
+ operations.
+
+Covered flows include:
+
+- `ecdh_compute` and `ecdh_compute_raw`
+- `taproot_output_key` and `taproot_tweak_privkey`
+- `bip32_master_key`
+- `coin_derive_key` for standard Bitcoin HD paths
+- `coin_address_from_seed` end-to-end for Bitcoin and Ethereum
+- `silent_payment_create_output`
+- `silent_payment_scan`
+
+### Representative x86-64 / Linux Quick Snapshot
+
+Quick sanity run from `bench_unified --quick` on the local x86-64 validation machine:
+
+| Flow | Time |
+|------|-----:|
+| ECDH (`ecdh_compute`) | 22.8 us |
+| ECDH raw (`ecdh_compute_raw`) | 20.5 us |
+| Taproot output key | 10.5 us |
+| BIP-32 master key (64B seed) | 1.2 us |
+| BTC address from seed | 93.4 us |
+| ETH address from seed | 93.4 us |
+| Silent Payment create_output | 24.7 us |
+| Silent Payment scan | 35.7 us |
+
+These values are mainly intended as workflow reference points. For publishable
+cross-machine comparisons, use the full pinned benchmark methodology and JSON
+artifacts from `bench_unified`.
 
 ---
 
@@ -178,6 +215,32 @@ Summary: `53/54 modules passed -- ALL PASSED (1 advisory warnings)`.
 | Schnorr Sign (BIP-340) | 273.4 ns | 3.66 M/s | Tagged hash midstates, batch 16K |
 | Schnorr Verify (BIP-340) | 354.6 ns | 2.82 M/s | X-only pubkey, batch 16K |
 
+### GPU Zero-Knowledge Operations
+
+> **First open-source GPU implementation of secp256k1 ZK proofs (Knowledge + DLEQ + Bulletproof).**
+
+| Operation | Time/Op | Throughput | Notes |
+|-----------|---------|------------|-------|
+| Knowledge Prove (G) | 252.3 ns | 3,964 k/s | CT Schnorr sigma, batch 4K |
+| Knowledge Verify | 749.9 ns | 1,334 k/s | s*G == R + e*P, batch 4K |
+| DLEQ Prove | 668.3 ns | 1,496 k/s | Discrete log equality, CT path, batch 4K |
+| DLEQ Verify | 1,919.1 ns | 521 k/s | Two-base verification, batch 4K |
+| Pedersen Commit | 66.0 ns | 15,160 k/s | v*H + r*G, batch 4K |
+| Range Prove (64-bit) | 3,711,570 ns | 0.27 k/s | Bulletproof, CT path, batch 256 |
+| Range Verify (64-bit) | 764,649 ns | 1.3 k/s | Full IPA verification, batch 256 |
+
+**GPU vs CPU ZK Speedup (single-core throughput):**
+
+| Operation | CPU (i5-14400F) | GPU (RTX 5060 Ti) | GPU/CPU Speedup |
+|-----------|----------------:|------------------:|----------------:|
+| Knowledge Prove | 24,292 ns | 252.3 ns | **96x** |
+| Knowledge Verify | 23,830 ns | 749.9 ns | **32x** |
+| DLEQ Prove | 42,370 ns | 668.3 ns | **63x** |
+| DLEQ Verify | 60,607 ns | 1,919.1 ns | **32x** |
+| Pedersen Commit | 29,718 ns | 66.0 ns | **450x** |
+| Range Prove (64-bit) | 13,618,693 ns | 3,711,570 ns | **3.7x** |
+| Range Verify (64-bit) | 2,669,843 ns | 764,649 ns | **3.5x** |
+
 ---
 
 ## OpenCL Benchmarks
@@ -233,6 +296,10 @@ Summary: `53/54 modules passed -- ALL PASSED (1 advisory warnings)`.
 | ECDSA Verify | 410.1 ns | -- | CUDA only |
 | Schnorr Sign | 273.4 ns | -- | CUDA only |
 | Schnorr Verify | 354.6 ns | -- | CUDA only |
+| Knowledge Prove | 263.7 ns | -- | CUDA only |
+| Knowledge Verify | 744.5 ns | -- | CUDA only |
+| DLEQ Prove | 675.4 ns | -- | CUDA only |
+| DLEQ Verify | 1,912.0 ns | -- | CUDA only |
 
 ---
 
@@ -271,6 +338,10 @@ Summary: `53/54 modules passed -- ALL PASSED (1 advisory warnings)`.
 | ECDSA Verify | 410.1 ns | -- | -- |
 | Schnorr Sign | 273.4 ns | -- | -- |
 | Schnorr Verify | 354.6 ns | -- | -- |
+| Knowledge Prove | 263.7 ns | -- | -- |
+| Knowledge Verify | 744.5 ns | -- | -- |
+| DLEQ Prove | 675.4 ns | -- | -- |
+| DLEQ Verify | 1,912.0 ns | -- | -- |
 
 > **Note:** CUDA/OpenCL -- RTX 5060 Ti (36 SMs, 2602 MHz, GDDR7 256 GB/s).  
 > Metal -- M3 Pro (18 GPU cores, ~150 GB/s unified memory bandwidth).  
@@ -455,17 +526,52 @@ CT layer provides side-channel resistance at the cost of performance.
 
 ---
 
+## Zero-Knowledge Proof Benchmarks (CPU)
+
+**Hardware:** Intel Core i5-14400F (P-core, Raptor Lake)
+**Compiler:** Clang 19.1.7, `-O3 -march=native`
+**Methodology:** 11 passes, IQR outlier removal, median, 64-key pool, pinned core
+
+### ZK Proof Operations
+
+| Operation | Time/Op | Throughput | Notes |
+|-----------|---------|------------|-------|
+| Pedersen Commit | 29.7 us | 33,670 op/s | v*H + r*G (two scalar muls) |
+| Knowledge Prove | 24.3 us | 41,152 op/s | Non-interactive Schnorr sigma, CT path |
+| Knowledge Verify | 23.8 us | 42,017 op/s | s*G == R + e*P, FAST path |
+| DLEQ Prove | 42.4 us | 23,585 op/s | Discrete log equality, CT path |
+| DLEQ Verify | 60.6 us | 16,502 op/s | Two-base verification, FAST path |
+| Range Prove (64-bit) | 13,619 us | 73 op/s | Bulletproof prover, CT path |
+| Range Verify (64-bit) | 2,670 us | 375 op/s | MSM-optimized verifier, FAST path |
+
+### Range Verify Optimization (v3.22+)
+
+The Bulletproof verifier was optimized with multi-scalar multiplication (MSM):
+
+| Optimization | Technique | Speedup |
+|--------------|-----------|---------|
+| Polynomial check | 5-point MSM (delta, t_hat*G, tau_x*H, -T1, -T2) | Reduced from 3 scalar muls |
+| P_check + expected merge | 144-point MSM (64 G_i, 64 H_i, 12 L_j, 12 R_j, A, S, ...) | Single MSM vs 128+ individual muls |
+| s_coeff computation | Montgomery batch inversion (1 inv + 126 muls vs 64 inversions) | ~64x fewer inversions |
+| **Total** | **Combined MSM + batch inversion** | **1.93x (5,079 -> 2,634 us)** |
+
+Pippenger MSM is used when point count > 64. For the prover, individual GLV-optimized
+scalar multiplications remain faster than MSM for the 129-point workload.
+
+---
+
 ## Available Benchmark Targets
 
 All targets registered in CMake. Build with `cmake --build build -j` then run from `build/cpu/`.
 
 | Target | What It Measures |
 |--------|-----------------|
-| `bench_unified` | THE standard: full apple-to-apple vs libsecp256k1 + OpenSSL |
+| `bench_unified` | THE standard: primitives + CT + batch verify + Ethereum + ZK + real-world wallet/protocol flows, with apple-to-apple comparison vs libsecp256k1 + OpenSSL |
 | `bench_ct` | Fast (`fast::`) vs Constant-Time (`ct::`) layer comparison |
 | `bench_field_52` | 5x52 field arithmetic micro-benchmarks |
 | `bench_field_26` | 10x26 field arithmetic micro-benchmarks |
 | `bench_kP` | Scalar multiplication (k*P) benchmarks |
+| `bench_zk` (CUDA) | GPU ZK proof benchmarks: Knowledge, DLEQ, Pedersen, Bulletproof |
 
 
 ---
@@ -479,21 +585,43 @@ All targets registered in CMake. Build with `cmake --build build -j` then run fr
 3. **Timer:** `std::chrono::high_resolution_clock`
 4. **Compiler flags:** `-O3 -march=native`
 
+`bench_unified` additionally reports workflow-level operations such as HD
+derivation, Taproot key tweaking, ECDH, and Silent Payments so primitive
+performance can be interpreted in a wallet and protocol context.
+
 ### CUDA Benchmarks
 
-1. **Warm-up:** 10 kernel launches discarded
-2. **Measurement:** 100 launches, average
+1. **Warm-up:** 5-10 kernel launches discarded
+2. **Measurement:** 11 passes, median
 3. **Timer:** CUDA events
 4. **Sync:** Full device synchronization between measurements
+
+### CUDA ZK Benchmarks
+
+1. **Warm-up:** 5 kernel launches discarded
+2. **Measurement:** 11 passes, median
+3. **Timer:** CUDA events (ns/op = elapsed_ms * 1e6 / batch_size)
+4. **Correctness:** 0/4096 verify failures (Knowledge/DLEQ), 0/256 (Bulletproof) required before timing
+5. **Batch sizes:** Knowledge/DLEQ/Pedersen = 4096, Bulletproof = 256
+6. **Setup:** Precomputed pubkeys + Bulletproof generators (not included in timing)
 
 ### Reproducibility
 
 ```bash
-# Run CPU benchmark
+# Run CPU benchmark (includes ZK section)
 ./build/cpu/bench_unified
 
-# Run CUDA benchmark
+# Run the full unified suite explicitly
+./build/cpu/bench_unified --suite all
+
+# Quick smoke / CI-style run
+./build/cpu/bench_unified --quick
+
+# Run CUDA ECC benchmark
 ./build/cuda/secp256k1_cuda_bench
+
+# Run CUDA ZK benchmark
+./build/cuda/bench_zk
 
 # Results saved to: benchmark-<platform>-<date>.txt
 ```
@@ -753,4 +881,3 @@ AWS Graviton, AMD EPYC, Intel Xeon Sapphire Rapids, Milk-V Pioneer (C920).
 
 UltrafastSecp256k1 v3.16.0  
 Benchmarks updated: 2026-03-02
-

@@ -3,18 +3,8 @@ name: Clang-Tidy
 on:
   push:
     branches: [main, dev]
-    paths:
-      - 'cpu/**'
-      - 'include/**'
-      - '.clang-tidy'
-      - '.github/workflows/clang-tidy.yml'
   pull_request:
     branches: [main, dev]
-    paths:
-      - 'cpu/**'
-      - 'include/**'
-      - '.clang-tidy'
-      - '.github/workflows/clang-tidy.yml'
 
 permissions:
   contents: read

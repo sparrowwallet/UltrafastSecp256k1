@@ -129,6 +129,16 @@ inline JacobianPoint jacobian_double(thread const JacobianPoint &p) {
 // =============================================================================
 
 inline JacobianPoint jacobian_add_mixed(thread const JacobianPoint &p,
+                                         thread const AffinePoint &q);
+
+// Overload for device address space AffinePoint (kernel buffers)
+inline JacobianPoint jacobian_add_mixed(thread const JacobianPoint &p,
+                                         device const AffinePoint &q) {
+    AffinePoint local_q = q;
+    return jacobian_add_mixed(p, local_q);
+}
+
+inline JacobianPoint jacobian_add_mixed(thread const JacobianPoint &p,
                                          thread const AffinePoint &q) {
     if (p.infinity != 0) {
         JacobianPoint r;
@@ -386,6 +396,13 @@ inline JacobianPoint scalar_mul(thread const AffinePoint &base,
         }
     }
     return r;
+}
+
+// Overload for device address space base points (e.g. buffer arrays)
+inline JacobianPoint scalar_mul(device const AffinePoint &base,
+                                 thread const Scalar256 &k) {
+    AffinePoint local_base = base;
+    return scalar_mul(local_base, k);
 }
 
 // =============================================================================

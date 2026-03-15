@@ -339,7 +339,13 @@ Scalar musig2_partial_sign(
 
     // s_i = k + e * a_i * d  (mod n)
     // Scalar +/* are fixed-iteration multi-limb arithmetic -- CT by construction.
-    return k + session.e * key_agg_ctx.key_coefficients[signer_index] * d;
+    Scalar const result = k + session.e * key_agg_ctx.key_coefficients[signer_index] * d;
+
+    // Erase secret nonce and adjusted signing key from stack.
+    secure_erase(&k, sizeof(k));
+    secure_erase(&d, sizeof(d));
+
+    return result;
 }
 
 // -- Partial Verification -----------------------------------------------------

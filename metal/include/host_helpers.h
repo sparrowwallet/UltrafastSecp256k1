@@ -43,9 +43,9 @@ inline std::array<uint8_t, 32> hex_to_bytes(const char* hex) {
     for (size_t i = 0; i < len; i++) {
         c = hex[i];
         val = 0;
-        if (c >= '0' && c <= '9') val = c - '0';
-        else if (c >= 'a' && c <= 'f') val = c - 'a' + 10;
-        else if (c >= 'A' && c <= 'F') val = c - 'A' + 10;
+        if (c >= '0' && c <= '9') val = static_cast<uint8_t>(c - '0');
+        else if (c >= 'a' && c <= 'f') val = static_cast<uint8_t>(c - 'a' + 10);
+        else if (c >= 'A' && c <= 'F') val = static_cast<uint8_t>(c - 'A' + 10);
 
         byte_idx = (len - 1 - i) / 2;
         if ((len - 1 - i) % 2 == 0) {
@@ -92,9 +92,9 @@ struct HostScalar {
     static HostScalar from_bytes(const std::array<uint8_t, 32>& bytes) {
         HostScalar s;
         uint64_t limb;
-        for (int i = 0; i < 4; ++i) {
+        for (size_t i = 0; i < 4; ++i) {
             limb = 0;
-            for (int j = 0; j < 8; ++j) {
+            for (size_t j = 0; j < 8; ++j) {
                 limb |= (uint64_t)bytes[31 - (i * 8 + j)] << (j * 8);
             }
             s.limbs[i] = limb;
@@ -117,9 +117,9 @@ struct HostScalar {
 
     std::array<uint8_t, 32> to_bytes() const {
         std::array<uint8_t, 32> bytes;
-        for (int i = 0; i < 4; ++i) {
-            for (int j = 0; j < 8; ++j) {
-                bytes[31 - (i * 8 + j)] = (limbs[i] >> (j * 8)) & 0xFF;
+        for (size_t i = 0; i < 4; ++i) {
+            for (size_t j = 0; j < 8; ++j) {
+                bytes[31 - (i * 8 + j)] = static_cast<uint8_t>((limbs[i] >> (j * 8)) & 0xFF);
             }
         }
         return bytes;
@@ -166,9 +166,9 @@ struct HostFieldElement {
     static HostFieldElement from_bytes(const std::array<uint8_t, 32>& bytes) {
         HostFieldElement f;
         uint64_t limb;
-        for (int i = 0; i < 4; ++i) {
+        for (size_t i = 0; i < 4; ++i) {
             limb = 0;
-            for (int j = 0; j < 8; ++j) {
+            for (size_t j = 0; j < 8; ++j) {
                 limb |= (uint64_t)bytes[31 - (i * 8 + j)] << (j * 8);
             }
             f.limbs[i] = limb;
@@ -191,9 +191,9 @@ struct HostFieldElement {
 
     std::array<uint8_t, 32> to_bytes() const {
         std::array<uint8_t, 32> bytes;
-        for (int i = 0; i < 4; ++i) {
-            for (int j = 0; j < 8; ++j) {
-                bytes[31 - (i * 8 + j)] = (limbs[i] >> (j * 8)) & 0xFF;
+        for (size_t i = 0; i < 4; ++i) {
+            for (size_t j = 0; j < 8; ++j) {
+                bytes[31 - (i * 8 + j)] = static_cast<uint8_t>((limbs[i] >> (j * 8)) & 0xFF);
             }
         }
         return bytes;

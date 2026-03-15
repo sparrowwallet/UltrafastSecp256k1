@@ -1,6 +1,6 @@
 # Test Coverage Matrix
 
-**UltrafastSecp256k1 v3.14.0** -- Comprehensive Test Map for Auditors
+**UltrafastSecp256k1 v3.22.0** -- Comprehensive Test Map for Auditors
 
 ---
 
@@ -8,9 +8,11 @@
 
 | Category | Tests | Status |
 |----------|-------|--------|
-| **CTest targets** | 20+ | [OK] All passing |
-| **Audit suite checks** | 641,194 | [OK] 0 failures |
+| **CTest targets** | 41 | [OK] All passing |
+| **Audit suite checks** | 641,194+ | [OK] 0 failures |
 | **Fuzz harnesses** | 3 | [OK] Active |
+| **ECIES regression** | 85 | [OK] All passing |
+| **Adversarial protocol** | 89 functions, 186 checks | [OK] Active |
 | **Side-channel (dudect)** | 1 | [OK] Active |
 | **Benchmark suites** | 4+ | [OK] Active |
 | **Platform-specific** | 5+ | [OK] Per-platform |
@@ -33,8 +35,23 @@
 | `audit_integration.cpp` | 13,144 | End-to-end: sign->verify, derive->use, full protocol flows |
 | `test_ct_sidechannel.cpp` | -- | dudect timing: Welch t-test for side-channel leakage |
 | `differential_test.cpp` | -- | Cross-implementation comparison |
+| `test_ecies_regression.cpp` | 85 | ECIES hardening: parity tamper, invalid prefix, truncated envelope, tamper matrix, KAT, ABI prefix rejection, pubkey parser consistency, RNG fail-closed |
+| `test_adversarial_protocol.cpp` | 89 functions, 186 checks | Adversarial protocol: MuSig2 (nonce reuse/replay, rogue-key, transcript mutation, signer ordering, malicious aggregator), FROST (below-threshold, malformed commitment, malicious coordinator, duplicate nonce), Silent Payments, ECDSA adaptor (round-trip, transcript mismatch, extraction misuse), Schnorr adaptor, DLEQ (malformed proof, wrong generators), BIP-32, FFI hostile-caller (null args, undersized buffers, overlapping buffers, malformed counts) |
+| `test_fuzz_parsers.cpp` | 10K/suite | Parser fuzz: DER, Schnorr sig, compressed/uncompressed pubkey round-trip |
+| `test_fuzz_address_bip32_ffi.cpp` | 10K/suite | Address/BIP-32/FFI fuzz: P2PKH/P2WPKH/P2TR/WIF, BIP-32 paths, BIP-39, coin derivation, FFI boundaries |
 | `bench_ct_vs_libsecp.cpp` | -- | Performance comparison with libsecp256k1 |
 | `bench_field_ops.cpp` | -- | Field operation microbenchmarks |
+| `test_abi_gate.cpp` | -- | ABI compatibility gate: version checks, symbol presence, struct sizes |
+| `test_batch_randomness.cpp` | -- | Batch randomness: nonce independence, distribution, uniqueness |
+| `test_carry_propagation.cpp` | -- | Carry propagation: field arithmetic edge cases across limb boundaries |
+| `test_cross_libsecp256k1.cpp` | -- | Cross-implementation: differential test against bitcoin-core/secp256k1 |
+| `test_cross_platform_kat.cpp` | -- | Cross-platform known-answer tests: deterministic outputs across architectures |
+| `test_debug_invariants.cpp` | -- | Debug invariants: internal consistency checks under debug mode |
+| `test_fiat_crypto_linkage.cpp` | -- | Fiat-Crypto linkage: formal arithmetic verification vectors |
+| `test_frost_kat.cpp` | -- | FROST t-of-n threshold signing known-answer tests |
+| `test_wycheproof_ecdsa.cpp` | -- | Wycheproof ECDSA: Google Project Wycheproof test vectors |
+| `test_wycheproof_ecdh.cpp` | -- | Wycheproof ECDH: Google Project Wycheproof test vectors |
+| `unified_audit_runner.cpp` | 49 modules | Unified audit: all 49 audit modules in single binary |
 
 ### CPU Unit Tests (`cpu/tests/`)
 
@@ -46,7 +63,10 @@
 | `test_ecdsa_schnorr.cpp` | ECDSA (RFC 6979) + Schnorr (BIP-340) vectors | [OK] |
 | `test_ecdh_recovery_taproot.cpp` | ECDH, key recovery, Taproot | [OK] |
 | `test_bip32.cpp` | BIP-32 HD key derivation | [OK] |
-| `test_coins.cpp` | 27-coin address dispatch | [OK] |
+| `test_bip39.cpp` | BIP-39 mnemonic: PBKDF2, wordlist, entropy, validation, seed derivation (57 tests) | [OK] |
+| `test_coins.cpp` | 28-coin address dispatch + P2SH/P2SH-P2WPKH/CashAddr | [OK] |
+| `test_wallet.cpp` | Wallet API: key management, signing, address formats, recovery | [OK] |
+| `test_ethereum.cpp` | Ethereum signing: EIP-155, EIP-191, ecrecover, personal_sign | [OK] |
 | `test_musig2.cpp` | MuSig2 protocol tests | [OK] |
 | `test_batch_add_affine.cpp` | Batch affine addition | [OK] |
 | `test_multiscalar_batch.cpp` | Multi-scalar multiplication | [OK] |
@@ -55,10 +75,14 @@
 | `test_large_scalar_multiplication.cpp` | Large scalar multiplication | [OK] |
 | `test_field_52.cpp` | 52-bit limb representation | [OK] |
 | `test_field_26.cpp` | 26-bit limb representation | [OK] |
+| `test_zk.cpp` | ZK proofs: knowledge, DLEQ, Bulletproof, batch (24 tests) | [OK] |
 | `test_hash_accel.cpp` | SHA-256 acceleration tests | [OK] |
 | `test_exhaustive.cpp` | Exhaustive tests (small curves) | [OK] |
 | `test_v4_features.cpp` | v4 feature tests | [OK] |
 | `run_selftest.cpp` | Selftest runner (smoke/ci/stress) | [OK] |
+| `test_ecc_properties.cpp` | ECC algebraic properties: associativity, commutativity, distributivity | [OK] |
+| `test_edge_cases.cpp` | Edge cases: scalar zero, infinity arithmetic, BIP-32 IL>=n, cache corruption | [OK] |
+| `test_point_edge_cases.cpp` | Point edge cases: infinity, Z=0 guards, roundtrip encoding | [OK] |
 
 ### Fuzz Harnesses (`cpu/fuzz/`)
 
@@ -76,7 +100,17 @@
 | `opencl/tests/opencl_extended_test.cpp` | OpenCL | Extended operations |
 | `opencl/src/opencl_audit_runner.cpp` | OpenCL | Unified GPU audit (27 modules, 8 sections) |
 | `metal/tests/test_metal_host.cpp` | Metal | Metal shader correctness |
-| `metal/src/metal_audit_runner.mm` | Metal | Unified GPU audit (27 modules, 8 sections) |
+| `metal/src/metal_audit_runner.mm` | Metal | `secp256k1_metal_audit`: unified GPU audit (27 modules, 8 sections) |
+| `cuda/src/test_ct_smoke.cu` | CUDA | CT smoke tests incl. ZK knowledge + DLEQ prove/verify (9 tests) |
+| `cuda/src/test_suite.cu` | CUDA | `cuda_selftest`: kernel correctness, field + scalar + point ops |
+| `cuda/src/gpu_audit_runner.cu` | CUDA | `gpu_audit`: unified GPU audit (27 modules, 8 sections) |
+| `metal/app/metal_test.mm` | Metal | `secp256k1_metal_test`: shader correctness, compute pipeline |
+| `metal/app/bench_metal.mm` | Metal | `secp256k1_metal_bench_full`: comprehensive Metal benchmark |
+| `compat/libsecp256k1_shim/tests/shim_test.cpp` | CPU | `secp256k1_shim_test`: libsecp256k1 API compatibility shim |
+| `audit/test_gpu_abi_gate.cpp` | GPU (all) | `gpu_abi_gate`: GPU C ABI surface test -- discovery, lifecycle, NULL safety, error strings, generator_mul equivalence |
+| `audit/test_gpu_ops_equivalence.cpp` | GPU (all) | `gpu_ops_equivalence`: GPU vs CPU reference for all 6 first-wave ops (skips UNSUPPORTED) |
+| `audit/test_gpu_host_api_negative.cpp` | GPU (all) | `gpu_host_api_negative`: NULL ptrs, count=0 no-ops, invalid backend/device, error strings |
+| `audit/test_gpu_backend_matrix.cpp` | GPU (all) | `gpu_backend_matrix`: backend enumeration, device info sanity, per-backend op probing |
 
 ---
 
@@ -164,13 +198,21 @@
 | Function | Test File | Coverage | Notes |
 |----------|-----------|----------|-------|
 | MuSig2 key aggregation | `test_musig2.cpp` | [OK] Basic | No extended vectors |
-| MuSig2 2-round sign | `test_musig2.cpp` | [OK] Basic | Limited edge cases |
-| FROST t-of-n | -- | [!] **Not tested** | Multi-party simulation needed |
-| Adaptor signatures | `test_v4_features.cpp` | [OK] Basic | Limited vectors |
+| MuSig2 2-round sign | `test_musig2.cpp` | [OK] Full | Rogue-key, transcript mutation, signer ordering, malicious aggregator adversarial tests added |
+| FROST t-of-n | `test_v4_features.cpp` | [OK] Basic | Keygen, sign, aggregate, verify |
+| Adaptor signatures | `test_v4_features.cpp` | [OK] Full | Transcript mismatch, extraction misuse, DLEQ malformed proof, wrong generators adversarial tests added |
 | Pedersen commitments | `test_v4_features.cpp` | [OK] Basic | Limited vectors |
+| ZK Knowledge proof | `test_zk.cpp` | [OK] | Prove/verify, arbitrary base, serialization |
+| ZK DLEQ proof | `test_zk.cpp` | [OK] | Prove/verify, cross-basis equality |
+| ZK Bulletproof range | `test_zk.cpp` | [OK] | Prove/verify, boundary values, inner product |
+| ZK batch range verify | `test_zk.cpp` | [OK] | Multi-proof batch verification |
+| GPU ZK Knowledge proof | `test_ct_smoke.cu` | [OK] | CT prove + fast-path verify on CUDA |
+| GPU ZK DLEQ proof | `test_ct_smoke.cu` | [OK] | CT prove + fast-path verify on CUDA |
 | Taproot (BIP-341) | `test_ecdh_recovery_taproot.cpp` | [OK] Basic | -- |
 | BIP-32 HD derivation | `test_bip32.cpp` | [OK] | Standard vectors |
-| 27-coin dispatch | `test_coins.cpp` | [OK] | Per-coin address format |
+| 28-coin dispatch | `test_coins.cpp` | [OK] | Per-coin address format (P2PKH, P2WPKH, P2TR, P2SH-P2WPKH, CashAddr, EIP-55, TRON_BASE58) |
+| Wallet API | `test_wallet.cpp` | [OK] | Chain-agnostic key mgmt, signing, recovery |
+| Ethereum signing | `test_ethereum.cpp` | [OK] | EIP-155/-191, ecrecover, multi-chain |
 | ECDH | `test_ecdh_recovery_taproot.cpp` | [OK] | -- |
 | Key recovery | `test_ecdh_recovery_taproot.cpp` | [OK] | -- |
 
@@ -182,7 +224,6 @@
 
 | Gap | Impact | Blocked By |
 |-----|--------|------------|
-| **FROST protocol-level tests** | Cannot verify threshold signing correctness | Need multi-party simulation framework |
 | **Formal verification** | CT properties unverified mathematically | Fiat-Crypto/ct-verif integration needed |
 | **Cross-ABI tests** | Cannot verify FFI correctness across calling conventions | Need multi-compiler test matrix |
 
@@ -190,10 +231,9 @@
 
 | Gap | Impact | Status |
 |-----|--------|--------|
-| MuSig2 extended test vectors | Limited edge-case coverage | Reference impl vectors needed |
+| MuSig2 extended test vectors | Full adversarial coverage (A.4-A.7) | Reference impl vectors available via BIP-327 |
 | Multi-uarch timing tests | CT may break on specific CPUs | Need hardware test farm |
-| FROST nonce CT audit | Nonce handling may leak timing | Requires protocol-level CT analysis |
-| GPU vs CPU differential | GPU arithmetic may diverge | Partial coverage via OpenCL tests |
+| GPU vs CPU differential | GPU arithmetic may diverge | Covered by gpu_ops_equivalence (6 ops) + OpenCL/CUDA tests |
 
 ### Low Priority
 
@@ -201,7 +241,7 @@
 |-----|--------|--------|
 | WASM-specific tests | WASM arithmetic may diverge | Build-tested, limited runtime tests |
 | ESP32/STM32 hardware tests | Embedded correctness | Requires physical devices |
-| Adaptor signature extended vectors | Limited coverage | Low usage currently |
+| Adaptor signature extended vectors | Full adversarial coverage (D.1-D.6, E.1-E.5) | Transcript mismatch and extraction misuse covered |
 
 ---
 
@@ -260,4 +300,4 @@ clang++ -fsanitize=fuzzer,address -O2 -std=c++20 \
 
 ---
 
-*UltrafastSecp256k1 v3.14.0 -- Test Coverage Matrix*
+*UltrafastSecp256k1 v3.22.0 -- Test Coverage Matrix*

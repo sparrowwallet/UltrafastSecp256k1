@@ -45,14 +45,29 @@
 #include "secp256k1/point.hpp"
 #include "secp256k1/ecdsa.hpp"
 #include "secp256k1/schnorr.hpp"
+#include "secp256k1/ecdh.hpp"
+#include "secp256k1/taproot.hpp"
+#include "secp256k1/address.hpp"
+#include "secp256k1/bip32.hpp"
 #include "secp256k1/tagged_hash.hpp"
 #include "secp256k1/ct/sign.hpp"
 #include "secp256k1/ct/point.hpp"
+#include "secp256k1/zk.hpp"
+#include "secp256k1/pedersen.hpp"
 #include "secp256k1/selftest.hpp"
 #include "secp256k1/init.hpp"
 #include "secp256k1/benchmark_harness.hpp"
 #include "secp256k1/glv.hpp"
 #include "secp256k1/batch_verify.hpp"
+#ifdef SECP256K1_BUILD_ETHEREUM
+#include "secp256k1/recovery.hpp"
+#include "secp256k1/coins/keccak256.hpp"
+#include "secp256k1/coins/ethereum.hpp"
+#include "secp256k1/coins/eth_signing.hpp"
+#endif
+#include "secp256k1/coins/coin_address.hpp"
+#include "secp256k1/coins/coin_hd.hpp"
+#include "secp256k1/coins/coin_params.hpp"
 #if defined(__SIZEOF_INT128__) && !defined(__EMSCRIPTEN__)
 #include "secp256k1/field_52.hpp"
 #endif
@@ -61,6 +76,9 @@
 #include "secp256k1.h"
 #include "secp256k1_extrakeys.h"
 #include "secp256k1_schnorrsig.h"
+#ifdef SECP256K1_BUILD_ETHEREUM
+#include "secp256k1_recovery.h"
+#endif
 
 // Thin wrappers from libsecp_provider.c exposing internal field ops
 extern "C" {
@@ -94,6 +112,8 @@ extern "C" {
 #include <cstdint>
 #include <cstring>
 #include <chrono>
+#include <string>
+#include <vector>
 
 // OpenSSL (optional, system library -- enabled by CMake find_package(OpenSSL))
 #ifdef BENCH_HAS_OPENSSL
@@ -1587,6 +1607,195 @@ int main(int argc, char** argv) {
     printf("\n");
 
     // =====================================================================
+    //  SECTION 6.5: Ethereum Operations (conditional)
+    // =====================================================================
+
+#ifdef SECP256K1_BUILD_ETHEREUM
+    double u_keccak_32 = 0, u_eth_addr = 0, u_eip191 = 0;
+    double u_eth_sign = 0, u_sign_rec = 0, u_ecrecover = 0;
+    double u_personal_sign = 0, u_eip55 = 0;
+    {
+        using namespace secp256k1::coins;
+
+        print_header("ETHEREUM OPERATIONS");
+
+        // Keccak-256 (32-byte input, typical hash-of-hash)
+        idx = 0;
+        u_keccak_32 = bench_ns([&]() {
+            auto h = keccak256(msghashes[idx % POOL].data(), 32);
+            bench::DoNotOptimize(h); ++idx;
+        }, N_FIELD);
+        print_row("keccak256 (32B)", u_keccak_32);
+
+        // Ethereum address derivation from public key
+        idx = 0;
+        u_eth_addr = bench_ns([&]() {
+            auto addr = ethereum_address_bytes(pubkeys[idx % POOL]);
+            bench::DoNotOptimize(addr); ++idx;
+        }, N_POINT);
+        print_row("ethereum_address", u_eth_addr);
+
+        // EIP-191 personal message hash
+        idx = 0;
+        const char eth_msg[] = "I agree to the terms of service";
+        u_eip191 = bench_ns([&]() {
+            auto h = eip191_hash(reinterpret_cast<const uint8_t*>(eth_msg), sizeof(eth_msg) - 1);
+            bench::DoNotOptimize(h); ++idx;
+        }, N_SIGN);
+        print_row("eip191_hash", u_eip191);
+
+        // ECDSA sign with recovery (eth_sign_hash)
+        idx = 0;
+        u_eth_sign = bench_ns([&]() {
+            auto sig = eth_sign_hash(msghashes[idx % POOL], privkeys[idx % POOL], 1);
+            bench::DoNotOptimize(sig); ++idx;
+        }, N_SIGN);
+        print_row("eth_sign_hash", u_eth_sign);
+
+        // ECDSA recoverable sign (raw, no EIP encoding)
+        idx = 0;
+        u_sign_rec = bench_ns([&]() {
+            auto sig = ecdsa_sign_recoverable(msghashes[idx % POOL], privkeys[idx % POOL]);
+            bench::DoNotOptimize(sig); ++idx;
+        }, N_SIGN);
+        print_row("ecdsa_sign_recoverable", u_sign_rec);
+
+        // ecrecover (full pipeline: recover pubkey + derive address)
+        // Pre-sign for recovery pool
+        EthSignature eth_sigs[POOL];
+        for (int i = 0; i < POOL; ++i) {
+            eth_sigs[i] = eth_sign_hash(msghashes[i], privkeys[i], 1);
+        }
+
+        idx = 0;
+        u_ecrecover = bench_ns([&]() {
+            auto [addr, ok] = ecrecover(msghashes[idx % POOL], eth_sigs[idx % POOL]);
+            bench::DoNotOptimize(addr);
+            bench::DoNotOptimize(ok);
+            ++idx;
+        }, N_VERIFY);
+        print_row("ecrecover", u_ecrecover);
+
+        // eth_personal_sign (EIP-191 hash + sign with recovery)
+        idx = 0;
+        u_personal_sign = bench_ns([&]() {
+            auto sig = eth_personal_sign(reinterpret_cast<const uint8_t*>(eth_msg),
+                                         sizeof(eth_msg) - 1, privkeys[idx % POOL]);
+            bench::DoNotOptimize(sig); ++idx;
+        }, N_SIGN);
+        print_row("eth_personal_sign", u_personal_sign);
+
+        // EIP-55 checksummed address (string output)
+        idx = 0;
+        u_eip55 = bench_ns([&]() {
+            auto addr = ethereum_address(pubkeys[idx % POOL]);
+            bench::DoNotOptimize(addr); ++idx;
+        }, N_POINT);
+        print_row("ethereum_address_eip55", u_eip55);
+
+        print_sep();
+        printf("\n");
+    }
+#endif // SECP256K1_BUILD_ETHEREUM
+
+    // =====================================================================
+    //  SECTION 6.7: Real-World Wallet / Protocol Flows
+    // =====================================================================
+
+    double u_ecdh = 0, u_ecdh_raw = 0, u_taproot_out = 0, u_taproot_tweak = 0;
+    double u_bip32_master = 0, u_bip32_child = 0, u_coin_addr_btc = 0, u_coin_addr_eth = 0;
+    double u_silent_sender = 0, u_silent_scan = 0;
+    {
+        print_header("REAL-WORLD FLOWS");
+
+        std::array<std::uint8_t, 64> hd_seed{};
+        std::memcpy(hd_seed.data(), msghashes[0].data(), 32);
+        std::memcpy(hd_seed.data() + 32, msghashes[1].data(), 32);
+
+        auto [master_hd, master_ok] = bip32_master_key(hd_seed.data(), hd_seed.size());
+        if (!master_ok) {
+            printf("[!] bip32_master_key() setup failed\n");
+            return 1;
+        }
+
+        std::array<std::uint8_t, 32> empty_merkle{};
+        auto internal_key_x = schnorr_pubkeys_x[0];
+        std::vector<Scalar> sp_input_sks{privkeys[2], privkeys[3]};
+        std::vector<Point> sp_input_pks{pubkeys[2], pubkeys[3]};
+        auto sp_addr = silent_payment_address(privkeys[0], privkeys[1]);
+        auto [sp_output_pk, _sp_tweak] = silent_payment_create_output(sp_input_sks, sp_addr, 0);
+        std::vector<std::array<std::uint8_t, 32>> sp_outputs{sp_output_pk.x().to_bytes()};
+
+        idx = 0;
+        u_ecdh = bench_ns([&]() {
+            auto s = ecdh_compute(privkeys[idx % POOL], pubkeys[(idx + 1) % POOL]);
+            bench::DoNotOptimize(s); ++idx;
+        }, N_VERIFY);
+        print_row("ecdh_compute (SHA256 shared secret)", u_ecdh);
+
+        idx = 0;
+        u_ecdh_raw = bench_ns([&]() {
+            auto s = ecdh_compute_raw(privkeys[idx % POOL], pubkeys[(idx + 1) % POOL]);
+            bench::DoNotOptimize(s); ++idx;
+        }, N_VERIFY);
+        print_row("ecdh_compute_raw (x-only shared)", u_ecdh_raw);
+
+        u_taproot_out = bench_ns([&]() {
+            auto out = taproot_output_key(internal_key_x, empty_merkle.data(), 0);
+            bench::DoNotOptimize(out);
+        }, N_SIGN);
+        print_row("taproot_output_key (BIP-341 key path)", u_taproot_out);
+
+        u_taproot_tweak = bench_ns([&]() {
+            auto s = taproot_tweak_privkey(privkeys[0], empty_merkle.data(), 0);
+            bench::DoNotOptimize(s);
+        }, N_SIGN);
+        print_row("taproot_tweak_privkey (BIP-341)", u_taproot_tweak);
+
+        u_bip32_master = bench_ns([&]() {
+            auto mk = bip32_master_key(hd_seed.data(), hd_seed.size());
+            bench::DoNotOptimize(mk);
+        }, N_SIGN);
+        print_row("bip32_master_key (64B seed)", u_bip32_master);
+
+        u_bip32_child = bench_ns([&]() {
+            auto child = secp256k1::coins::coin_derive_key(master_hd, secp256k1::coins::Bitcoin, 0, false, 0);
+            bench::DoNotOptimize(child);
+        }, N_SIGN);
+        print_row("bip32_coin_derive_key (BTC m/84'/0'/0'/0/0)", u_bip32_child);
+
+        u_coin_addr_btc = bench_ns([&]() {
+            auto addr = secp256k1::coins::coin_address_from_seed(
+                hd_seed.data(), hd_seed.size(), secp256k1::coins::Bitcoin, 0, 0);
+            bench::DoNotOptimize(addr);
+        }, N_SIGN);
+        print_row("coin_address_from_seed (BTC end-to-end)", u_coin_addr_btc);
+
+        u_coin_addr_eth = bench_ns([&]() {
+            auto addr = secp256k1::coins::coin_address_from_seed(
+                hd_seed.data(), hd_seed.size(), secp256k1::coins::Ethereum, 0, 0);
+            bench::DoNotOptimize(addr);
+        }, N_SIGN);
+        print_row("coin_address_from_seed (ETH end-to-end)", u_coin_addr_eth);
+
+        u_silent_sender = bench_ns([&]() {
+            auto out = silent_payment_create_output(sp_input_sks, sp_addr, static_cast<std::uint32_t>(idx & 3));
+            bench::DoNotOptimize(out); ++idx;
+        }, N_SIGN);
+        print_row("silent_payment_create_output", u_silent_sender);
+
+        idx = 0;
+        u_silent_scan = bench_ns([&]() {
+            auto found = silent_payment_scan(privkeys[0], privkeys[1], sp_input_pks, sp_outputs);
+            bench::DoNotOptimize(found); ++idx;
+        }, N_SIGN);
+        print_row("silent_payment_scan (single output set)", u_silent_scan);
+
+        print_sep();
+        printf("\n");
+    }
+
+    // =====================================================================
     //  SECTION 7: libsecp256k1 (bitcoin-core) -- SAME harness, pool, timer
     // =====================================================================
 
@@ -1608,11 +1817,13 @@ int main(int argc, char** argv) {
     secp256k1_ecdsa_signature  ls_esigs[POOL];
     unsigned char              ls_schnorr_sigs[POOL][64];
 
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wunused-result"
     for (int i = 0; i < POOL; ++i) {
         auto const h = make_hash(0xdeadbeef00ULL + static_cast<uint64_t>(i));
         std::memcpy(ls_seckeys[i], h.data(), 32);
-        secp256k1_ec_pubkey_create(ls_ctx, &ls_pubkeys[i], ls_seckeys[i]);
-        secp256k1_keypair_create(ls_ctx, &ls_keypairs[i], ls_seckeys[i]);
+        (void)secp256k1_ec_pubkey_create(ls_ctx, &ls_pubkeys[i], ls_seckeys[i]);
+        (void)secp256k1_keypair_create(ls_ctx, &ls_keypairs[i], ls_seckeys[i]);
         secp256k1_keypair_xonly_pub(ls_ctx, &ls_xonly[i], NULL, &ls_keypairs[i]);
 
         auto const mh = make_hash(0xcafebabe00ULL + static_cast<uint64_t>(i));
@@ -1648,7 +1859,7 @@ int main(int argc, char** argv) {
     idx = 0;
     const double ls_gen = bench_ns([&]() {
         secp256k1_pubkey pk;
-        secp256k1_ec_pubkey_create(ls_ctx, &pk, ls_seckeys[idx % POOL]);
+        (void)secp256k1_ec_pubkey_create(ls_ctx, &pk, ls_seckeys[idx % POOL]);
         bench::DoNotOptimize(pk); ++idx;
     }, N_KEYGEN);
 
@@ -1670,11 +1881,43 @@ int main(int argc, char** argv) {
         (void)ok; ++idx;
     }, N_VERIFY);
 
+#ifdef SECP256K1_BUILD_ETHEREUM
+    // ECDSA Sign Recoverable (libsecp)
+    secp256k1_ecdsa_recoverable_signature ls_rec_sigs[POOL];
+    idx = 0;
+    const double ls_sign_rec = bench_ns([&]() {
+        secp256k1_ecdsa_sign_recoverable(ls_ctx, &ls_rec_sigs[idx % POOL],
+                                         ls_msgs[idx % POOL],
+                                         ls_seckeys[idx % POOL],
+                                         NULL, NULL);
+        bench::DoNotOptimize(ls_rec_sigs[idx % POOL]); ++idx;
+    }, N_SIGN);
+
+    // Pre-sign all recovery sigs for the recover benchmark
+    for (int i = 0; i < POOL; ++i) {
+        secp256k1_ecdsa_sign_recoverable(ls_ctx, &ls_rec_sigs[i],
+                                         ls_msgs[i], ls_seckeys[i],
+                                         NULL, NULL);
+    }
+
+    // ECDSA Recover (libsecp)
+    idx = 0;
+    const double ls_recover = bench_ns([&]() {
+        secp256k1_pubkey pk;
+        (void)secp256k1_ecdsa_recover(ls_ctx, &pk, &ls_rec_sigs[idx % POOL],
+                                      ls_msgs[idx % POOL]);
+        bench::DoNotOptimize(pk); ++idx;
+    }, N_VERIFY);
+#else
+    const double ls_sign_rec = 0.0;
+    const double ls_recover  = 0.0;
+#endif // SECP256K1_BUILD_ETHEREUM
+
     // Schnorr Keypair Create
     idx = 0;
     const double ls_schnorr_kp = bench_ns([&]() {
         secp256k1_keypair kp;
-        secp256k1_keypair_create(ls_ctx, &kp, ls_seckeys[idx % POOL]);
+        (void)secp256k1_keypair_create(ls_ctx, &kp, ls_seckeys[idx % POOL]);
         bench::DoNotOptimize(kp); ++idx;
     }, N_KEYGEN);
 
@@ -1702,8 +1945,8 @@ int main(int argc, char** argv) {
     idx = 0;
     const double ls_kP = bench_ns([&]() {
         secp256k1_pubkey pk_copy = ls_pubkeys[idx % POOL];
-        secp256k1_ec_pubkey_tweak_mul(ls_ctx, &pk_copy,
-                                      ls_seckeys[(idx + 1) % POOL]);
+        (void)secp256k1_ec_pubkey_tweak_mul(ls_ctx, &pk_copy,
+                                             ls_seckeys[(idx + 1) % POOL]);
         bench::DoNotOptimize(pk_copy); ++idx;
     }, N_SCALAR);
 
@@ -1738,9 +1981,10 @@ int main(int argc, char** argv) {
             &ls_pubkeys[idx % POOL],
             &ls_pubkeys[(idx + 1) % POOL]
         };
-        secp256k1_ec_pubkey_combine(ls_ctx, &result, ins, 2);
+        (void)secp256k1_ec_pubkey_combine(ls_ctx, &result, ins, 2);
         bench::DoNotOptimize(result); ++idx;
     }, N_POINT);
+#pragma GCC diagnostic pop
 
     // -----------------------------------------------------------------
     //  libsecp MICRO-BENCHMARKS: internal field/scalar/point primitives
@@ -2153,6 +2397,17 @@ int main(int argc, char** argv) {
     print_sep_3col();
     printf("\n");
 
+#ifdef SECP256K1_BUILD_ETHEREUM
+    // ---- Ethereum / Recovery Operations ----
+    print_header_3col("ETHEREUM / RECOVERY");
+    print_row_3col("sign_recoverable",    u_sign_rec,         ls_sign_rec);
+    print_row_3col("ecrecover",           u_ecrecover,        ls_recover);
+    print_row_3col("eth_sign_hash",       u_eth_sign,         ls_sign_rec);
+    print_row_3col("eth_personal_sign",   u_personal_sign,    ls_sign_rec);
+    print_sep_3col();
+    printf("\n");
+#endif
+
     // --- OpenSSL ratios (only if measured) ---
 #ifdef BENCH_HAS_OPENSSL
     if (ossl_gen > 0.0) {
@@ -2177,6 +2432,83 @@ int main(int argc, char** argv) {
         printf("\n");
     }
 #endif
+
+    // =====================================================================
+    //  SECTION 8.5: ZK Proofs & Commitments
+    // =====================================================================
+    double u_pedersen = 0, u_kp_prove = 0, u_kp_verify = 0;
+    double u_dleq_prove = 0, u_dleq_verify = 0;
+    double u_range_prove = 0, u_range_verify = 0;
+    {
+        using namespace secp256k1::zk;
+
+        auto sk_zk = make_scalar(42);
+        auto pk_zk = Point::generator().scalar_mul(sk_zk);
+        auto blind = make_scalar(99);
+        auto val_scalar = Scalar::from_uint64(12345);
+        auto commit = secp256k1::pedersen_commit(val_scalar, blind);
+        std::array<uint8_t, 32> aux_zk{};
+        aux_zk[0] = 0xAA;
+
+        // Pedersen commit
+        u_pedersen = bench_ns([&]{
+            auto c = secp256k1::pedersen_commit(val_scalar, blind);
+            bench::DoNotOptimize(c);
+        }, N_SIGN);
+
+        // Knowledge proof (Schnorr sigma protocol)
+        u_kp_prove = bench_ns([&]{
+            auto kp = knowledge_prove(sk_zk, pk_zk, {}, aux_zk);
+            bench::DoNotOptimize(kp);
+        }, N_SIGN);
+
+        auto kp = knowledge_prove(sk_zk, pk_zk, {}, aux_zk);
+        u_kp_verify = bench_ns([&]{
+            bool ok = knowledge_verify(kp, pk_zk, {});
+            bench::DoNotOptimize(ok);
+        }, N_SIGN);
+
+        // DLEQ proof
+        auto sk2_zk = make_scalar(87654321);
+        auto H_zk = Point::generator().scalar_mul(sk2_zk);
+        auto P_zk = Point::generator().scalar_mul(sk_zk);
+        auto Q_zk = H_zk.scalar_mul(sk_zk);
+
+        u_dleq_prove = bench_ns([&]{
+            auto dp = dleq_prove(sk_zk, Point::generator(), H_zk, P_zk, Q_zk, aux_zk);
+            bench::DoNotOptimize(dp);
+        }, N_SIGN / 2);
+
+        auto dp = dleq_prove(sk_zk, Point::generator(), H_zk, P_zk, Q_zk, aux_zk);
+        u_dleq_verify = bench_ns([&]{
+            bool ok = dleq_verify(dp, Point::generator(), H_zk, P_zk, Q_zk);
+            bench::DoNotOptimize(ok);
+        }, N_SIGN / 2);
+
+        // Bulletproof range proof (64-bit)
+        std::uint64_t val = 12345;
+        auto rp = range_prove(val, blind, commit, aux_zk);
+        u_range_prove = bench_ns([&]{
+            auto p = range_prove(val, blind, commit, aux_zk);
+            bench::DoNotOptimize(p);
+        }, std::max(1, N_SIGN / 64));
+
+        u_range_verify = bench_ns([&]{
+            bool ok = range_verify(commit, rp);
+            bench::DoNotOptimize(ok);
+        }, std::max(1, N_SIGN / 32));
+
+        print_header("ZK Proofs & Commitments");
+        print_row("Pedersen commit",              u_pedersen);
+        print_row("Knowledge prove (sigma)",      u_kp_prove);
+        print_row("Knowledge verify",             u_kp_verify);
+        print_row("DLEQ prove",                   u_dleq_prove);
+        print_row("DLEQ verify",                  u_dleq_verify);
+        print_row("Bulletproof range_prove (64b)", u_range_prove);
+        print_row("Bulletproof range_verify (64b)",u_range_verify);
+        print_sep();
+        printf("\n");
+    }
 
     // =====================================================================
     //  SECTION 9: Summary
@@ -2204,10 +2536,24 @@ int main(int argc, char** argv) {
     tput("Schnorr verify (cached)",   u_schnorr_verify);
     tput("Schnorr verify (raw)",      u_schnorr_verify_raw);
     tput("pubkey_create (k*G)",       keygen);
+    tput("ECDH",                      u_ecdh);
+    tput("Taproot output key",        u_taproot_out);
+    tput("BIP32 derive (BTC)",        u_bip32_child);
+    tput("Silent Payment sender",     u_silent_sender);
+    tput("Silent Payment scan",       u_silent_scan);
     printf("\n");
     printf("  --- Ultra CT ---\n");
     tput("CT ECDSA sign",             u_ct_ecdsa);
     tput("CT Schnorr sign",           u_ct_schnorr);
+    printf("\n");
+    printf("  --- Ultra ZK ---\n");
+    tput("Pedersen commit",           u_pedersen);
+    tput("Knowledge prove",           u_kp_prove);
+    tput("Knowledge verify",          u_kp_verify);
+    tput("DLEQ prove",                u_dleq_prove);
+    tput("DLEQ verify",               u_dleq_verify);
+    tput("Bulletproof range_prove",   u_range_prove);
+    tput("Bulletproof range_verify",  u_range_verify);
     printf("\n");
     printf("  --- libsecp256k1 ---\n");
     tput("field_mul",                 ls_fe_mul);

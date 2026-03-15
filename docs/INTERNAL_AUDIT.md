@@ -1,6 +1,6 @@
 # Internal Security Audit -- Full Results
 
-**UltrafastSecp256k1 v3.14.0**  
+**UltrafastSecp256k1 v3.22.0**  
 **Audit Date**: 2026-02-25  
 **Branch**: `dev` (HEAD)  
 **Methodology**: Automated + manual, deterministic seeds, zero external dependencies  
@@ -713,5 +713,5 @@ SECP256K1_DIFFERENTIAL_MULTIPLIER=100 ./build/tests/test_cross_libsecp256k1
 
 ---
 
-*UltrafastSecp256k1 v3.14.0 -- Internal Security Audit Report*  
+*UltrafastSecp256k1 v3.22.0 -- Internal Security Audit Report*  
 *Generated: 2026-02-25*

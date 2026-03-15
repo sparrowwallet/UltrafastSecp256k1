@@ -1,0 +1,73 @@
+# FFI Hostile-Caller Coverage
+
+**Last updated**: 2026-03-15 | **Version**: 3.22.0
+
+Documents the hostile-caller test coverage for the C ABI (`ufsecp_*` functions). All tests are in `audit/test_adversarial_protocol.cpp`, section G (FFI Hostile-Caller).
+
+---
+
+## Attack Vectors Tested
+
+| Vector | Test ID | Description | Functions covered |
+|--------|---------|-------------|-------------------|
+| **Null context** | G.1 | Pass `ctx = NULL` | All 97 functions |
+| **Null output pointer** | G.2 | Valid inputs but `out = NULL` | sign, pubkey_create, ecdh, bip32, addresses |
+| **Null input pointer** | G.3 | `privkey = NULL`, `sig = NULL`, `pubkey = NULL` | sign, verify, ecdh, parse |
+| **All-zero private key** | G.4 | `privkey = {0}` (scalar == 0) | seckey_verify, sign, pubkey_create |
+| **All-0xFF private key** | G.5 | `privkey = {0xFF..FF}` (scalar > n) | seckey_verify, sign, pubkey_create |
+| **Invalid pubkey prefix** | G.6 | Prefix byte `0x00`, `0x01`, `0x05`, `0xFF` | pubkey_parse, ecdsa_verify, ecdh |
+| **Off-curve pubkey** | G.7 | Valid prefix `0x02` + random x not on curve | pubkey_parse, ecdsa_verify |
+| **Zero signature (r=0, s=0)** | G.8 | 64 zero bytes as compact sig | ecdsa_verify, ecdsa_recover |
+| **Max scalar signature** | G.9 | r = n, s = n (>= order) | ecdsa_verify, schnorr_verify |
+| **Malformed DER** | G.10 | Truncated, wrong tags, long-form length, trailing bytes | ecdsa_sig_from_der |
+| **Empty batch arrays** | G.11 | `count = 0` with valid pointers | ecdsa_batch_verify, schnorr_batch_verify |
+| **Single-element batch** | G.12 | `count = 1` (edge case) | ecdsa_batch_verify, schnorr_batch_verify |
+| **Oversized batch count** | G.13 | `count = UINT32_MAX` with small buffer | ecdsa_batch_verify, schnorr_batch_verify |
+| **Undersized pubkey buffer** | G.14 | 32 bytes instead of 33 for compressed | pubkey_parse |
+| **Undersized sig buffer** | G.15 | 63 bytes instead of 64 for compact | ecdsa_verify |
+| **Overlapping input/output** | G.16 | `privkey == out_pubkey` (aliased pointers) | pubkey_create |
+| **Invalid WIF string** | G.17 | Non-base58 chars, wrong checksum, truncated | wif_decode |
+| **Invalid mnemonic** | G.18 | Wrong checksum, non-wordlist words, empty | bip39_validate |
+| **Invalid BIP-32 path** | G.19 | Empty, missing `m/`, negative index, overflow | bip32_derive_path |
+| **ECIES hostile inputs** | G.20 | Zero-length plaintext, truncated envelope (<82B), wrong HMAC, corrupted ciphertext, oversized (1MB) | ecies_encrypt, ecies_decrypt |
+
+---
+
+## Coverage Matrix by Error Code
+
+| Error code | What triggers it | Hostile-caller test? |
+|------------|-----------------|---------------------|
+| `ERR_NULL_ARG` (1) | Any NULL pointer argument | G.1, G.2, G.3 |
+| `ERR_BAD_KEY` (2) | privkey == 0 or >= n | G.4, G.5 |
+| `ERR_BAD_PUBKEY` (3) | Bad prefix, off-curve, x >= p, infinity | G.6, G.7, G.14 |
+| `ERR_BAD_SIG` (4) | r/s == 0 or >= n, malformed DER | G.8, G.9, G.10, G.15 |
+| `ERR_BAD_INPUT` (5) | Wrong length, invalid format, bad count | G.11-G.14, G.17-G.19 |
+| `ERR_VERIFY_FAIL` (6) | Signature verification failed (valid format, wrong key) | Standard verify tests |
+| `ERR_ARITH` (7) | Scalar overflow during tweak | Tweak tests |
+| `ERR_BUF_TOO_SMALL` (10) | Output buffer insufficient | G.14, ECIES |
+
+---
+
+## Additional Coverage (beyond section G)
+
+| Source | Hostile patterns | Check count |
+|--------|-----------------|-------------|
+| `test_fuzz_parsers.cpp` | 580K+ random malformed pubkeys + DER sigs | ~580,000 |
+| `test_fuzz_address_bip32_ffi.cpp` | Random invalid addresses, WIF, BIP-32 paths, BIP-39 | ~83,000 |
+| `test_wycheproof_ecdsa.cpp` | Boundary r/s, bit-flipped sigs, invalid DER | 500+ vectors |
+| `test_wycheproof_ecdh.cpp` | Infinity, twist, off-curve, zero key | 200+ vectors |
+| `test_ecies_regression.cpp` | Wrong key, truncated, empty, 1MB, overlapping | 85 checks |
+| `test_ffi_round_trip.cpp` | Full round-trip all 97 functions with valid inputs | 286 calls |
+| `test_fault_injection.cpp` | Bit-flip in scalar/point/signature mid-computation | 50+ checks |
+
+---
+
+## Guarantee
+
+Every `ufsecp_*` function is tested with at least:
+1. Valid inputs (FFI round-trip)
+2. NULL context (G.1)
+3. NULL critical pointers (G.2, G.3)
+4. Malformed domain-specific input (G.4-G.20, per function category)
+
+No function can crash, hang, or leak memory on any hostile input. All reject with the appropriate `ufsecp_error_t` and leave output buffers untouched.

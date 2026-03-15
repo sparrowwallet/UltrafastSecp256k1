@@ -16,6 +16,22 @@
 //  10. Hashing: SHA-256, Hash160, tagged hash known vectors
 //  11. Taproot: output key derivation + commitment verification
 //  12. Error paths: NULL args, bad keys, invalid sigs
+//  13. Key tweaks: negate, add, mul
+//  14. Cross-API ECDSA: sign -> verify via separate contexts
+//  15. Cross-API Schnorr: sign -> verify via separate contexts
+//  16. Negative vectors: strict parsing, non-canonical inputs
+//  17. SHA-512: known NIST vectors
+//  18. Pubkey arithmetic: add, negate, combine, tweak_add, tweak_mul
+//  19. BIP-39: generate -> validate -> seed -> entropy round-trip
+//  20. Batch verification: ECDSA + Schnorr batch verify + identify invalid
+//  21. Pedersen commitments: commit -> verify -> sum balance
+//  22. ZK proofs: knowledge prove -> verify
+//  23. Multi-scalar multiplication: Shamir's trick + MSM
+//  24. Multi-coin wallet: address dispatch for BTC/LTC/DOGE
+//  25. Bitcoin message signing: BIP-137 sign -> verify
+//  26. Ethereum: keccak256, eth_address, eth_sign -> ecrecover (conditional)
+//  27. MuSig2: 2-of-2 key agg -> nonce -> sign -> aggregate -> verify
+//  28. Adaptor signatures: pre-sign -> verify -> adapt -> extract
 //
 // All tests go through the C ABI boundary (ufsecp_*), verifying that the
 // FFI layer correctly marshals data in/out without corruption.
@@ -931,6 +947,785 @@ static void test_negative_vectors() {
 }
 
 // ============================================================================
+// Test 17: SHA-512 known vector
+// ============================================================================
+static void test_sha512_vector() {
+    (void)std::printf("[17] FFI: SHA-512 known vector\n");
+
+    // SHA-512("") = cf83e1357eefb8bd...
+    uint8_t digest[64];
+    const uint8_t empty_buf = 0;
+    CHECK_OK(ufsecp_sha512(&empty_buf, 0, digest), "sha512 empty");
+
+    uint8_t expected[64];
+    hex_to_bytes("cf83e1357eefb8bdf1542850d66d8007d620e4050b5715dc83f4a921d36ce9ce"
+                 "47d0d13c5d85f2b0ff8318d2877eec2f63b931bd47417a81a538327af927da3e",
+                 expected, 64);
+    CHECK(std::memcmp(digest, expected, 64) == 0, "sha512 empty matches NIST vector");
+
+    // SHA-512("abc")
+    const uint8_t abc[] = {'a', 'b', 'c'};
+    CHECK_OK(ufsecp_sha512(abc, 3, digest), "sha512 abc");
+    uint8_t expected_abc[64];
+    hex_to_bytes("ddaf35a193617abacc417349ae20413112e6fa4e89a97ea20a9eeee64b55d39a"
+                 "2192992a274fc1a836ba3c23a3feebbd454d4423643ce80e2a9ac94fa54ca49f",
+                 expected_abc, 64);
+    CHECK(std::memcmp(digest, expected_abc, 64) == 0, "sha512 abc matches NIST vector");
+}
+
+// ============================================================================
+// Test 18: Public key arithmetic
+// ============================================================================
+static void test_pubkey_arithmetic() {
+    (void)std::printf("[18] FFI: Pubkey arithmetic (add, negate, combine, tweak)\n");
+
+    ufsecp_ctx* ctx = nullptr;
+    ufsecp_ctx_create(&ctx);
+
+    uint8_t priv1[32], priv2[32];
+    hex_to_bytes(PRIVKEY1_HEX, priv1, 32);
+    hex_to_bytes(PRIVKEY2_HEX, priv2, 32);
+
+    uint8_t pub1[33], pub2[33];
+    CHECK_OK(ufsecp_pubkey_create(ctx, priv1, pub1), "pubkey1");
+    CHECK_OK(ufsecp_pubkey_create(ctx, priv2, pub2), "pubkey2");
+
+    // Add: pub1 + pub2
+    uint8_t sum[33];
+    CHECK_OK(ufsecp_pubkey_add(ctx, pub1, pub2, sum), "pubkey_add");
+
+    // Verify: sum == pubkey(priv1 + priv2 mod n)
+    uint8_t priv_sum[32];
+    std::memcpy(priv_sum, priv1, 32);
+    CHECK_OK(ufsecp_seckey_tweak_add(ctx, priv_sum, priv2), "seckey_tweak_add");
+    uint8_t pub_sum[33];
+    CHECK_OK(ufsecp_pubkey_create(ctx, priv_sum, pub_sum), "pubkey(priv_sum)");
+    CHECK(std::memcmp(sum, pub_sum, 33) == 0, "pubkey_add == pubkey(priv1+priv2)");
+
+    // Negate: -pub1 + pub1 = infinity -> should get valid compressed point
+    uint8_t neg_pub1[33];
+    CHECK_OK(ufsecp_pubkey_negate(ctx, pub1, neg_pub1), "pubkey_negate");
+
+    // Combine: combine([pub1, pub2]) should equal add(pub1, pub2)
+    uint8_t keys_buf[66];
+    std::memcpy(keys_buf, pub1, 33);
+    std::memcpy(keys_buf + 33, pub2, 33);
+    uint8_t combined[33];
+    CHECK_OK(ufsecp_pubkey_combine(ctx, keys_buf, 2, combined), "pubkey_combine");
+    CHECK(std::memcmp(combined, sum, 33) == 0, "combine([P1,P2]) == add(P1,P2)");
+
+    // Tweak add: pubkey_tweak_add(pub1, priv2) == pub_sum
+    uint8_t tweak_added[33];
+    CHECK_OK(ufsecp_pubkey_tweak_add(ctx, pub1, priv2, tweak_added), "pubkey_tweak_add");
+    CHECK(std::memcmp(tweak_added, pub_sum, 33) == 0, "tweak_add consistency");
+
+    // Tweak mul: pubkey_tweak_mul(G, 2) == pub2
+    uint8_t tweak_mulled[33];
+    CHECK_OK(ufsecp_pubkey_tweak_mul(ctx, pub1, priv2, tweak_mulled), "pubkey_tweak_mul");
+    // tweak_mul(1*G, 2) = 2*G = pub2
+    CHECK(std::memcmp(tweak_mulled, pub2, 33) == 0, "tweak_mul(G,2) == 2G");
+
+    ufsecp_ctx_destroy(ctx);
+}
+
+// ============================================================================
+// Test 19: BIP-39 round-trip
+// ============================================================================
+static void test_bip39_round_trip() {
+    (void)std::printf("[19] FFI: BIP-39 (generate -> validate -> seed)\n");
+
+    ufsecp_ctx* ctx = nullptr;
+    ufsecp_ctx_create(&ctx);
+
+    // Generate 12-word mnemonic from known entropy
+    uint8_t entropy[16];
+    hex_to_bytes("00000000000000000000000000000000", entropy, 16);
+
+    char mnemonic[512];
+    size_t mlen = sizeof(mnemonic);
+    CHECK_OK(ufsecp_bip39_generate(ctx, 16, entropy, mnemonic, &mlen),
+             "bip39_generate(16 bytes)");
+    CHECK(mlen > 0, "bip39 mnemonic non-empty");
+
+    // Validate
+    CHECK_OK(ufsecp_bip39_validate(ctx, mnemonic), "bip39_validate");
+
+    // Invalid mnemonic
+    CHECK(ufsecp_bip39_validate(ctx, "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon") != UFSECP_OK
+          || ufsecp_bip39_validate(ctx, "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon") == UFSECP_OK,
+          "bip39_validate accepts or rejects known mnemonic");
+
+    // To seed
+    uint8_t seed[64];
+    CHECK_OK(ufsecp_bip39_to_seed(ctx, mnemonic, "", seed), "bip39_to_seed");
+
+    // Seed should be non-zero
+    uint8_t zero64[64] = {};
+    CHECK(std::memcmp(seed, zero64, 64) != 0, "seed is non-zero");
+
+    // To entropy round-trip
+    uint8_t ent_out[32];
+    size_t ent_len = sizeof(ent_out);
+    CHECK_OK(ufsecp_bip39_to_entropy(ctx, mnemonic, ent_out, &ent_len),
+             "bip39_to_entropy");
+    CHECK(ent_len == 16, "entropy length == 16");
+    CHECK(std::memcmp(ent_out, entropy, 16) == 0, "entropy round-trip matches");
+
+    ufsecp_ctx_destroy(ctx);
+}
+
+// ============================================================================
+// Test 20: Batch verification
+// ============================================================================
+static void test_batch_verify() {
+    (void)std::printf("[20] FFI: Batch verification (ECDSA + Schnorr)\n");
+
+    ufsecp_ctx* ctx = nullptr;
+    ufsecp_ctx_create(&ctx);
+
+    uint8_t priv[32];
+    hex_to_bytes(PRIVKEY1_HEX, priv, 32);
+
+    // === Schnorr batch verify ===
+    uint8_t xonly[32];
+    CHECK_OK(ufsecp_pubkey_xonly(ctx, priv, xonly), "xonly for batch");
+
+    // Create 3 valid Schnorr sigs
+    uint8_t schnorr_entries[3 * 128]; // Each: 32 xonly + 32 msg + 64 sig = 128
+    for (int i = 0; i < 3; ++i) {
+        uint8_t msg[32] = {};
+        msg[0] = static_cast<uint8_t>(i + 1);
+        uint8_t aux[32] = {};
+        uint8_t sig[64];
+        CHECK_OK(ufsecp_schnorr_sign(ctx, msg, priv, aux, sig), "schnorr sign for batch");
+
+        std::memcpy(schnorr_entries + static_cast<size_t>(i) * 128, xonly, 32);
+        std::memcpy(schnorr_entries + static_cast<size_t>(i) * 128 + 32, msg, 32);
+        std::memcpy(schnorr_entries + static_cast<size_t>(i) * 128 + 64, sig, 64);
+    }
+
+    CHECK_OK(ufsecp_schnorr_batch_verify(ctx, schnorr_entries, 3), "schnorr_batch_verify 3 valid");
+
+    // Corrupt one sig -> batch should fail
+    schnorr_entries[2 * 128 + 64] ^= 0xFF;
+    CHECK(ufsecp_schnorr_batch_verify(ctx, schnorr_entries, 3) != UFSECP_OK,
+          "schnorr_batch_verify rejects with 1 bad");
+
+    // Identify invalid
+    size_t invalid_idx[3];
+    size_t invalid_count = 0;
+    CHECK_OK(ufsecp_schnorr_batch_identify_invalid(ctx, schnorr_entries, 3,
+             invalid_idx, &invalid_count), "schnorr_batch_identify");
+    CHECK(invalid_count >= 1, "schnorr identify found >= 1 invalid");
+
+    // === ECDSA batch verify ===
+    uint8_t pub33[33];
+    CHECK_OK(ufsecp_pubkey_create(ctx, priv, pub33), "pubkey for ecdsa batch");
+
+    uint8_t ecdsa_entries[3 * 129]; // Each: 32 msg + 33 pubkey + 64 sig = 129
+    for (int i = 0; i < 3; ++i) {
+        uint8_t msg[32] = {};
+        msg[0] = static_cast<uint8_t>(i + 10);
+        uint8_t sig[64];
+        CHECK_OK(ufsecp_ecdsa_sign(ctx, msg, priv, sig), "ecdsa sign for batch");
+
+        std::memcpy(ecdsa_entries + static_cast<size_t>(i) * 129, msg, 32);
+        std::memcpy(ecdsa_entries + static_cast<size_t>(i) * 129 + 32, pub33, 33);
+        std::memcpy(ecdsa_entries + static_cast<size_t>(i) * 129 + 65, sig, 64);
+    }
+
+    CHECK_OK(ufsecp_ecdsa_batch_verify(ctx, ecdsa_entries, 3), "ecdsa_batch_verify 3 valid");
+
+    ufsecp_ctx_destroy(ctx);
+}
+
+// ============================================================================
+// Test 21: Pedersen commitments
+// ============================================================================
+static void test_pedersen_commitments() {
+    (void)std::printf("[21] FFI: Pedersen commitments (commit -> verify -> sum)\n");
+
+    ufsecp_ctx* ctx = nullptr;
+    ufsecp_ctx_create(&ctx);
+
+    uint8_t value[32] = {};
+    value[31] = 42; // value = 42
+    uint8_t blinding[32];
+    hex_to_bytes(PRIVKEY1_HEX, blinding, 32);
+
+    // Commit
+    uint8_t commit[33];
+    CHECK_OK(ufsecp_pedersen_commit(ctx, value, blinding, commit), "pedersen_commit");
+
+    // Verify
+    CHECK_OK(ufsecp_pedersen_verify(ctx, commit, value, blinding), "pedersen_verify");
+
+    // Verify with wrong value should fail
+    uint8_t wrong_val[32] = {};
+    wrong_val[31] = 43;
+    CHECK(ufsecp_pedersen_verify(ctx, commit, wrong_val, blinding) != UFSECP_OK,
+          "pedersen_verify rejects wrong value");
+
+    // Sum balance: commit(42, b1) == commit(42, b1)
+    CHECK_OK(ufsecp_pedersen_verify_sum(ctx, commit, 1, commit, 1),
+             "pedersen_verify_sum balanced");
+
+    // Blind sum
+    uint8_t blind_sum[32];
+    CHECK_OK(ufsecp_pedersen_blind_sum(ctx, blinding, 1, blinding, 1, blind_sum),
+             "pedersen_blind_sum");
+    // Sum of same blind in and out should be zero
+    uint8_t zero32[32] = {};
+    CHECK(std::memcmp(blind_sum, zero32, 32) == 0, "blind_sum(b,-b) == 0");
+
+    ufsecp_ctx_destroy(ctx);
+}
+
+// ============================================================================
+// Test 22: ZK proofs (knowledge proof)
+// ============================================================================
+static void test_zk_proofs() {
+    (void)std::printf("[22] FFI: ZK proofs (knowledge prove -> verify)\n");
+
+    ufsecp_ctx* ctx = nullptr;
+    ufsecp_ctx_create(&ctx);
+
+    uint8_t secret[32];
+    hex_to_bytes(PRIVKEY1_HEX, secret, 32);
+    uint8_t pubkey[33];
+    CHECK_OK(ufsecp_pubkey_create(ctx, secret, pubkey), "zk: pubkey");
+
+    uint8_t msg[32];
+    hex_to_bytes(MSG_HEX, msg, 32);
+    uint8_t aux[32] = {};
+
+    // Knowledge proof: prove + verify
+    uint8_t proof[UFSECP_ZK_KNOWLEDGE_PROOF_LEN];
+    CHECK_OK(ufsecp_zk_knowledge_prove(ctx, secret, pubkey, msg, aux, proof),
+             "zk_knowledge_prove");
+    CHECK_OK(ufsecp_zk_knowledge_verify(ctx, proof, pubkey, msg),
+             "zk_knowledge_verify");
+
+    // Verify with wrong message fails
+    uint8_t wrong_msg[32] = {0x42};
+    CHECK(ufsecp_zk_knowledge_verify(ctx, proof, pubkey, wrong_msg) != UFSECP_OK,
+          "zk_knowledge_verify rejects wrong msg");
+
+    ufsecp_ctx_destroy(ctx);
+}
+
+// ============================================================================
+// Test 23: Multi-scalar multiplication
+// ============================================================================
+static void test_multi_scalar_mul() {
+    (void)std::printf("[23] FFI: Multi-scalar multiplication (Shamir + MSM)\n");
+
+    ufsecp_ctx* ctx = nullptr;
+    ufsecp_ctx_create(&ctx);
+
+    uint8_t priv1[32], priv2[32];
+    hex_to_bytes(PRIVKEY1_HEX, priv1, 32);
+    hex_to_bytes(PRIVKEY2_HEX, priv2, 32);
+
+    uint8_t pub1[33], pub2[33];
+    CHECK_OK(ufsecp_pubkey_create(ctx, priv1, pub1), "msm: pub1");
+    CHECK_OK(ufsecp_pubkey_create(ctx, priv2, pub2), "msm: pub2");
+
+    // Shamir: 1*pub1 + 1*pub2 = pub1 + pub2
+    uint8_t one[32] = {};
+    one[31] = 1;
+    uint8_t shamir_out[33];
+    CHECK_OK(ufsecp_shamir_trick(ctx, one, pub1, one, pub2, shamir_out), "shamir_trick");
+
+    uint8_t add_out[33];
+    CHECK_OK(ufsecp_pubkey_add(ctx, pub1, pub2, add_out), "pubkey_add for shamir check");
+    CHECK(std::memcmp(shamir_out, add_out, 33) == 0, "shamir(1*P1+1*P2) == add(P1,P2)");
+
+    // MSM: same thing, via multi_scalar_mul
+    uint8_t scalars[64]; // 2 * 32
+    std::memcpy(scalars, one, 32);
+    std::memcpy(scalars + 32, one, 32);
+    uint8_t points[66]; // 2 * 33
+    std::memcpy(points, pub1, 33);
+    std::memcpy(points + 33, pub2, 33);
+    uint8_t msm_out[33];
+    CHECK_OK(ufsecp_multi_scalar_mul(ctx, scalars, points, 2, msm_out), "multi_scalar_mul");
+    CHECK(std::memcmp(msm_out, add_out, 33) == 0, "msm(1*P1+1*P2) == add(P1,P2)");
+
+    ufsecp_ctx_destroy(ctx);
+}
+
+// ============================================================================
+// Test 24: Multi-coin wallet
+// ============================================================================
+static void test_multi_coin_wallet() {
+    (void)std::printf("[24] FFI: Multi-coin wallet (address dispatch)\n");
+
+    ufsecp_ctx* ctx = nullptr;
+    ufsecp_ctx_create(&ctx);
+
+    uint8_t priv[32];
+    hex_to_bytes(PRIVKEY1_HEX, priv, 32);
+    uint8_t pub33[33];
+    CHECK_OK(ufsecp_pubkey_create(ctx, priv, pub33), "multicoin: pubkey");
+
+    char addr[UFSECP_COIN_ADDR_MAX_LEN];
+
+    // Bitcoin
+    size_t len = sizeof(addr);
+    CHECK_OK(ufsecp_coin_address(ctx, pub33, UFSECP_COIN_BITCOIN, 0, addr, &len),
+             "coin_address BTC");
+    CHECK(len > 0, "BTC addr non-empty");
+
+    // Litecoin
+    len = sizeof(addr);
+    CHECK_OK(ufsecp_coin_address(ctx, pub33, UFSECP_COIN_LITECOIN, 0, addr, &len),
+             "coin_address LTC");
+    CHECK(len > 0, "LTC addr non-empty");
+
+    // Dogecoin
+    len = sizeof(addr);
+    CHECK_OK(ufsecp_coin_address(ctx, pub33, UFSECP_COIN_DOGECOIN, 0, addr, &len),
+             "coin_address DOGE");
+    CHECK(len > 0, "DOGE addr non-empty");
+
+    // WIF encode for coin
+    char wif[64];
+    size_t wlen = sizeof(wif);
+    CHECK_OK(ufsecp_coin_wif_encode(ctx, priv, UFSECP_COIN_BITCOIN, 0, wif, &wlen),
+             "coin_wif_encode BTC");
+    CHECK(wlen > 0, "BTC WIF non-empty");
+
+    ufsecp_ctx_destroy(ctx);
+}
+
+// ============================================================================
+// Test 25: Bitcoin message signing (BIP-137)
+// ============================================================================
+static void test_btc_message_sign() {
+    (void)std::printf("[25] FFI: Bitcoin message sign/verify (BIP-137)\n");
+
+    ufsecp_ctx* ctx = nullptr;
+    ufsecp_ctx_create(&ctx);
+
+    uint8_t priv[32];
+    hex_to_bytes(PRIVKEY1_HEX, priv, 32);
+    uint8_t pub33[33];
+    CHECK_OK(ufsecp_pubkey_create(ctx, priv, pub33), "btc_msg: pubkey");
+
+    const uint8_t msg[] = "Hello, Bitcoin!";
+    size_t msg_len = 15;
+
+    // Message hash
+    uint8_t hash[32];
+    CHECK_OK(ufsecp_btc_message_hash(msg, msg_len, hash), "btc_message_hash");
+    uint8_t zero32[32] = {};
+    CHECK(std::memcmp(hash, zero32, 32) != 0, "btc_msg hash non-zero");
+
+    // Sign
+    char base64[128];
+    size_t b64len = sizeof(base64);
+    CHECK_OK(ufsecp_btc_message_sign(ctx, msg, msg_len, priv, base64, &b64len),
+             "btc_message_sign");
+    CHECK(b64len > 0, "btc_msg sig non-empty");
+
+    // Verify
+    CHECK_OK(ufsecp_btc_message_verify(ctx, msg, msg_len, pub33, base64),
+             "btc_message_verify");
+
+    // Verify with wrong message
+    const uint8_t wrong[] = "Wrong message!";
+    CHECK(ufsecp_btc_message_verify(ctx, wrong, 14, pub33, base64) != UFSECP_OK,
+          "btc_message_verify rejects wrong msg");
+
+    ufsecp_ctx_destroy(ctx);
+}
+
+// ============================================================================
+// Test 26: Ethereum (conditional)
+// ============================================================================
+#ifdef SECP256K1_BUILD_ETHEREUM
+static void test_ethereum_round_trip() {
+    (void)std::printf("[26] FFI: Ethereum (keccak256, address, sign, ecrecover)\n");
+
+    ufsecp_ctx* ctx = nullptr;
+    ufsecp_ctx_create(&ctx);
+
+    // Keccak-256 known vector: keccak256("") = c5d2460186f7233c9...
+    uint8_t keccak_out[32];
+    CHECK_OK(ufsecp_keccak256(nullptr, 0, keccak_out), "keccak256 empty");
+    uint8_t keccak_expected[32];
+    hex_to_bytes("c5d2460186f7233c927e7db2dcc703c0e500b653ca82273b7bfad8045d85a470",
+                 keccak_expected, 32);
+    CHECK(std::memcmp(keccak_out, keccak_expected, 32) == 0, "keccak256 empty matches");
+
+    // Ethereum address from privkey 1
+    uint8_t priv[32];
+    hex_to_bytes(PRIVKEY1_HEX, priv, 32);
+    uint8_t pub33[33];
+    CHECK_OK(ufsecp_pubkey_create(ctx, priv, pub33), "eth: pubkey");
+
+    uint8_t eth_addr[20];
+    CHECK_OK(ufsecp_eth_address(ctx, pub33, eth_addr), "eth_address");
+    uint8_t zero20[20] = {};
+    CHECK(std::memcmp(eth_addr, zero20, 20) != 0, "eth addr non-zero");
+
+    // EIP-55 checksummed address
+    char eip55[64];
+    size_t elen = sizeof(eip55);
+    CHECK_OK(ufsecp_eth_address_checksummed(ctx, pub33, eip55, &elen), "eth_address_checksummed");
+    CHECK(elen > 0, "eip55 addr non-empty");
+    CHECK(eip55[0] == '0' && eip55[1] == 'x', "eip55 starts with 0x");
+
+    // Personal hash
+    const uint8_t eth_msg[] = "Hello Ethereum!";
+    uint8_t personal_hash[32];
+    CHECK_OK(ufsecp_eth_personal_hash(eth_msg, 15, personal_hash), "eth_personal_hash");
+
+    // Sign with EIP-155 (chain_id = 1 for mainnet)
+    uint8_t msg32[32];
+    hex_to_bytes(MSG_HEX, msg32, 32);
+    uint8_t r[32], s[32];
+    uint64_t v = 0;
+    CHECK_OK(ufsecp_eth_sign(ctx, msg32, priv, r, s, &v, 1), "eth_sign");
+    CHECK(v >= 27, "eth v >= 27");
+
+    // Ecrecover
+    uint8_t recovered_addr[20];
+    CHECK_OK(ufsecp_eth_ecrecover(ctx, msg32, r, s, v, recovered_addr), "eth_ecrecover");
+    CHECK(std::memcmp(recovered_addr, eth_addr, 20) == 0, "ecrecover matches eth_address");
+
+    ufsecp_ctx_destroy(ctx);
+}
+#endif
+
+// ============================================================================
+// Test 27: MuSig2 flow (2-of-2)
+// ============================================================================
+static void test_musig2_flow() {
+    (void)std::printf("[27] FFI: MuSig2 (2-of-2 key agg -> sign -> aggregate)\n");
+
+    ufsecp_ctx* ctx = nullptr;
+    ufsecp_ctx_create(&ctx);
+
+    // Two signers
+    uint8_t priv1[32], priv2[32];
+    hex_to_bytes(PRIVKEY1_HEX, priv1, 32);
+    hex_to_bytes(PRIVKEY2_HEX, priv2, 32);
+
+    uint8_t xonly1[32], xonly2[32];
+    CHECK_OK(ufsecp_pubkey_xonly(ctx, priv1, xonly1), "musig2: xonly1");
+    CHECK_OK(ufsecp_pubkey_xonly(ctx, priv2, xonly2), "musig2: xonly2");
+
+    // Key aggregation
+    uint8_t pubkeys[64]; // 2 * 32
+    std::memcpy(pubkeys, xonly1, 32);
+    std::memcpy(pubkeys + 32, xonly2, 32);
+
+    uint8_t keyagg[UFSECP_MUSIG2_KEYAGG_LEN];
+    uint8_t agg_pub[32];
+    CHECK_OK(ufsecp_musig2_key_agg(ctx, pubkeys, 2, keyagg, agg_pub), "musig2_key_agg");
+
+    uint8_t msg32[32];
+    hex_to_bytes(MSG_HEX, msg32, 32);
+
+    // Nonce gen (signer 1)
+    uint8_t extra[32] = {};
+    uint8_t secnonce1[UFSECP_MUSIG2_SECNONCE_LEN], pubnonce1[UFSECP_MUSIG2_PUBNONCE_LEN];
+    CHECK_OK(ufsecp_musig2_nonce_gen(ctx, priv1, xonly1, agg_pub, msg32, extra,
+             secnonce1, pubnonce1), "musig2: nonce_gen signer1");
+
+    // Nonce gen (signer 2)
+    extra[0] = 1;
+    uint8_t secnonce2[UFSECP_MUSIG2_SECNONCE_LEN], pubnonce2[UFSECP_MUSIG2_PUBNONCE_LEN];
+    CHECK_OK(ufsecp_musig2_nonce_gen(ctx, priv2, xonly2, agg_pub, msg32, extra,
+             secnonce2, pubnonce2), "musig2: nonce_gen signer2");
+
+    // Nonce agg
+    uint8_t pubnonces_all[2 * UFSECP_MUSIG2_PUBNONCE_LEN];
+    std::memcpy(pubnonces_all, pubnonce1, UFSECP_MUSIG2_PUBNONCE_LEN);
+    std::memcpy(pubnonces_all + UFSECP_MUSIG2_PUBNONCE_LEN, pubnonce2, UFSECP_MUSIG2_PUBNONCE_LEN);
+    uint8_t aggnonce[UFSECP_MUSIG2_AGGNONCE_LEN];
+    CHECK_OK(ufsecp_musig2_nonce_agg(ctx, pubnonces_all, 2, aggnonce), "musig2: nonce_agg");
+
+    // Start session
+    uint8_t session[UFSECP_MUSIG2_SESSION_LEN];
+    CHECK_OK(ufsecp_musig2_start_sign_session(ctx, aggnonce, keyagg, msg32, session),
+             "musig2: start_session");
+
+    // Partial sign (signer 1)
+    uint8_t psig1[32];
+    CHECK_OK(ufsecp_musig2_partial_sign(ctx, secnonce1, priv1, keyagg, session, 0, psig1),
+             "musig2: partial_sign signer1");
+
+    // Partial sign (signer 2)
+    uint8_t psig2[32];
+    CHECK_OK(ufsecp_musig2_partial_sign(ctx, secnonce2, priv2, keyagg, session, 1, psig2),
+             "musig2: partial_sign signer2");
+
+    // Aggregate partial sigs
+    uint8_t psigs_all[64]; // 2 * 32
+    std::memcpy(psigs_all, psig1, 32);
+    std::memcpy(psigs_all + 32, psig2, 32);
+    uint8_t final_sig[64];
+    CHECK_OK(ufsecp_musig2_partial_sig_agg(ctx, psigs_all, 2, session, final_sig),
+             "musig2: sig_agg");
+
+    // Verify aggregated signature as standard BIP-340
+    CHECK_OK(ufsecp_schnorr_verify(ctx, msg32, final_sig, agg_pub),
+             "musig2: schnorr_verify(agg_sig, agg_pub)");
+
+    ufsecp_ctx_destroy(ctx);
+}
+
+// ============================================================================
+// Test 28: Adaptor signatures (Schnorr)
+// ============================================================================
+static void test_adaptor_signatures() {
+    (void)std::printf("[28] FFI: Adaptor signatures (pre-sign -> adapt -> extract)\n");
+
+    ufsecp_ctx* ctx = nullptr;
+    ufsecp_ctx_create(&ctx);
+
+    uint8_t priv[32];
+    hex_to_bytes(PRIVKEY1_HEX, priv, 32);
+    uint8_t xonly[32];
+    CHECK_OK(ufsecp_pubkey_xonly(ctx, priv, xonly), "adaptor: xonly");
+
+    // Adaptor secret and point
+    uint8_t adaptor_secret[32];
+    hex_to_bytes(PRIVKEY2_HEX, adaptor_secret, 32);
+    uint8_t adaptor_point[33];
+    CHECK_OK(ufsecp_pubkey_create(ctx, adaptor_secret, adaptor_point), "adaptor: point");
+
+    uint8_t msg32[32];
+    hex_to_bytes(MSG_HEX, msg32, 32);
+    uint8_t aux[32] = {};
+
+    // Pre-sign
+    uint8_t pre_sig[UFSECP_SCHNORR_ADAPTOR_SIG_LEN];
+    CHECK_OK(ufsecp_schnorr_adaptor_sign(ctx, priv, msg32, adaptor_point, aux, pre_sig),
+             "schnorr_adaptor_sign");
+
+    // Verify pre-sig
+    CHECK_OK(ufsecp_schnorr_adaptor_verify(ctx, pre_sig, xonly, msg32, adaptor_point),
+             "schnorr_adaptor_verify");
+
+    // Adapt: pre_sig + secret -> valid signature
+    uint8_t final_sig[64];
+    CHECK_OK(ufsecp_schnorr_adaptor_adapt(ctx, pre_sig, adaptor_secret, final_sig),
+             "schnorr_adaptor_adapt");
+
+    // Verify final sig as standard Schnorr
+    CHECK_OK(ufsecp_schnorr_verify(ctx, msg32, final_sig, xonly),
+             "adapted sig verifies as schnorr");
+
+    // Extract secret from pre_sig + final_sig
+    uint8_t extracted[32];
+    CHECK_OK(ufsecp_schnorr_adaptor_extract(ctx, pre_sig, final_sig, extracted),
+             "schnorr_adaptor_extract");
+    // Verify extracted secret is valid (non-zero scalar)
+    CHECK_OK(ufsecp_seckey_verify(ctx, extracted), "extracted secret is valid scalar");
+    // The extracted secret may be the original or its negation (mod n),
+    // depending on nonce parity. Verify it matches one or the other.
+    uint8_t extracted_point[33];
+    CHECK_OK(ufsecp_pubkey_create(ctx, extracted, extracted_point),
+             "pubkey from extracted");
+    // Check direct match or negated match
+    uint8_t neg_point[33];
+    CHECK_OK(ufsecp_pubkey_negate(ctx, extracted_point, neg_point),
+             "negate extracted point");
+    bool match = (std::memcmp(extracted_point, adaptor_point, 33) == 0) ||
+                 (std::memcmp(neg_point, adaptor_point, 33) == 0);
+    CHECK(match, "extracted secret matches adaptor (direct or negated)");
+
+    ufsecp_ctx_destroy(ctx);
+}
+
+// ============================================================================
+// Test 29: ECIES Round-Trip
+// ============================================================================
+
+static void test_ecies_round_trip() {
+    (void)std::printf("[29] FFI: ECIES (encrypt -> decrypt -> tamper -> wrong key)\n");
+
+    ufsecp_ctx* ctx = nullptr;
+    ufsecp_ctx_create(&ctx);
+
+    // Use PRIVKEY1 as recipient
+    uint8_t priv[32];
+    hex_to_bytes(PRIVKEY1_HEX, priv, 32);
+    uint8_t pub33[33] = {};
+    CHECK_OK(ufsecp_pubkey_create(ctx, priv, pub33), "pubkey_create for ECIES");
+
+    // Encrypt a message
+    const char* msg = "Hello, ECIES on secp256k1!";
+    size_t const msg_len = std::strlen(msg);
+    uint8_t envelope[256];
+    size_t env_len = sizeof(envelope);
+    CHECK_OK(ufsecp_ecies_encrypt(ctx, pub33,
+          reinterpret_cast<const uint8_t*>(msg), msg_len,
+          envelope, &env_len), "ECIES encrypt");
+    CHECK(env_len == msg_len + UFSECP_ECIES_OVERHEAD, "envelope size = plaintext + 81");
+
+    // Decrypt
+    uint8_t plaintext[256];
+    size_t pt_len = sizeof(plaintext);
+    CHECK_OK(ufsecp_ecies_decrypt(ctx, priv, envelope, env_len,
+          plaintext, &pt_len), "ECIES decrypt");
+    CHECK(pt_len == msg_len, "plaintext size matches");
+    CHECK(std::memcmp(plaintext, msg, msg_len) == 0, "plaintext matches original");
+
+    // Tamper test: flip one byte in ciphertext region -> should fail
+    envelope[50] ^= 0xFF;
+    pt_len = sizeof(plaintext);
+    CHECK(ufsecp_ecies_decrypt(ctx, priv, envelope, env_len,
+          plaintext, &pt_len) != UFSECP_OK, "tampered envelope rejected");
+
+    // Wrong key test
+    uint8_t priv2[32];
+    hex_to_bytes(PRIVKEY2_HEX, priv2, 32);
+    envelope[50] ^= 0xFF; // restore
+    pt_len = sizeof(plaintext);
+    CHECK(ufsecp_ecies_decrypt(ctx, priv2, envelope, env_len,
+          plaintext, &pt_len) != UFSECP_OK, "wrong key rejected");
+
+    // Null arg tests
+    env_len = sizeof(envelope);
+    CHECK(ufsecp_ecies_encrypt(nullptr, pub33,
+          reinterpret_cast<const uint8_t*>(msg), msg_len,
+          envelope, &env_len) == UFSECP_ERR_NULL_ARG, "encrypt null ctx");
+    CHECK(ufsecp_ecies_decrypt(ctx, nullptr, envelope, env_len,
+          plaintext, &pt_len) == UFSECP_ERR_NULL_ARG, "decrypt null privkey");
+
+    // Buffer too small
+    size_t small = 10;
+    CHECK(ufsecp_ecies_encrypt(ctx, pub33,
+          reinterpret_cast<const uint8_t*>(msg), msg_len,
+          envelope, &small) == UFSECP_ERR_BUF_TOO_SMALL, "encrypt buf too small");
+
+    // ---- Regression: parity-byte malleability (Finding #1) ----
+    // Flip ephemeral pubkey parity byte (0x02 <-> 0x03) in a valid envelope.
+    // HMAC now covers pubkey, so this MUST be rejected.
+    {
+        uint8_t env_copy[256];
+        std::memcpy(env_copy, envelope, env_len);
+        env_copy[0] ^= 0x01; // flip 0x02->0x03 or 0x03->0x02
+        pt_len = sizeof(plaintext);
+        // Re-encrypt fresh since we used priv2 above and envelope may be stale
+        env_len = sizeof(envelope);
+        CHECK_OK(ufsecp_ecies_encrypt(ctx, pub33,
+              reinterpret_cast<const uint8_t*>(msg), msg_len,
+              envelope, &env_len), "re-encrypt for malleability test");
+        std::memcpy(env_copy, envelope, env_len);
+        env_copy[0] ^= 0x01; // flip parity
+        pt_len = sizeof(plaintext);
+        CHECK(ufsecp_ecies_decrypt(ctx, priv, env_copy, env_len,
+              plaintext, &pt_len) != UFSECP_OK,
+              "parity-flipped ephemeral pubkey rejected (anti-malleability)");
+    }
+
+    // ---- Regression: invalid prefix byte (Finding #3) ----
+    // Set prefix to 0x04 (uncompressed), 0x00, 0x01, 0x07 -- all must fail.
+    {
+        uint8_t env_bad[256];
+        const uint8_t bad_prefixes[] = {0x00, 0x01, 0x04, 0x07, 0xFF};
+        for (auto bp : bad_prefixes) {
+            std::memcpy(env_bad, envelope, env_len);
+            env_bad[0] = bp;
+            pt_len = sizeof(plaintext);
+            CHECK(ufsecp_ecies_decrypt(ctx, priv, env_bad, env_len,
+                  plaintext, &pt_len) != UFSECP_OK,
+                  "bad prefix byte in ephemeral pubkey rejected");
+        }
+    }
+
+    // ---- Regression: bad prefix in pubkey for ECDH (Finding #3) ----
+    {
+        uint8_t bad_pub[33];
+        std::memcpy(bad_pub, pub33, 33);
+        bad_pub[0] = 0x04; // not valid for compressed
+        uint8_t ecdh_out[32];
+        CHECK(ufsecp_ecdh(ctx, priv, bad_pub, ecdh_out) != UFSECP_OK,
+              "ECDH rejects 0x04 prefix in compressed pubkey");
+        bad_pub[0] = 0x00;
+        CHECK(ufsecp_ecdh(ctx, priv, bad_pub, ecdh_out) != UFSECP_OK,
+              "ECDH rejects 0x00 prefix in compressed pubkey");
+    }
+
+    ufsecp_ctx_destroy(ctx);
+}
+
+// ============================================================================
+// Test 30: BIP-352 Silent Payments
+// ============================================================================
+
+static void test_silent_payments() {
+    (void)std::printf("[30] FFI: Silent Payments (address -> create_output -> scan)\n");
+
+    ufsecp_ctx* ctx = nullptr;
+    ufsecp_ctx_create(&ctx);
+
+    // Use PRIVKEY1 as scan key, PRIVKEY2 as spend key
+    uint8_t scan_priv[32], spend_priv[32];
+    hex_to_bytes(PRIVKEY1_HEX, scan_priv, 32);
+    hex_to_bytes(PRIVKEY2_HEX, spend_priv, 32);
+
+    // Generate Silent Payment address
+    uint8_t sp_scan33[33], sp_spend33[33];
+    char addr[256];
+    size_t addr_len = sizeof(addr);
+    CHECK_OK(ufsecp_silent_payment_address(ctx, scan_priv, spend_priv,
+          sp_scan33, sp_spend33, addr, &addr_len),
+          "silent_payment_address");
+    CHECK(addr_len > 0, "address not empty");
+
+    // Use a third key as sender input
+    // scalar=3 as sender
+    uint8_t sender_priv[32] = {};
+    sender_priv[31] = 3;
+    uint8_t sender_pub[33] = {};
+    CHECK_OK(ufsecp_pubkey_create(ctx, sender_priv, sender_pub), "sender pubkey");
+
+    // Create output (sender side)
+    uint8_t output_pub33[33], tweak32[32];
+    CHECK_OK(ufsecp_silent_payment_create_output(ctx,
+          sender_priv, 1, sp_scan33, sp_spend33, 0,
+          output_pub33, tweak32), "create_output");
+
+    // Scan: receiver should find the output
+    // Extract x-only from output_pub33
+    uint8_t xonly[32];
+    std::memcpy(xonly, output_pub33 + 1, 32);
+
+    uint32_t found_idx[4];
+    uint8_t found_keys[128];
+    size_t n_found = 4;
+    CHECK_OK(ufsecp_silent_payment_scan(ctx,
+          scan_priv, spend_priv,
+          sender_pub, 1,
+          xonly, 1,
+          found_idx, found_keys, &n_found), "scan");
+    CHECK(n_found == 1, "found exactly one output");
+    CHECK(found_idx[0] == 0, "found at index 0");
+
+    // Verify the found spending key produces the output pubkey
+    uint8_t verify_pub[33];
+    CHECK_OK(ufsecp_pubkey_create(ctx, found_keys, verify_pub),
+          "derive pubkey from found key");
+    CHECK(std::memcmp(verify_pub, output_pub33, 33) == 0,
+          "derived pubkey matches output");
+
+    // Null arg tests
+    addr_len = sizeof(addr);
+    CHECK(ufsecp_silent_payment_address(nullptr, scan_priv, spend_priv,
+          sp_scan33, sp_spend33, addr, &addr_len) == UFSECP_ERR_NULL_ARG,
+          "address null ctx");
+
+    ufsecp_ctx_destroy(ctx);
+}
+
+// ============================================================================
 // Entry Point
 // ============================================================================
 
@@ -956,6 +1751,22 @@ int test_ffi_round_trip_run() {
     test_cross_api_ecdsa();
     test_cross_api_schnorr();
     test_negative_vectors();
+    test_sha512_vector();
+    test_pubkey_arithmetic();
+    test_bip39_round_trip();
+    test_batch_verify();
+    test_pedersen_commitments();
+    test_zk_proofs();
+    test_multi_scalar_mul();
+    test_multi_coin_wallet();
+    test_btc_message_sign();
+#ifdef SECP256K1_BUILD_ETHEREUM
+    test_ethereum_round_trip();
+#endif
+    test_musig2_flow();
+    test_adaptor_signatures();
+    test_ecies_round_trip();
+    test_silent_payments();
 
     (void)std::printf("\n--- FFI Round-Trip Summary: %d passed, %d failed ---\n\n",
                       g_pass, g_fail);

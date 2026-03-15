@@ -162,7 +162,7 @@ pod 'Ufsecp', '~> 3.14.0'
 ### 2.7 Go (Go Modules)
 
 ```bash
-go get github.com/nicenemo/ufsecp@v3.14.0
+go get github.com/nicenemo/ufsecp@v3.22.0
 ```
 
 **CGo requirements**: Requires C compiler + `libufsecp` installed system-wide or via `CGO_LDFLAGS`/`CGO_CFLAGS`.

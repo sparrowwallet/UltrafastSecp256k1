@@ -46,7 +46,9 @@ else()
         $<$<COMPILE_LANGUAGE:CUDA>:--use_fast_math>
         $<$<COMPILE_LANGUAGE:CUDA>:-Xptxas=-O3>
     )
-    set_target_properties(secp256k1_cuda_lib PROPERTIES CUDA_SEPARABLE_COMPILATION ON)
+    set_target_properties(secp256k1_cuda_lib PROPERTIES
+        CUDA_SEPARABLE_COMPILATION ON
+        POSITION_INDEPENDENT_CODE ON)
 endif()
 
 target_include_directories(secp256k1_cuda_lib PUBLIC
@@ -113,6 +115,18 @@ else()
     )
 endif()
 target_link_libraries(gpu_audit_runner PRIVATE secp256k1_cuda_lib)
+# Link CPU library for CPU-GPU differential cross-verification
+if(TARGET fastsecp256k1)
+    target_include_directories(gpu_audit_runner PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/../cpu/include
+    )
+    target_link_libraries(gpu_audit_runner PRIVATE
+        $<TARGET_FILE:fastsecp256k1>
+    )
+    target_compile_definitions(gpu_audit_runner PRIVATE HAVE_CPU_LIB=1)
+    set_target_properties(gpu_audit_runner PROPERTIES INTERPROCEDURAL_OPTIMIZATION FALSE)
+    target_link_options(gpu_audit_runner PRIVATE -fno-lto)
+endif()
 add_test(NAME gpu_audit COMMAND gpu_audit_runner --json-only)
 
 # ===== GPU Unified Benchmark =====
@@ -217,4 +231,24 @@ else()
 endif()
 target_link_libraries(test_ct_smoke PRIVATE secp256k1_cuda_lib)
 add_test(NAME gpu_ct_smoke COMMAND test_ct_smoke)
+
+# ===== GPU ZK Benchmark =====
+set(_BENCH_ZK_SOURCES src/bench_zk.cu)
+if(_GPU_LANG STREQUAL "HIP")
+    set_source_files_properties(${_BENCH_ZK_SOURCES} PROPERTIES LANGUAGE HIP)
+    add_executable(bench_zk ${_BENCH_ZK_SOURCES})
+    target_compile_options(bench_zk PRIVATE
+        $<$<COMPILE_LANGUAGE:HIP>:-O3>
+        $<$<COMPILE_LANGUAGE:HIP>:-ffast-math>
+    )
+else()
+    add_executable(bench_zk ${_BENCH_ZK_SOURCES})
+    target_compile_options(bench_zk PRIVATE
+        $<$<COMPILE_LANGUAGE:CUDA>:--expt-relaxed-constexpr>
+        $<$<COMPILE_LANGUAGE:CUDA>:-O3>
+        $<$<COMPILE_LANGUAGE:CUDA>:--use_fast_math>
+        $<$<COMPILE_LANGUAGE:CUDA>:-Xptxas=-O3>
+    )
+endif()
+target_link_libraries(bench_zk PRIVATE secp256k1_cuda_lib)
 

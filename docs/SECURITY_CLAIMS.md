@@ -1,6 +1,6 @@
 # Security Claims & API Contract
 
-**UltrafastSecp256k1 v3.21.0** -- FAST / CT Dual-Layer Architecture (CPU + GPU)
+**UltrafastSecp256k1 v3.22.0** -- FAST / CT Dual-Layer Architecture (CPU + GPU)
 
 ---
 
@@ -20,7 +20,7 @@ mathematical semantics. They differ **only** in execution profile:
 | **Nonce Erasure** | Not erased | Intermediate nonces erased (volatile fn-ptr) |
 | **Side-Channel** | Not resistant | Resistant (CPU backend) |
 
-### CT Overhead by Platform (v3.21.0)
+### CT Overhead by Platform (v3.22.0)
 
 Measured with `bench_unified` / `gpu_bench_unified` (signing operations; verify uses public inputs -- CT not needed):
 
@@ -203,14 +203,22 @@ cryptographic implementations, including libsecp256k1.
 | Schnorr sign | `secp256k1::schnorr_sign(...)` | `ct::schnorr_sign(...)` |
 | Schnorr pubkey | `secp256k1::schnorr_pubkey(k)` | `ct::schnorr_pubkey(k)` |
 | Keypair create | `schnorr_keypair_create(k)` | `ct::schnorr_keypair_create(k)` |
+| Knowledge prove | N/A | `zk::knowledge_prove()` (uses CT internally) |
+| DLEQ prove | N/A | `zk::dleq_prove()` (uses CT internally) |
+| Range prove | N/A | `zk::range_prove()` (uses CT internally) |
+| Knowledge verify | `zk::knowledge_verify()` | N/A (public data) |
+| DLEQ verify | `zk::dleq_verify()` | N/A (public data) |
+| Range verify | `zk::range_verify()` | N/A (public data) |
 | Scalar cond. move | N/A (use if/else) | `ct::scalar_cmov(r, a, mask)` |
 | Scalar cond. swap | N/A (use std::swap) | `ct::scalar_cswap(a, b, mask)` |
 | Scalar cond. negate | `s.negate()` with if | `ct::scalar_cneg(a, mask)` |
 
-### GPU (CUDA) API
+### GPU (CUDA/OpenCL/Metal) API
 
-All GPU CT functions are in the `secp256k1::cuda::ct::` namespace.
-Headers: `cuda/include/ct/{ct_ops.cuh, ct_field.cuh, ct_scalar.cuh, ct_point.cuh, ct_sign.cuh}`
+All GPU CT functions are in the `secp256k1::cuda::ct::` namespace (CUDA),
+with equivalent kernels in OpenCL (`secp256k1_ct_sign.cl`, `secp256k1_ct_zk.cl`)
+and Metal (`secp256k1_ct_sign.metal`, `secp256k1_ct_zk.metal`).
+All three backends implement identical CT algorithms.
 
 | Operation | FAST (`secp256k1::cuda::`) | CT (`secp256k1::cuda::ct::`) |
 |-----------|---------------------------|------------------------------|
@@ -222,6 +230,10 @@ Headers: `cuda/include/ct/{ct_ops.cuh, ct_field.cuh, ct_scalar.cuh, ct_point.cuh
 | ECDSA sign | `ecdsa_sign(msg, key, &sig)` | `ct_ecdsa_sign(msg, key, &sig)` |
 | Schnorr sign | `schnorr_sign(key, msg, aux, &sig)` | `ct_schnorr_sign(key, msg, aux, &sig)` |
 | Keypair create | N/A | `ct_schnorr_keypair_create(key, &kp)` |
+| Knowledge prove | N/A | `ct_knowledge_prove_device(sec, pk, base, msg, aux, &pf)` |
+| DLEQ prove | N/A | `ct_dleq_prove_device(sec, G, H, P, Q, aux, &pf)` |
+| Knowledge verify | `knowledge_verify_device(...)` | N/A (public data) |
+| DLEQ verify | `dleq_verify_device(...)` | N/A (public data) |
 | Field cmov | N/A | `field_cmov(&r, &a, mask)` |
 | Scalar cmov | N/A | `scalar_cmov(&r, &a, mask)` |
 | Scalar inverse | `scalar_inverse(a, &r)` | `scalar_inverse(a, &r)` (CT Fermat) |
@@ -261,11 +273,13 @@ See [docs/CT_EMPIRICAL_REPORT.md](CT_EMPIRICAL_REPORT.md) for full methodology.
 
 > The CT guarantee applies to:
 > - **CPU**: `secp256k1::ct::` under `g++-13` / `clang-17+` at `-O2`, on **x86-64** and **ARM64**
-> - **GPU**: `secp256k1::cuda::ct::` under CUDA 12.0+ / nvcc, on **SM 7.5+** (Turing through Blackwell)
+> - **CUDA GPU**: `secp256k1::cuda::ct::` under CUDA 12.0+ / nvcc, on **SM 7.5+** (Turing through Blackwell)
+> - **OpenCL GPU**: CT kernels in `secp256k1_ct_sign.cl` / `secp256k1_ct_zk.cl`
+> - **Metal GPU**: CT shaders in `secp256k1_ct_sign.metal` / `secp256k1_ct_zk.metal`
 
-The GPU CT layer provides **algorithmic** constant-time guarantees (no secret-dependent
+All GPU CT layers provide **algorithmic** constant-time guarantees (no secret-dependent
 branches or memory access patterns). Hardware-level side-channel resistance on GPUs
-is limited by the SIMT execution model.
+is limited by the SIMT/SIMD execution model.
 
 **Explicitly NOT covered:**
 - Protocol internals of FROST and MuSig2 -- partial coverage only
@@ -275,12 +289,41 @@ is limited by the SIMT execution model.
 
 ---
 
-## 8. Release CT Scope Tracking
+## 8. ZK Proof Security Properties
+
+### Schnorr Knowledge Proof
+
+- **Soundness**: Prover cannot forge proof without knowing discrete log (Fiat-Shamir in ROM)
+- **Zero-Knowledge**: Proof reveals no information about secret beyond the public key
+- **Binding**: Challenge derived via tagged SHA-256 ("ZK/knowledge"), bound to R, P, and msg
+- **CT**: Proving uses `ct::generator_mul` for nonce commitment; nonce erased after use
+
+### DLEQ Proof (Discrete Log Equality)
+
+- **Soundness**: Both discrete logs must be identical or attack succeeds with negligible probability
+- **Binding**: Challenge bound to full tuple (G, H, P, Q, R1, R2) via tagged SHA-256
+- **Zero-Knowledge**: Proof reveals no information about the shared secret
+- **CT**: Proving uses CT scalar multiplications for both bases
+
+### Bulletproof Range Proof
+
+- **Completeness**: Valid proofs always verify
+- **Soundness**: Prover cannot create proof for value outside [0, 2^64) except with negligible probability
+- **Zero-Knowledge**: Proof leaks no information about value or blinding factor
+- **Logarithmic Size**: O(log n) group elements for n-bit range (12 group elements for 64-bit)
+- **No Trusted Setup**: Nothing-up-my-sleeve generators derived from tagged hashes
+- **CT**: Prover uses CT layer for all secret-dependent operations (blinding, nonce generation)
+- **Verification**: Uses FAST layer with MSM optimization (public data only)
+
+---
+
+## 9. Release CT Scope Tracking
 
 Every release must answer: **"Did the CT scope change?"**
 
 | Release | CT Scope Changed? | Details |
 |---------|-------------------|---------|
+| v3.22.0 | **Yes** | OpenCL CT layer (secp256k1_ct_sign.cl, secp256k1_ct_zk.cl); Metal CT layer (secp256k1_ct_sign.metal, secp256k1_ct_zk.metal); full C ABI with 80+ functions; BIP-39, Ethereum, Pedersen, ZK, Adaptor, MuSig2, FROST |
 | v3.21.0 | **Yes** | GPU CT layer (5 headers); GPU CT audit modules in gpu_audit_runner; GPU CT benchmarks in gpu_bench_unified |
 | v3.16.0 | **Yes** | CT nonce erasure (volatile fn-ptr trick); MuSig2/FROST dudect added; ct-arm64 ARM64 native CI |
 | v3.15.0 | **Yes** | Branchless `scalar_window` on RISC-V; `value_barrier` after mask; RISC-V `is_zero_mask` asm |
@@ -327,4 +370,4 @@ Every release must answer: **"Did the CT scope change?"**
 
 ---
 
-*UltrafastSecp256k1 v3.21.0 -- Security Claims*
+*UltrafastSecp256k1 v3.22.0 -- Security Claims*

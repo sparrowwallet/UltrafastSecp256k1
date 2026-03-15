@@ -30,7 +30,7 @@ cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
 cmake --build build -j
 
 # Benchmark command
-./build/cpu/bench_comprehensive --filter "ecdsa_sign"
+./build/cpu/bench_unified --quick
 ```
 
 **Compiler flags**

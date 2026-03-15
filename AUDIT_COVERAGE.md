@@ -880,8 +880,8 @@ C API builds as shared library on Linux/macOS/Windows, then each binding is comp
 
 | Platform | Config | Tool |
 |----------|--------|------|
-| Linux (ubuntu-latest) | Release, ASM=ON | bench_comprehensive -> JSON -> github-action-benchmark |
-| Windows (windows-latest) | Release, MSVC | bench_comprehensive -> summary |
+| Linux (ubuntu-latest) | Release, ASM=ON | bench_unified -> JSON -> github-action-benchmark |
+| Windows (windows-latest) | Release, MSVC | bench_unified -> summary |
 
 - **Dashboard**: GitHub Pages (gh-pages branch)
 - **Alert threshold**: 150% (warns if >50% slower than baseline)

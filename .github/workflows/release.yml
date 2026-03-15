@@ -1712,7 +1712,12 @@ jobs:
           sed -i "s/VERSION_PLACEHOLDER/${VERSION}/g; s/TIMESTAMP_PLACEHOLDER/${TIMESTAMP}/g" sbom.cdx.json
 
       - name: Delete pre-existing release (if any)
-        run: gh release delete "${{ github.ref_name }}" --yes 2>/dev/null || true
+        run: |
+          gh release delete "${{ github.ref_name }}" --yes 2>/dev/null || true
+          # Brief pause to let GitHub API propagate the deletion,
+          # avoiding 404 on asset update when action-gh-release
+          # encounters stale asset metadata from a deleted release.
+          sleep 5
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
@@ -1725,11 +1730,14 @@ jobs:
           draft: false
           prerelease: ${{ contains(github.ref_name, '-rc') || contains(github.ref_name, '-beta') || contains(github.ref_name, '-alpha') }}
           fail_on_unmatched_files: false
+          # NOTE: dist/**/* already includes .sigstore files created by
+          # the cosign step -- do NOT add dist/**/*.sigstore separately
+          # or action-gh-release will hit 404 trying to PATCH duplicate
+          # assets.
           files: |
             dist/**/*
             SHA256SUMS
             SHA256SUMS.sigstore
-            dist/**/*.sigstore
             sbom.cdx.json
             selftest_report.json
             traceability_report.json

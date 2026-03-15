@@ -1,0 +1,74 @@
+# preflight.yml -- Pre-commit quality gate
+# Runs preflight.py checks on every push/PR to main/dev.
+# Hard-fail: --security, --abi, --freshness, validate_assurance.py
+# Advisory: --coverage (may flag gaps that are acknowledged in FEATURE_ASSURANCE_LEDGER),
+#           --changed (informational only, no blocking threshold)
+
+name: Preflight
+
+on:
+  push:
+    branches: [main, dev]
+  pull_request:
+    branches: [main, dev]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: preflight-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  preflight:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Harden the runner
+        uses: step-security/harden-runner@58077d3c7e43986b6b15fba718e8ea69e387dfcc # v2.15.1
+        with:
+          egress-policy: audit
+
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          fetch-depth: 0  # full history for git diff
+
+      - name: Set up Python
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        with:
+          python-version: '3.12'
+
+      - name: Build project graph
+        run: python3 scripts/build_project_graph.py --rebuild
+
+      - name: Preflight -- Security invariants (hard-fail)
+        run: python3 scripts/preflight.py --security
+
+      - name: Preflight -- ABI surface (hard-fail)
+        run: python3 scripts/preflight.py --abi
+
+      - name: Preflight -- Coverage gaps (advisory)
+        run: python3 scripts/preflight.py --coverage || true
+
+      - name: Preflight -- Graph freshness (hard-fail)
+        run: python3 scripts/preflight.py --freshness
+
+      - name: Preflight -- Changed files impact (advisory)
+        run: python3 scripts/preflight.py --changed || true
+
+      - name: Assurance docs validation (hard-fail)
+        run: python3 scripts/validate_assurance.py
+
+      - name: Export assurance report (JSON)
+        run: python3 scripts/export_assurance.py -o assurance_report.json
+
+      - name: Coverage gaps summary
+        run: python3 scripts/query_graph.py gaps || true
+
+      - name: Upload assurance artifacts
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: preflight-reports
+          path: |
+            assurance_report.json
+          retention-days: 30

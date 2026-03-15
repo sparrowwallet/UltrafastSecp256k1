@@ -1,21 +1,23 @@
-# UltrafastSecp256k1 -- High-Performance Open-Source secp256k1 Library
+# UltrafastSecp256k1 -- High-Performance secp256k1 Engine for CPU, GPU, Mobile, Embedded, and Web
 
-**Zero-dependency, multi-backend secp256k1 elliptic curve cryptography library** -- GPU-accelerated ECDSA & Schnorr signatures, constant-time side-channel protection, 12+ platform targets inc. CUDA, Metal, OpenCL, ROCm, WebAssembly, RISC-V, ESP32, and STM32.
+**Zero-dependency, multi-backend secp256k1 cryptography engine** -- built independently from scratch for Bitcoin, Ethereum, Silent Payments, threshold signatures, embedded systems, and GPU-scale workloads. UltrafastSecp256k1 delivers GPU-accelerated ECDSA and Schnorr, constant-time CPU signing paths, and 12+ platform targets including CUDA, Metal, OpenCL, ROCm, WebAssembly, RISC-V, ESP32, and STM32.
 
-> **4.88 M ECDSA signs/s** * **2.44 M ECDSA verifies/s** * **3.66 M Schnorr signs/s** * **2.82 M Schnorr verifies/s** -- single GPU (RTX 5060 Ti)
+> **4.88 M ECDSA signs/s** * **2.44 M ECDSA verifies/s** * **3.66 M Schnorr signs/s** * **2.82 M Schnorr verifies/s** -- single GPU (RTX 5060 Ti, hybrid GPU execution model)
 
 ### Why UltrafastSecp256k1?
 
-- **Fastest open-source GPU signatures** -- no other library provides secp256k1 ECDSA + Schnorr sign/verify on CUDA, OpenCL, and Metal ([reproducible benchmark suite and raw logs](docs/BENCHMARKS.md))
-- **Fast CPU signing (k\*G-dominant workloads)** -- generator multiply 2-4x faster than libsecp256k1; scalar multiply (k\*P) is comparable on x86-64 ([see bench_unified ratio table](docs/BENCHMARKS.md))
-- **BIP-352 Silent Payments scanning** -- full pipeline 1.20x faster than libsecp256k1 on isolated single-threaded benchmark ([standalone benchmark by @craigraw](https://github.com/craigraw/bench_bip352))
+- **Fastest open-source GPU signatures** -- no other library provides secp256k1 ECDSA + Schnorr sign/verify on CUDA; OpenCL covers core ECC ops, Metal provides discovery/lifecycle ([reproducible benchmark suite and raw logs](docs/BENCHMARKS.md))
+- **High-performance CPU secp256k1 engine** -- optimized generator multiply, scalar multiply, hashing, and serialization pipelines across x86-64, ARM64, RISC-V, and embedded targets ([see bench_unified ratio table](docs/BENCHMARKS.md))
+- **Independent benchmark wins on real workloads** -- BIP-352 Silent Payments scanning and other end-to-end flows show strong results in standalone external and in-repo benchmarks ([standalone benchmark by @craigraw](https://github.com/craigraw/bench_bip352))
+- **Built for modern secp256k1 workloads** -- signing, verification, wallet derivation, threshold protocols, adaptor signatures, ZK primitives, address generation, and large-scale public-key pipelines in one engine
+- **Field-tested GPU pipeline** -- the CUDA engine has been stress-tested in live high-throughput workflows over long-running sessions and very large point volumes, not only in short synthetic benchmarks
 - **Zero dependencies** -- pure C++20, no Boost, no OpenSSL, compiles anywhere with a conforming compiler
 - **Dual-layer security** -- variable-time FAST path for throughput, constant-time CT path for secret-key operations
 - **12+ platforms** -- x86-64, ARM64, RISC-V, WASM, iOS, Android, ESP32, STM32, CUDA, Metal, OpenCL, ROCm
 
 > **Benchmark reproducibility:** All numbers come from pinned compiler/driver/toolkit versions with exact commands and raw logs. See [`docs/BENCHMARKS.md`](docs/BENCHMARKS.md) (methodology) and the [live dashboard](https://shrec.github.io/UltrafastSecp256k1/dev/bench/).
 
-**Quick links:** [Discord](https://discord.gg/sUmW7cc5) * [Benchmarks](docs/BENCHMARKS.md) * [Build Guide](docs/BUILDING.md) * [API Reference](docs/API_REFERENCE.md) * [Security Policy](SECURITY.md) * [Threat Model](THREAT_MODEL.md) * [Porting Guide](PORTING.md)
+**Quick links:** [Discord](https://discord.gg/sUmW7cc5) * [Benchmarks](docs/BENCHMARKS.md) * [Build Guide](docs/BUILDING.md) * [API Reference](docs/API_REFERENCE.md) * [Security Policy](SECURITY.md) * [Threat Model](THREAT_MODEL.md) * [Porting Guide](PORTING.md) * [**Sponsor**](https://github.com/sponsors/shrec)
 
 ---
 
@@ -73,20 +75,149 @@
 
 ---
 
+## Highlights
+
+- **GPU-accelerated secp256k1** -- ECDSA + Schnorr sign/verify on CUDA; core ECC on OpenCL; Metal experimental
+- **Zero-Knowledge cryptographic layer** -- Pedersen commitments, DLEQ proofs, Bulletproof range proofs
+- **Multi-language bindings** -- Python, Node.js, Rust, Go, C#, Java, Swift, PHP, Ruby, Dart
+- **Embedded device support** -- ESP32-S3, ESP32-P4, ESP32-C6, STM32 Cortex-M
+- **Zero-dependency C++20 core** -- no Boost, no OpenSSL, compiles anywhere
+- **Massively parallel workloads** -- batch signatures, key scanning, address generation at GPU scale
+
+## Performance
+
+**RTX 5060 Ti (CUDA 12, kernel throughput)**
+
+| Metric | Value |
+|--------|-------|
+| ECC operations (field/point) | ~2.3 B ops/sec |
+| ECDSA sign | 4.88 M sigs/sec |
+| ECDSA verify | 2.44 M verifies/sec |
+| Schnorr sign (BIP-340) | 3.66 M sigs/sec |
+| Schnorr verify (BIP-340) | 2.82 M verifies/sec |
+
+## Architecture
+
+```
++-------------------------------------------------------+
+|              Language Bindings (FFI)                   |
+|  Python | Node | Rust | Go | C# | Java | Swift | PHP |
++-------------------------------------------------------+
+                         |
+                  Bindings Layer
+                 (ctypes / koffi / cgo
+                  JNA / P/Invoke / FFI)
+                         |
++-------------------------------------------------------+
+|          UltrafastSecp256k1 Core (C++20)               |
+|                                                       |
+|  ECDSA | Schnorr | ECDH | MuSig2 | FROST | Pedersen  |
+|  Taproot | BIP-32 HD | Adaptor Sigs | ZK Proofs       |
+|  [FAST layer]              [CT layer]                 |
++-------------------------------------------------------+
+                         |
++--------+---------+---------+---------+----------------+
+|  CPU   |  CUDA   | OpenCL  |  Metal  |   Embedded     |
+| x86_64 | NVIDIA  | AMD/NV  |  Apple  | ESP32 / STM32  |
+| ARM64  | sm_50+  | any GPU | Silicon | RISC-V / WASM  |
+| RISC-V |         |         |         | Cortex-M       |
++--------+---------+---------+---------+----------------+
+```
+
+## Examples
+
+| Category | Description | Link |
+|----------|-------------|------|
+| **CPU** | Core ECC, ECDSA, Schnorr, BIP-32, Taproot, Pedersen | [examples/](examples/) |
+| **CUDA** | GPU signatures, batch operations, device management | [examples/](examples/) |
+| **OpenCL** | Cross-vendor GPU compute | [examples/](examples/) |
+| **Metal** | Apple Silicon GPU acceleration | [examples/](examples/) |
+| **Multi-language** | C, Python, Rust, Node.js, Go, Java binding examples | [examples/README.md](examples/README.md) |
+| **Embedded** | ESP32-S3, STM32 platform ports | [examples/esp32_test/](examples/esp32_test/) |
+
+## Use Cases
+
+- **Blockchain infrastructure** -- high-throughput transaction signing and validation
+- **Signature verification at scale** -- batch verify millions of signatures per second on GPU
+- **Cryptographic research** -- independent secp256k1 implementation with full source access
+- **Zero-knowledge pipelines** -- Pedersen commitments, Bulletproofs, DLEQ proofs
+- **Embedded cryptographic systems** -- hardware wallets, IoT devices, microcontrollers
+- **Key scanning & address generation** -- BIP-352 Silent Payments, vanity address mining
+
+> Star the repository if you find it useful!
+
+---
+
 ## [!] Security Notice
 
-**Research & Development Project -- Not Audited**
+**Production-Focused Engine -- Independently Unaudited**
 
-This library has **not undergone independent security audits**. It is provided for research, educational, and experimental purposes.
+UltrafastSecp256k1 is engineered for real workloads and broad deployment targets, but it has **not yet undergone an independent third-party cryptographic audit**.
 
-- [FAIL] Not recommended for production without independent cryptographic audit
 - [OK] All self-tests pass (76/76 including all backends)
 - [OK] Dual-layer constant-time architecture (FAST + CT always active)
 - [OK] Stable C ABI (`ufsecp`) with 45 exported functions
 - [OK] Fuzz-tested core arithmetic (libFuzzer + ASan)
+- [OK] GPU and CPU paths are exercised by large benchmark and validation pipelines
+- [!] Independent external audit is still pending
 
 **Report vulnerabilities** via [GitHub Security Advisories](https://github.com/shrec/UltrafastSecp256k1/security/advisories/new) or email [payysoon@gmail.com](mailto:payysoon@gmail.com).
-For production cryptographic systems, prefer audited libraries like [libsecp256k1](https://github.com/bitcoin-core/secp256k1).
+For production cryptographic systems, perform your own risk review, review the current guarantees in [SUPPORTED_GUARANTEES.md](include/ufsecp/SUPPORTED_GUARANTEES.md), and apply the assurance level appropriate to your deployment.
+
+---
+
+## Seeking Sponsors -- Audit, Bug Bounty & Development
+
+> **We are actively seeking sponsors and funding partners** to take UltrafastSecp256k1 from research-grade to production-ready.
+
+[![Sponsor](https://img.shields.io/badge/Sponsor_This_Project-GitHub_Sponsors-ea4aaa.svg?style=for-the-badge&logo=github)](https://github.com/sponsors/shrec)
+[![Donate with Bitcoin Lightning](https://img.shields.io/badge/Lightning_Sats-shrec@stacker.news-F7931A?style=for-the-badge&logo=bitcoin)](https://stacker.news/shrec)
+
+UltrafastSecp256k1 is a **high-performance, zero-dependency secp256k1 library** with GPU acceleration, constant-time side-channel protection, and 12+ platform targets. To reach production maturity, we need:
+
+### 1. Independent Cryptographic Audit
+
+The #1 priority. A professional third-party audit of the core cryptographic layers (field arithmetic, scalar operations, point operations, ECDSA, Schnorr BIP-340, constant-time layer) is essential before any production deployment. We are looking for:
+
+- **Audit firms** willing to perform a full review (NCC Group, Trail of Bits, Cure53, Least Authority, etc.)
+- **Grants** from blockchain foundations (Bitcoin, Ethereum, Zcash, etc.) to fund the audit
+- **Corporate sponsors** who use secp256k1 in their products and want a second high-quality audited implementation
+
+### 2. Bug Bounty Program
+
+We want to establish a **funded bug bounty program** to incentivize security researchers:
+
+- Critical vulnerabilities (signature forgery, key recovery, CT bypass) -- high bounty tier
+- Correctness bugs (arithmetic errors, edge cases) -- medium bounty tier
+- Memory safety / undefined behavior -- standard bounty tier
+- All GPU backends (CUDA, OpenCL, Metal, ROCm) covered
+
+Currently we accept vulnerability reports via [GitHub Security Advisories](https://github.com/shrec/UltrafastSecp256k1/security/advisories/new) but **cannot offer financial rewards without sponsor funding**.
+
+### 3. Ongoing Development
+
+Sponsorship helps sustain development of:
+
+- **Zero-knowledge proofs** -- Pedersen commitments, Bulletproofs, Schnorr sigma protocols, DLEQ proofs
+- **GPU compute** -- CUDA, OpenCL, Metal, ROCm batch signature generation/verification
+- **Platform ports** -- embedded (ESP32, STM32), mobile (iOS, Android), WASM
+- **Protocol features** -- MuSig2, FROST threshold signatures, Taproot, BIP-352 Silent Payments
+- **Multi-coin support** -- 27+ blockchain address formats and signing
+- **Formal verification** -- Fiat-Crypto integration, ct-verif, Cryptol models
+- **CI/CD infrastructure** -- cross-platform testing, performance regression gates, fuzzing
+
+### How to Sponsor
+
+| Method | Link |
+|--------|------|
+| **GitHub Sponsors** (preferred) | [github.com/sponsors/shrec](https://github.com/sponsors/shrec) |
+| **Bitcoin Lightning** | `shrec@stacker.news` (any Lightning wallet) |
+| **PayPal** | [paypal.me/IChkheidze](https://paypal.me/IChkheidze) |
+| **Corporate / Foundation** | [payysoon@gmail.com](mailto:payysoon@gmail.com) |
+| **Discord** | [Join our server](https://discord.gg/sUmW7cc5) |
+
+All sponsors will be acknowledged in the README, release notes, and project documentation.
+For corporate partnerships, audit co-funding, or grant applications -- please reach out via email.
 
 ---
 
@@ -113,6 +244,7 @@ Features are organized into **maturity tiers** (see [SUPPORTED_GUARANTEES.md](in
 | **2 -- Protocol** | FROST | Threshold signatures, t-of-n | [OK] |
 | **2 -- Protocol** | Adaptor | Schnorr + ECDSA adaptor signatures | [OK] |
 | **2 -- Protocol** | Pedersen | Commitments, homomorphic, switch commitments | [OK] |
+| **2 -- Protocol** | ZK Proofs | Schnorr sigma, DLEQ, Bulletproof range proofs (64-bit) | [OK] |
 | **3 -- Convenience** | Address | P2PKH, P2WPKH, P2TR, Base58, Bech32/m, EIP-55 | [OK] |
 | **3 -- Convenience** | Coins | 27 blockchains, auto-dispatch | [OK] |
 | -- | GPU | CUDA, Metal, OpenCL, ROCm kernels | [OK] |
@@ -133,7 +265,7 @@ The C ABI (`ufsecp_*`) returns distinct error codes: `UFSECP_ERR_BAD_SIG` (non-c
 
 ## BIP-352 Silent Payments Scanning Benchmark
 
-Standalone single-threaded benchmark comparing UltrafastSecp256k1 vs libsecp256k1 on the full BIP-352 scanning pipeline (k\*P, serialize, tagged SHA-256, k\*G, point add, serialize, prefix match). Benchmark by [@craigraw](https://github.com/craigraw) ([bench_bip352](https://github.com/craigraw/bench_bip352)). Thank you for the contribution!
+Standalone single-threaded benchmark on the full BIP-352 scanning pipeline (k\*P, serialize, tagged SHA-256, k\*G, point add, serialize, prefix match). Benchmark by [@craigraw](https://github.com/craigraw) ([bench_bip352](https://github.com/craigraw/bench_bip352)). Thank you for the contribution!
 
 **Full pipeline** (10K points, 11 passes, median, GCC 12.4, `-O3 -march=native`, `USE_ASM_X86_64=1`):
 
@@ -202,8 +334,8 @@ cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release && cmake --build build -
 | **STM32 (Cortex-M)** | CPU | CMake cross-compile | [OK] Tested |
 | **NVIDIA GPU** | CUDA 12+ | Build with `-DSECP256K1_BUILD_CUDA=ON` | [OK] Stable |
 | **AMD GPU** | ROCm/HIP | Build with `-DSECP256K1_BUILD_ROCM=ON` | [!] Beta |
-| **Apple GPU** | Metal | Build with Metal backend | [OK] Stable |
-| **Any GPU** | OpenCL | Build with `-DSECP256K1_BUILD_OPENCL=ON` | [!] Beta |
+| **Apple GPU** | Metal | Build with Metal backend | [..] Experimental (discovery only) |
+| **Any GPU** | OpenCL | Build with `-DSECP256K1_BUILD_OPENCL=ON` | [OK] Partial (4/6 ops) |
 | **RISC-V (RV64GC)** | CPU | Cross-compile | [OK] Tested |
 
 ---
@@ -285,7 +417,7 @@ UltrafastSecp256k1 is the **only open-source library** that provides full secp25
 | **Metal** | Apple M3 Pro | 0.33 M/s | -- | -- | -- | -- |
 | **ROCm (HIP)** | AMD GPUs | Portable | -- | -- | -- | -- |
 
-*CUDA 12.0, sm_86;sm_89, batch=16K signatures. Metal 2.4, 8x32-bit Comba limbs, 18 GPU cores.*
+*CUDA 12.0, sm_86;sm_89, batch=16K signatures, measured on RTX 5060 Ti. The CUDA path uses our own hybrid GPU execution model, which improved end-to-end throughput by more than 10% during optimization. Metal 2.4, 8x32-bit Comba limbs, 18 GPU cores.*
 
 ### CUDA Core ECC Operations (Kernel-Only Throughput)
 
@@ -393,6 +525,42 @@ See [THREAT_MODEL.md](THREAT_MODEL.md) for a full layer-by-layer risk assessment
 | **Formal CT verification** | Fiat-Crypto style | 🔜 Planned |
 
 **Assumptions:** CT guarantees depend on compiler not introducing secret-dependent branches during optimization. Builds use `-O2` with Clang; MSVC may require additional flags. Micro-architectural side channels (Spectre, power analysis) are outside current scope -- see [THREAT_MODEL.md](THREAT_MODEL.md).
+
+---
+
+## Zero-Knowledge Proofs (Schnorr Sigma, DLEQ, Bulletproofs)
+
+UltrafastSecp256k1 provides ZK proof primitives over the secp256k1 curve:
+
+| Proof Type | Prove | Verify | Proof Size | Use Cases |
+|------------|-------|--------|------------|-----------|
+| **Knowledge Proof** | 20.3 us | 21.8 us | 64 bytes | Prove knowledge of discrete log (x: P = x*G) |
+| **DLEQ Proof** | 40.0 us | 56.4 us | 64 bytes | Prove log_G(P) == log_H(Q) -- VRFs, adaptor sigs, atomic swaps |
+| **Bulletproof Range** | 13,467 us | 2,634 us | ~620 bytes | Prove committed value in [0, 2^64) -- Confidential Transactions |
+
+**Security model:**
+- All proving operations use the **CT layer** (constant-time, side-channel resistant)
+- All verification uses the **FAST layer** (variable-time, public data only)
+- Non-interactive via **Fiat-Shamir** (tagged SHA-256)
+- Nothing-up-my-sleeve generators for Bulletproofs (no trusted setup)
+
+**API:** `#include <secp256k1/zk.hpp>` -- namespace `secp256k1::zk`
+
+```cpp
+// Knowledge proof: prove you know x such that P = x*G
+auto proof = zk::knowledge_prove(secret, pubkey, msg, aux_rand);
+bool ok = zk::knowledge_verify(proof, pubkey, msg);
+
+// DLEQ: prove log_G(P) == log_H(Q)
+auto dleq = zk::dleq_prove(secret, G, H, P, Q, aux_rand);
+bool ok = zk::dleq_verify(dleq, G, H, P, Q);
+
+// Bulletproof range proof: prove committed value in [0, 2^64)
+auto rp = zk::range_prove(value, blinding, commitment, aux_rand);
+bool ok = zk::range_verify(commitment, rp);
+```
+
+*Benchmarks: i7-14400F, 11 passes, pinned core, median. See [docs/BENCHMARKS.md](docs/BENCHMARKS.md).*
 
 ---
 
@@ -781,6 +949,75 @@ All EVM chains (ETH, BNB, MATIC, AVAX, FTM, ARB, OP) share the same address form
 
 ## secp256k1 Architecture
 
+### Library Stack
+
+```
++----------------------------------------------------------+
+|           Language Bindings (FFI / C ABI)                 |
+|  Python | Node.js | Rust | Go | C# | Java | Swift | PHP |
++----------------------------------------------------------+
+                          |
+                   Bindings Layer
+                  (ctypes / koffi / cgo
+                   JNA / P/Invoke / FFI)
+                          |
++----------------------------------------------------------+
+|            UltrafastSecp256k1 Core (C++20)                |
+|                                                          |
+|  Field Arithmetic | Scalar Ops | Point Ops | GLV/Endomo  |
+|  ECDSA | Schnorr BIP-340 | ECDH | MuSig2 | FROST       |
+|  Pedersen | Taproot | BIP-32 HD | Adaptor Sigs | ZK      |
+|                                                          |
+|  [FAST layer]              [CT layer]                    |
+|  Variable-time             Constant-time                 |
+|  Max throughput            Side-channel safe              |
++----------------------------------------------------------+
+                          |
++----------+----------+----------+----------+--------------+
+|   CPU    |   CUDA   |  OpenCL  |  Metal   |  Embedded    |
+|          |          |          |          |              |
+| x86_64   | NVIDIA   | AMD/NVIDIA| Apple   | ESP32-S3     |
+| ARM64    | sm_50+   | any GPU  | Silicon | ESP32-C6     |
+| RISC-V   |          |          |          | STM32        |
+| WASM     |          |          |          | Cortex-M     |
++----------+----------+----------+----------+--------------+
+```
+
+### Hardware Compatibility
+
+| Platform | Architecture | Backend | Status |
+|----------|-------------|---------|--------|
+| **Desktop CPU** | x86_64 (Intel / AMD) | CPU | [OK] Stable |
+| **Desktop CPU** | ARM64 (Apple Silicon, Ampere) | CPU | [OK] Stable |
+| **Desktop CPU** | RISC-V RV64GC | CPU | [OK] Stable |
+| **Raspberry Pi** | ARM64 (BCM2710, Zero 2 W) | CPU | [..] Testing |
+| **NVIDIA GPU** | RTX / GTX / Tesla (sm_50+) | CUDA 12+ | [OK] Stable (6/6 C ABI ops) |
+| **AMD GPU** | RDNA / CDNA | OpenCL | [OK] Partial (4/6 C ABI ops) |
+| **AMD GPU** | RDNA / CDNA | ROCm/HIP | [!] Beta |
+| **Apple GPU** | Apple Silicon (M1/M2/M3/M4) | Metal | [..] Experimental (discovery/lifecycle only) |
+| **Any GPU** | OpenCL 1.2+ compatible | OpenCL | [OK] Partial (4/6 C ABI ops) |
+| **ESP32-S3** | Xtensa LX7 @ 240 MHz | CPU | [OK] Tested |
+| **ESP32-P4** | RISC-V @ 400 MHz | CPU | [OK] Supported |
+| **ESP32-C6** | RISC-V (single-core) | CPU | [OK] Supported |
+| **STM32** | ARM Cortex-M3/M4 | CPU | [..] Experimental |
+| **WebAssembly** | WASM (Emscripten) | CPU | [OK] Stable |
+| **Android** | ARM64 (NDK r27c) | CPU | [OK] Stable |
+| **iOS** | ARM64 (Xcode) | CPU | [OK] Stable |
+
+> **GPU C ABI ops**: generator_mul_batch, ecdsa_verify_batch, schnorr_verify_batch, ecdh_batch, hash160_batch, msm. See [GPU Validation Matrix](docs/GPU_VALIDATION_MATRIX.md) for per-backend details.
+
+### Embedded Targets
+
+| Target | MCU | Clock | Scalar x G | Flash | RAM |
+|--------|-----|-------|-----------|-------|-----|
+| ESP32-S3 | Xtensa LX7 (dual) | 240 MHz | 5.2 ms | ~120 KB | ~8 KB |
+| ESP32-PICO-D4 | Xtensa LX6 (dual) | 240 MHz | 6.2 ms | ~120 KB | ~8 KB |
+| ESP32-P4 | RISC-V | 400 MHz | ~3 ms | ~120 KB | ~8 KB |
+| ESP32-C6 | RISC-V (single) | 160 MHz | ~12 ms | ~120 KB | ~8 KB |
+| STM32F103 | Cortex-M3 | 72 MHz | 38 ms | ~100 KB | ~6 KB |
+
+### Source Directory
+
 ```
 UltrafastSecp256k1/
 +-- cpu/                 # CPU-optimized implementation
@@ -794,7 +1031,14 @@ UltrafastSecp256k1/
 +-- wasm/                # WebAssembly (Emscripten)
 +-- android/             # Android NDK (ARM64)
 +-- include/ufsecp/      # Stable C ABI
++-- bindings/            # Language bindings (Rust, Python, Node.js, Go, C#, Java, ...)
 +-- examples/
+|   +-- c_example/       # C API usage
+|   +-- rust_example/    # Rust FFI example
+|   +-- python_example/  # Python ctypes example
+|   +-- nodejs_example/  # Node.js koffi example
+|   +-- go_example/      # Go cgo example
+|   +-- java_example/    # Java JNA example
 |   +-- esp32_test/      # ESP32-S3 Xtensa LX7 port
 |   +-- stm32_test/      # STM32F103 ARM Cortex-M3 port
 +-- docs/                # Documentation
@@ -989,6 +1233,10 @@ cosign verify-blob SHA256SUMS \
 | [API Reference](docs/API_REFERENCE.md) | Full C++ and C ABI reference |
 | [Build Guide](docs/BUILDING.md) | Detailed build instructions for all platforms |
 | [Benchmarks](docs/BENCHMARKS.md) | Complete benchmark results and methodology |
+| [GPU API](include/ufsecp/ufsecp_gpu.h) | GPU C ABI header (16 functions, 3 backends) |
+| [GPU Validation Matrix](docs/GPU_VALIDATION_MATRIX.md) | Per-backend op coverage and validation status |
+| [Feature Maturity](docs/FEATURE_MATURITY.md) | Per-feature GPU/CT/fuzz/tier status table |
+| [Supported Guarantees](include/ufsecp/SUPPORTED_GUARANTEES.md) | ABI stability tiers and commitment levels |
 | [Audit Coverage](AUDIT_COVERAGE.md) | Full audit report with 46+ modules and platform verdicts |
 | [Audit Guide](docs/AUDIT_GUIDE.md) | How to run and interpret audit suite |
 | [Test Matrix](docs/TEST_MATRIX.md) | Comprehensive test coverage map for auditors |
@@ -998,6 +1246,7 @@ cosign verify-blob SHA256SUMS \
 | [Porting Guide](PORTING.md) | Add new platforms, architectures, GPU backends |
 | [RISC-V Optimizations](RISCV_OPTIMIZATIONS.md) | RISC-V assembly details |
 | [ESP32 Setup](docs/ESP32_SETUP.md) | ESP32 embedded development guide |
+| [Examples](examples/README.md) | Multi-language binding examples (C, Python, Rust, Node.js, Go, Java) |
 | [Contributing](CONTRIBUTING.md) | Development guidelines |
 | [Changelog](CHANGELOG.md) | Version history |
 
@@ -1045,13 +1294,13 @@ See [LICENSE](LICENSE) for full details.
 
 ## Acknowledgements
 
-UltrafastSecp256k1 is an independent implementation -- written from scratch with our own architecture, GPU pipeline, embedded ports, and optimization techniques. At the same time, no project exists in a vacuum. The published research, specifications, and open discussions from the wider cryptographic community helped us refine our own ideas and validate our results.
+UltrafastSecp256k1 is an independent implementation -- written from scratch with our own architecture, hybrid GPU execution model, embedded ports, and optimization techniques. The library's core structure and most performance gains came from direct experimentation, profiling, and iteration. At the same time, no project exists in a vacuum. Studying public research and implementation notes from the wider cryptographic community later helped us validate decisions, avoid weaker paths, and uncover additional optimization opportunities.
 
 We want to acknowledge the teams whose public work informed parts of our journey:
 
-- **[bitcoin-core/secp256k1](https://github.com/bitcoin-core/secp256k1)** -- The reference C library whose published research on constant-time field arithmetic and endomorphism-based scalar multiplication (GLV, Strauss, Pippenger) helped us benchmark and verify our own independent implementations on GPU and embedded targets.
+- **[bitcoin-core/secp256k1](https://github.com/bitcoin-core/secp256k1)** -- A major reference point for the ecosystem. UltrafastSecp256k1 was built independently from scratch, but studying their published research later helped us benchmark our own implementations, validate design choices, and extract additional optimization ideas for CPU, GPU, and embedded targets.
 - **[Bitcoin Core](https://github.com/bitcoin/bitcoin)** contributors -- For open specifications (BIP-340 Schnorr, BIP-341 Taproot, RFC 6979) and a correctness-first engineering culture that benefits everyone building in this space.
-- **Pieter Wuille, Jonas Nick, Tim Ruffing** and the libsecp256k1 maintainers -- For publicly sharing their research on side-channel resistance, exhaustive testing, and field representation trade-offs. Their published findings helped us make better decisions when designing our own architecture.
+- **Pieter Wuille, Jonas Nick, Tim Ruffing** and the libsecp256k1 maintainers -- For publicly sharing research and implementation insights on side-channel resistance, exhaustive testing, field representation trade-offs, and practical optimization techniques. Their published work was valuable to study in the later optimization phase and helped us push our independently built engine further.
 - **[@craigraw](https://github.com/craigraw)** ([Sparrow Wallet](https://sparrowwallet.com)) -- For creating the [bench_bip352](https://github.com/craigraw/bench_bip352) standalone BIP-352 Silent Payments scanning benchmark, which provided an independent, reproducible pipeline comparison between secp256k1 implementations.
 
 We share our optimizations, GPU kernels, embedded ports, and cross-platform techniques freely -- because open-source cryptography grows stronger when knowledge flows in every direction.
@@ -1062,16 +1311,32 @@ Extra gratitude to [@0xbitcoiner](https://stacker.news/0xbitcoiner) for the init
 
 ---
 
-## ⚡ Support the Project
+## Support the Project
 
 If you find **UltrafastSecp256k1** useful, consider supporting its development!
 
-[![Donate with Bitcoin Lightning](https://img.shields.io/badge/Donate%20with-Lightning%20%E2%9A%A1-yellow?style=for-the-badge&logo=bitcoin)](https://stacker.news/shrec)
+> **We are actively seeking sponsors for an independent cryptographic audit, a funded bug bounty program, and ongoing development.**
+> See the [Seeking Sponsors](#seeking-sponsors----audit-bug-bounty--development) section above for details.
 
-**Lightning Address:** `shrec@stacker.news` -- send sats via any Lightning wallet or [stacker.news/shrec](https://stacker.news/shrec)
+[![Sponsor](https://img.shields.io/badge/Sponsor_This_Project-GitHub_Sponsors-ea4aaa.svg?style=for-the-badge&logo=github)](https://github.com/sponsors/shrec)
+[![Donate with Bitcoin Lightning](https://img.shields.io/badge/Lightning_Sats-shrec@stacker.news-F7931A?style=for-the-badge&logo=bitcoin)](https://stacker.news/shrec)
+[![PayPal](https://img.shields.io/badge/PayPal-Donate-blue.svg?style=for-the-badge&logo=paypal)](https://paypal.me/IChkheidze)
 
-[![Sponsor](https://img.shields.io/badge/Sponsor-GitHub%20Sponsors-ea4aaa.svg?logo=github)](https://github.com/sponsors/shrec)
-[![PayPal](https://img.shields.io/badge/PayPal-Donate-blue.svg?logo=paypal)](https://paypal.me/IChkheidze)
+| Method | Link |
+|--------|------|
+| **GitHub Sponsors** (preferred) | [github.com/sponsors/shrec](https://github.com/sponsors/shrec) |
+| **Bitcoin Lightning** | `shrec@stacker.news` via any Lightning wallet |
+| **PayPal** | [paypal.me/IChkheidze](https://paypal.me/IChkheidze) |
+| **Corporate / Foundation grants** | [payysoon@gmail.com](mailto:payysoon@gmail.com) |
+
+### What Your Sponsorship Funds
+
+- **Audit** -- Independent third-party cryptographic review by a professional security firm
+- **Bug Bounty** -- Financial rewards for security researchers who find vulnerabilities
+- **Development** -- GPU acceleration, ZK proofs, formal verification, embedded platform support
+- **Infrastructure** -- CI/CD, cross-platform testing, fuzzing, performance regression gates
+
+All sponsors are acknowledged in the README and release notes.
 
 ---
 

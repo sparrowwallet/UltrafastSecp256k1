@@ -136,7 +136,7 @@ inline constexpr int LARGE_SCALAR_PAIR_COUNT =
 
 inline std::array<uint8_t, 32> hex_to_bytes_be(const char* hex) {
     std::array<uint8_t, 32> bytes{};
-    for (int i = 0; i < 32; ++i) {
+    for (size_t i = 0; i < 32; ++i) {
         auto nib = [](char c) -> uint8_t {
             if (c >= '0' && c <= '9') return static_cast<uint8_t>(c - '0');
             if (c >= 'a' && c <= 'f') return static_cast<uint8_t>(c - 'a' + 10);
@@ -150,9 +150,9 @@ inline std::array<uint8_t, 32> hex_to_bytes_be(const char* hex) {
 
 // Big-endian bytes to 4x uint64_t little-endian limbs
 inline void bytes_be_to_limbs(const std::array<uint8_t, 32>& bytes, uint64_t limbs[4]) {
-    for (int i = 0; i < 4; ++i) {
+    for (size_t i = 0; i < 4; ++i) {
         uint64_t limb = 0;
-        for (int j = 0; j < 8; ++j) {
+        for (size_t j = 0; j < 8; ++j) {
             limb |= static_cast<uint64_t>(bytes[31 - (i * 8 + j)]) << (j * 8);
         }
         limbs[i] = limb;

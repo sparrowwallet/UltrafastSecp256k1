@@ -4,6 +4,31 @@ C# P/Invoke bindings for [UltrafastSecp256k1](https://github.com/shrec/Ultrafast
 
 Bundles native runtimes for Windows x64, Linux x64, Linux ARM64, and macOS ARM64. The native library is auto-copied to your build output -- no manual setup required.
 
+## Features
+
+- **ECDSA** -- sign, verify, recover, DER serialization (RFC 6979)
+- **Schnorr** -- BIP-340 sign/verify
+- **ECDH** -- shared secret derivation
+- **BIP-32** -- HD key derivation
+- **Taproot** -- BIP-341 output key tweaking
+- **Addresses** -- P2PKH, P2WPKH, P2TR
+- **WIF** -- encode/decode
+- **Hashing** -- SHA-256, HASH160, tagged hash
+- **Key tweaking** -- negate, add, multiply
+- **Ethereum** -- Keccak-256, EIP-55 addresses, EIP-155 sign, ecrecover
+- **BIP-39** -- mnemonic generation, validation, seed derivation
+- **Multi-coin wallet** -- 7-coin address dispatch (BTC/LTC/DOGE/DASH/ETH/BCH/TRX)
+- **Batch verification** -- ECDSA + Schnorr batch verify with invalid identification
+- **MuSig2** -- BIP-327 multi-signatures (key agg, nonce gen, partial sign, aggregate)
+- **FROST** -- threshold signatures (keygen, sign, aggregate, verify)
+- **Adaptor signatures** -- Schnorr + ECDSA adaptor pre-sign, adapt, extract
+- **Pedersen commitments** -- commit, verify, sum balance, switch commitments
+- **ZK proofs** -- knowledge proof, DLEQ proof, Bulletproof range proof
+- **Multi-scalar multiplication** -- Shamir's trick, MSM
+- **Pubkey arithmetic** -- add, negate, combine N keys
+- **SHA-512** -- full SHA-512 hash
+- **Message signing** -- BIP-137 Bitcoin message sign/verify
+
 ## Install
 
 ```bash

@@ -605,20 +605,16 @@ __constant__ static const uint64_t ORDER_MINUS_2[4] = {
     0xFFFFFFFFFFFFFFFFULL
 };
 
-// Scalar negation: r = -a mod n (branchless)
+// Scalar negation: r = -a mod n (branchless, aliasing-safe: a == r OK)
 __device__ inline void scalar_negate(const Scalar* a, Scalar* r) {
-    uint64_t borrow = 0;
-    r->limbs[0] = sub_cc(ORDER[0], a->limbs[0], borrow);
-    r->limbs[1] = sub_cc(ORDER[1], a->limbs[1], borrow);
-    r->limbs[2] = sub_cc(ORDER[2], a->limbs[2], borrow);
-    r->limbs[3] = sub_cc(ORDER[3], a->limbs[3], borrow);
-    // If a == 0, result must be 0 (branchless mask)
+    // Read zero-mask BEFORE writing to r (a may alias r)
     uint64_t nz = a->limbs[0] | a->limbs[1] | a->limbs[2] | a->limbs[3];
     uint64_t mask = -(uint64_t)(nz != 0);
-    r->limbs[0] &= mask;
-    r->limbs[1] &= mask;
-    r->limbs[2] &= mask;
-    r->limbs[3] &= mask;
+    uint64_t borrow = 0;
+    r->limbs[0] = sub_cc(ORDER[0], a->limbs[0], borrow) & mask;
+    r->limbs[1] = sub_cc(ORDER[1], a->limbs[1], borrow) & mask;
+    r->limbs[2] = sub_cc(ORDER[2], a->limbs[2], borrow) & mask;
+    r->limbs[3] = sub_cc(ORDER[3], a->limbs[3], borrow) & mask;
 }
 
 // Scalar parity check
@@ -721,28 +717,26 @@ __device__ inline void scalar_sqr_mod_n(const Scalar* a, Scalar* r) {
 
 // Scalar inverse: r = a^(n-2) mod n (Fermat's little theorem)
 // Square-and-multiply, MSB to LSB
+// Scalar inverse via Fermat's little theorem: a^(n-2) mod n
+// In-place aliasing safe (a == r OK via base copy)
 __device__ inline void scalar_inverse(const Scalar* a, Scalar* r) {
     if (scalar_is_zero(a)) {
         r->limbs[0] = r->limbs[1] = r->limbs[2] = r->limbs[3] = 0;
         return;
     }
 
+    Scalar base = *a;
     Scalar result;
     result.limbs[0] = 1; result.limbs[1] = 0;
     result.limbs[2] = 0; result.limbs[3] = 0;
-    Scalar base = *a;
 
     for (int i = 255; i >= 0; --i) {
-        Scalar tmp;
-        scalar_sqr_mod_n(&result, &tmp);
-        result = tmp;
+        scalar_sqr_mod_n(&result, &result);
 
         int limb_idx = i / 64;
         int bit_idx = i % 64;
-        if ((ORDER_MINUS_2[limb_idx] >> bit_idx) & 1) {
-            scalar_mul_mod_n(&result, &base, &tmp);
-            result = tmp;
-        }
+        if ((ORDER_MINUS_2[limb_idx] >> bit_idx) & 1)
+            scalar_mul_mod_n(&result, &base, &result);
     }
     *r = result;
 }
@@ -2913,9 +2907,11 @@ __device__ inline void scalar_mul_glv_wnaf(const JacobianPoint* p, const Scalar*
     // wNAF encode both ~128-bit half-scalars
     constexpr int WNAF_MAXLEN = 130;
     int8_t wnaf1[WNAF_MAXLEN], wnaf2[WNAF_MAXLEN];
-    int len1 = wnaf_encode(&decomp.k1, WNAF_W, wnaf1, WNAF_MAXLEN);
-    int len2 = wnaf_encode(&decomp.k2, WNAF_W, wnaf2, WNAF_MAXLEN);
-    int max_len = (len1 > len2) ? len1 : len2;
+    wnaf_encode(&decomp.k1, WNAF_W, wnaf1, WNAF_MAXLEN);
+    wnaf_encode(&decomp.k2, WNAF_W, wnaf2, WNAF_MAXLEN);
+    // Fixed loop bound — avoids warp divergence from variable max_len
+    // wnaf_encode zero-fills beyond encoding, so extra iterations are no-ops
+    constexpr int LOOP_LEN = WNAF_MAXLEN;
 
     // Shamir's 2-stream wNAF loop: single doubling chain, dual table lookups
     r->infinity = true;
@@ -2924,7 +2920,7 @@ __device__ inline void scalar_mul_glv_wnaf(const JacobianPoint* p, const Scalar*
     field_set_zero(&r->z);
 
     #pragma unroll 1
-    for (int i = max_len - 1; i >= 0; --i) {
+    for (int i = LOOP_LEN - 1; i >= 0; --i) {
         if (!r->infinity) {
             jacobian_double(r, r);
         }

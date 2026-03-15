@@ -28,6 +28,18 @@ All results from **v3.11.0** (2026-02-23). Benchmarks use IQR outlier removal an
 | **OpenCL** (RTX 5060 Ti) | 3.39 M/s | -- | -- | -- | -- |
 | **Metal** (M3 Pro) | 0.33 M/s | -- | -- | -- | -- |
 
+### Zero-Knowledge Proofs
+
+| Operation | CPU (i5-14400F) | GPU CUDA (RTX 5060 Ti) | GPU/CPU |
+|-----------|----------------:|-----------------------:|--------:|
+| Knowledge Prove | 24.3 us (41.2 k/s) | 263.7 ns (3,792 k/s) | **92x** |
+| Knowledge Verify | 23.8 us (42.0 k/s) | 744.5 ns (1,343 k/s) | **32x** |
+| DLEQ Prove | 42.4 us (23.6 k/s) | 675.4 ns (1,481 k/s) | **63x** |
+| DLEQ Verify | 60.6 us (16.5 k/s) | 1,912 ns (523 k/s) | **32x** |
+| Pedersen Commit | 29.7 us (33.7 k/s) | -- | -- |
+| Bulletproof Range Prove | 13,619 us (73 /s) | -- | -- |
+| Bulletproof Range Verify | 2,670 us (375 /s) | -- | -- |
+
 ### Embedded
 
 | Operation | ESP32-S3 (240 MHz) | ESP32 (240 MHz) | STM32F103 (72 MHz) |

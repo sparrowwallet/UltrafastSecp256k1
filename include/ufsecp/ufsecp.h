@@ -387,6 +387,650 @@ UFSECP_API ufsecp_error_t ufsecp_taproot_verify(
     const uint8_t internal_x[32],
     const uint8_t* merkle_root, size_t merkle_root_len);
 
+/* ===========================================================================
+ * Ethereum (conditional: SECP256K1_BUILD_ETHEREUM)
+ * =========================================================================== */
+
+/* ===========================================================================
+ * Public key arithmetic
+ * =========================================================================== */
+
+/** Add two compressed public keys: out = a + b. */
+UFSECP_API ufsecp_error_t ufsecp_pubkey_add(ufsecp_ctx* ctx,
+                                            const uint8_t a33[33],
+                                            const uint8_t b33[33],
+                                            uint8_t out33[33]);
+
+/** Negate a compressed public key: out = -P. */
+UFSECP_API ufsecp_error_t ufsecp_pubkey_negate(ufsecp_ctx* ctx,
+                                               const uint8_t pubkey33[33],
+                                               uint8_t out33[33]);
+
+/** Tweak-add a public key: out = P + tweak*G. */
+UFSECP_API ufsecp_error_t ufsecp_pubkey_tweak_add(ufsecp_ctx* ctx,
+                                                  const uint8_t pubkey33[33],
+                                                  const uint8_t tweak[32],
+                                                  uint8_t out33[33]);
+
+/** Tweak-mul a public key: out = tweak * P. */
+UFSECP_API ufsecp_error_t ufsecp_pubkey_tweak_mul(ufsecp_ctx* ctx,
+                                                  const uint8_t pubkey33[33],
+                                                  const uint8_t tweak[32],
+                                                  uint8_t out33[33]);
+
+/** Combine N compressed public keys: out = sum(pubkeys[i]).
+ *  pubkeys: array of 33-byte compressed keys, contiguous. */
+UFSECP_API ufsecp_error_t ufsecp_pubkey_combine(ufsecp_ctx* ctx,
+                                                const uint8_t* pubkeys,
+                                                size_t n,
+                                                uint8_t out33[33]);
+
+/* ===========================================================================
+ * BIP-39 (Mnemonic seed phrases)
+ * =========================================================================== */
+
+/** Generate BIP-39 mnemonic from entropy.
+ *  entropy_bytes: 16 (12 words), 20 (15), 24 (18), 28 (21), 32 (24 words).
+ *  entropy_in: NULL for random, or pointer to entropy bytes.
+ *  mnemonic_out: buffer for NUL-terminated mnemonic.
+ *  mnemonic_len: in = buffer size, out = strlen. */
+UFSECP_API ufsecp_error_t ufsecp_bip39_generate(ufsecp_ctx* ctx,
+                                                size_t entropy_bytes,
+                                                const uint8_t* entropy_in,
+                                                char* mnemonic_out,
+                                                size_t* mnemonic_len);
+
+/** Validate BIP-39 mnemonic (checksum + word list).
+ *  Returns UFSECP_OK if valid, UFSECP_ERR_BAD_INPUT if invalid. */
+UFSECP_API ufsecp_error_t ufsecp_bip39_validate(const ufsecp_ctx* ctx,
+                                                const char* mnemonic);
+
+/** Convert mnemonic to 64-byte seed (PBKDF2-HMAC-SHA512, 2048 rounds).
+ *  passphrase: optional BIP-39 passphrase (NULL or "" for none). */
+UFSECP_API ufsecp_error_t ufsecp_bip39_to_seed(ufsecp_ctx* ctx,
+                                               const char* mnemonic,
+                                               const char* passphrase,
+                                               uint8_t seed64_out[64]);
+
+/** Convert mnemonic back to raw entropy bytes.
+ *  entropy_out: buffer (>=32 bytes).
+ *  entropy_len: out = actual entropy length. */
+UFSECP_API ufsecp_error_t ufsecp_bip39_to_entropy(ufsecp_ctx* ctx,
+                                                  const char* mnemonic,
+                                                  uint8_t* entropy_out,
+                                                  size_t* entropy_len);
+
+/* ===========================================================================
+ * Batch verification
+ * =========================================================================== */
+
+/** Schnorr batch verify: verify N signatures in one call.
+ *  Each entry: [32-byte xonly pubkey | 32-byte msg | 64-byte sig] = 128 bytes.
+ *  Returns UFSECP_OK if ALL valid. */
+UFSECP_API ufsecp_error_t ufsecp_schnorr_batch_verify(
+    ufsecp_ctx* ctx,
+    const uint8_t* entries, size_t n);
+
+/** ECDSA batch verify: verify N signatures in one call.
+ *  Each entry: [32-byte msg | 33-byte pubkey | 64-byte sig] = 129 bytes.
+ *  Returns UFSECP_OK if ALL valid. */
+UFSECP_API ufsecp_error_t ufsecp_ecdsa_batch_verify(
+    ufsecp_ctx* ctx,
+    const uint8_t* entries, size_t n);
+
+/** Schnorr batch identify invalid: returns indices of invalid sigs.
+ *  invalid_out: caller-owned array of size_t (at least n elements).
+ *  invalid_count: out = number of invalid entries. */
+UFSECP_API ufsecp_error_t ufsecp_schnorr_batch_identify_invalid(
+    ufsecp_ctx* ctx,
+    const uint8_t* entries, size_t n,
+    size_t* invalid_out, size_t* invalid_count);
+
+/** ECDSA batch identify invalid: returns indices of invalid sigs.
+ *  invalid_out: caller-owned array of size_t (at least n elements).
+ *  invalid_count: out = number of invalid entries. */
+UFSECP_API ufsecp_error_t ufsecp_ecdsa_batch_identify_invalid(
+    ufsecp_ctx* ctx,
+    const uint8_t* entries, size_t n,
+    size_t* invalid_out, size_t* invalid_count);
+
+/* ===========================================================================
+ * SHA-512
+ * =========================================================================== */
+
+/** SHA-512 hash. */
+UFSECP_API ufsecp_error_t ufsecp_sha512(const uint8_t* data, size_t len,
+                                        uint8_t digest64_out[64]);
+
+/* ===========================================================================
+ * Multi-scalar multiplication
+ * =========================================================================== */
+
+/** Shamir's trick: compute a*P + b*Q.
+ *  All scalars are 32-byte big-endian. All points are 33-byte compressed. */
+UFSECP_API ufsecp_error_t ufsecp_shamir_trick(
+    ufsecp_ctx* ctx,
+    const uint8_t a[32], const uint8_t P33[33],
+    const uint8_t b[32], const uint8_t Q33[33],
+    uint8_t out33[33]);
+
+/** Multi-scalar multiplication: compute sum(scalars[i] * points[i]).
+ *  scalars: n * 32 bytes contiguous. points: n * 33 bytes contiguous. */
+UFSECP_API ufsecp_error_t ufsecp_multi_scalar_mul(
+    ufsecp_ctx* ctx,
+    const uint8_t* scalars, const uint8_t* points, size_t n,
+    uint8_t out33[33]);
+
+/* ===========================================================================
+ * MuSig2 (BIP-327 multi-signatures)
+ * =========================================================================== */
+
+#define UFSECP_MUSIG2_PUBNONCE_LEN   66  /**< 33 + 33 bytes */
+#define UFSECP_MUSIG2_AGGNONCE_LEN   66
+#define UFSECP_MUSIG2_KEYAGG_LEN     165 /**< opaque serialised key agg context */
+#define UFSECP_MUSIG2_SESSION_LEN    165 /**< opaque serialised session state */
+#define UFSECP_MUSIG2_SECNONCE_LEN   64  /**< secret nonce (2 x 32 bytes) */
+
+/** Aggregate public keys for MuSig2.
+ *  pubkeys: n * 32 bytes (x-only). keyagg_out: opaque context. */
+UFSECP_API ufsecp_error_t ufsecp_musig2_key_agg(
+    ufsecp_ctx* ctx,
+    const uint8_t* pubkeys, size_t n,
+    uint8_t keyagg_out[UFSECP_MUSIG2_KEYAGG_LEN],
+    uint8_t agg_pubkey32_out[32]);
+
+/** Generate MuSig2 nonce pair. */
+UFSECP_API ufsecp_error_t ufsecp_musig2_nonce_gen(
+    ufsecp_ctx* ctx,
+    const uint8_t privkey[32],
+    const uint8_t pubkey32[32],
+    const uint8_t agg_pubkey32[32],
+    const uint8_t msg32[32],
+    const uint8_t extra_in[32],
+    uint8_t secnonce_out[UFSECP_MUSIG2_SECNONCE_LEN],
+    uint8_t pubnonce_out[UFSECP_MUSIG2_PUBNONCE_LEN]);
+
+/** Aggregate public nonces. */
+UFSECP_API ufsecp_error_t ufsecp_musig2_nonce_agg(
+    ufsecp_ctx* ctx,
+    const uint8_t* pubnonces, size_t n,
+    uint8_t aggnonce_out[UFSECP_MUSIG2_AGGNONCE_LEN]);
+
+/** Start a MuSig2 signing session. */
+UFSECP_API ufsecp_error_t ufsecp_musig2_start_sign_session(
+    ufsecp_ctx* ctx,
+    const uint8_t aggnonce[UFSECP_MUSIG2_AGGNONCE_LEN],
+    const uint8_t keyagg[UFSECP_MUSIG2_KEYAGG_LEN],
+    const uint8_t msg32[32],
+    uint8_t session_out[UFSECP_MUSIG2_SESSION_LEN]);
+
+/** Produce a partial signature.
+ *  IMPORTANT: secnonce is zeroed after use to prevent nonce reuse. */
+UFSECP_API ufsecp_error_t ufsecp_musig2_partial_sign(
+    ufsecp_ctx* ctx,
+    uint8_t secnonce[UFSECP_MUSIG2_SECNONCE_LEN],
+    const uint8_t privkey[32],
+    const uint8_t keyagg[UFSECP_MUSIG2_KEYAGG_LEN],
+    const uint8_t session[UFSECP_MUSIG2_SESSION_LEN],
+    size_t signer_index,
+    uint8_t partial_sig32_out[32]);
+
+/** Verify a partial signature. */
+UFSECP_API ufsecp_error_t ufsecp_musig2_partial_verify(
+    ufsecp_ctx* ctx,
+    const uint8_t partial_sig32[32],
+    const uint8_t pubnonce[UFSECP_MUSIG2_PUBNONCE_LEN],
+    const uint8_t pubkey32[32],
+    const uint8_t keyagg[UFSECP_MUSIG2_KEYAGG_LEN],
+    const uint8_t session[UFSECP_MUSIG2_SESSION_LEN],
+    size_t signer_index);
+
+/** Aggregate partial signatures into a final BIP-340 Schnorr signature. */
+UFSECP_API ufsecp_error_t ufsecp_musig2_partial_sig_agg(
+    ufsecp_ctx* ctx,
+    const uint8_t* partial_sigs, size_t n,
+    const uint8_t session[UFSECP_MUSIG2_SESSION_LEN],
+    uint8_t sig64_out[64]);
+
+/* ===========================================================================
+ * FROST (Threshold signatures)
+ * =========================================================================== */
+
+#define UFSECP_FROST_SHARE_LEN         36   /**< 4 (from) + 32 (value) */
+#define UFSECP_FROST_KEYPKG_LEN        141  /**< serialised key package */
+#define UFSECP_FROST_NONCE_LEN         64   /**< hiding + binding nonce */
+#define UFSECP_FROST_NONCE_COMMIT_LEN  70   /**< id + hiding_pt + binding_pt */
+
+/** FROST key generation phase 1: produce commitment + shares.
+ *  commits_out: commitment blob. shares_out: n shares of UFSECP_FROST_SHARE_LEN each. */
+UFSECP_API ufsecp_error_t ufsecp_frost_keygen_begin(
+    ufsecp_ctx* ctx,
+    uint32_t participant_id, uint32_t threshold, uint32_t num_participants,
+    const uint8_t seed[32],
+    uint8_t* commits_out, size_t* commits_len,
+    uint8_t* shares_out, size_t* shares_len);
+
+/** FROST key generation phase 2: finalise key package. */
+UFSECP_API ufsecp_error_t ufsecp_frost_keygen_finalize(
+    ufsecp_ctx* ctx,
+    uint32_t participant_id,
+    const uint8_t* all_commits, size_t commits_len,
+    const uint8_t* received_shares, size_t shares_len,
+    uint32_t threshold, uint32_t num_participants,
+    uint8_t keypkg_out[UFSECP_FROST_KEYPKG_LEN]);
+
+/** Generate FROST signing nonce. */
+UFSECP_API ufsecp_error_t ufsecp_frost_sign_nonce_gen(
+    ufsecp_ctx* ctx,
+    uint32_t participant_id,
+    const uint8_t nonce_seed[32],
+    uint8_t nonce_out[UFSECP_FROST_NONCE_LEN],
+    uint8_t nonce_commit_out[UFSECP_FROST_NONCE_COMMIT_LEN]);
+
+/** Produce FROST partial signature. */
+UFSECP_API ufsecp_error_t ufsecp_frost_sign(
+    ufsecp_ctx* ctx,
+    const uint8_t keypkg[UFSECP_FROST_KEYPKG_LEN],
+    const uint8_t nonce[UFSECP_FROST_NONCE_LEN],
+    const uint8_t msg32[32],
+    const uint8_t* nonce_commits, size_t n_signers,
+    uint8_t partial_sig_out[36]);
+
+/** Verify FROST partial signature.
+ *  verification_share33: 33-byte compressed signer verification share Y_i. */
+UFSECP_API ufsecp_error_t ufsecp_frost_verify_partial(
+    ufsecp_ctx* ctx,
+    const uint8_t partial_sig[36],
+    const uint8_t verification_share33[33],
+    const uint8_t* nonce_commits, size_t n_signers,
+    const uint8_t msg32[32],
+    const uint8_t group_pubkey33[33]);
+
+/** Aggregate FROST partial signatures into final Schnorr signature. */
+UFSECP_API ufsecp_error_t ufsecp_frost_aggregate(
+    ufsecp_ctx* ctx,
+    const uint8_t* partial_sigs, size_t n,
+    const uint8_t* nonce_commits, size_t n_signers,
+    const uint8_t group_pubkey33[33],
+    const uint8_t msg32[32],
+    uint8_t sig64_out[64]);
+
+/* ===========================================================================
+ * Adaptor signatures (Atomic swaps / DLCs)
+ * =========================================================================== */
+
+#define UFSECP_SCHNORR_ADAPTOR_SIG_LEN 97  /**< 33 R_hat + 32 s_hat + 32 proof */
+#define UFSECP_ECDSA_ADAPTOR_SIG_LEN   130 /**< 33 R_hat + 32 s_hat + 33 r_proof + 32 dleq_e */
+
+/** BIP-340 Schnorr adaptor pre-sign. adaptor_point: 33-byte compressed. */
+UFSECP_API ufsecp_error_t ufsecp_schnorr_adaptor_sign(
+    ufsecp_ctx* ctx,
+    const uint8_t privkey[32],
+    const uint8_t msg32[32],
+    const uint8_t adaptor_point33[33],
+    const uint8_t aux_rand[32],
+    uint8_t pre_sig_out[UFSECP_SCHNORR_ADAPTOR_SIG_LEN]);
+
+/** Verify Schnorr adaptor pre-signature. */
+UFSECP_API ufsecp_error_t ufsecp_schnorr_adaptor_verify(
+    ufsecp_ctx* ctx,
+    const uint8_t pre_sig[UFSECP_SCHNORR_ADAPTOR_SIG_LEN],
+    const uint8_t pubkey_x[32],
+    const uint8_t msg32[32],
+    const uint8_t adaptor_point33[33]);
+
+/** Adapt a Schnorr pre-signature into a valid signature. */
+UFSECP_API ufsecp_error_t ufsecp_schnorr_adaptor_adapt(
+    ufsecp_ctx* ctx,
+    const uint8_t pre_sig[UFSECP_SCHNORR_ADAPTOR_SIG_LEN],
+    const uint8_t adaptor_secret[32],
+    uint8_t sig64_out[64]);
+
+/** Extract adaptor secret from pre-signature + completed signature. */
+UFSECP_API ufsecp_error_t ufsecp_schnorr_adaptor_extract(
+    ufsecp_ctx* ctx,
+    const uint8_t pre_sig[UFSECP_SCHNORR_ADAPTOR_SIG_LEN],
+    const uint8_t sig64[64],
+    uint8_t secret32_out[32]);
+
+/** ECDSA adaptor pre-sign. */
+UFSECP_API ufsecp_error_t ufsecp_ecdsa_adaptor_sign(
+    ufsecp_ctx* ctx,
+    const uint8_t privkey[32],
+    const uint8_t msg32[32],
+    const uint8_t adaptor_point33[33],
+    uint8_t pre_sig_out[UFSECP_ECDSA_ADAPTOR_SIG_LEN]);
+
+/** Verify ECDSA adaptor pre-signature. */
+UFSECP_API ufsecp_error_t ufsecp_ecdsa_adaptor_verify(
+    ufsecp_ctx* ctx,
+    const uint8_t pre_sig[UFSECP_ECDSA_ADAPTOR_SIG_LEN],
+    const uint8_t pubkey33[33],
+    const uint8_t msg32[32],
+    const uint8_t adaptor_point33[33]);
+
+/** Adapt ECDSA pre-signature into valid signature. */
+UFSECP_API ufsecp_error_t ufsecp_ecdsa_adaptor_adapt(
+    ufsecp_ctx* ctx,
+    const uint8_t pre_sig[UFSECP_ECDSA_ADAPTOR_SIG_LEN],
+    const uint8_t adaptor_secret[32],
+    uint8_t sig64_out[64]);
+
+/** Extract adaptor secret from ECDSA pre-sig + completed sig. */
+UFSECP_API ufsecp_error_t ufsecp_ecdsa_adaptor_extract(
+    ufsecp_ctx* ctx,
+    const uint8_t pre_sig[UFSECP_ECDSA_ADAPTOR_SIG_LEN],
+    const uint8_t sig64[64],
+    uint8_t secret32_out[32]);
+
+/* ===========================================================================
+ * Pedersen commitments
+ * =========================================================================== */
+
+/** Pedersen commitment: C = value * H + blinding * G.
+ *  commitment33_out: 33-byte compressed point. */
+UFSECP_API ufsecp_error_t ufsecp_pedersen_commit(
+    ufsecp_ctx* ctx,
+    const uint8_t value[32],
+    const uint8_t blinding[32],
+    uint8_t commitment33_out[33]);
+
+/** Verify Pedersen commitment. */
+UFSECP_API ufsecp_error_t ufsecp_pedersen_verify(
+    ufsecp_ctx* ctx,
+    const uint8_t commitment33[33],
+    const uint8_t value[32],
+    const uint8_t blinding[32]);
+
+/** Verify that sum of positive commitments equals sum of negative commitments.
+ *  pos/neg: arrays of 33-byte compressed commitments. */
+UFSECP_API ufsecp_error_t ufsecp_pedersen_verify_sum(
+    ufsecp_ctx* ctx,
+    const uint8_t* pos, size_t n_pos,
+    const uint8_t* neg, size_t n_neg);
+
+/** Compute blinding sum: sum(in) - sum(out).
+ *  blinds: all blindings contiguous (32 bytes each), first n_in are inputs. */
+UFSECP_API ufsecp_error_t ufsecp_pedersen_blind_sum(
+    ufsecp_ctx* ctx,
+    const uint8_t* blinds_in, size_t n_in,
+    const uint8_t* blinds_out, size_t n_out,
+    uint8_t sum32_out[32]);
+
+/** Switch commitment: C = value*H + blinding*G + switch_blind*J. */
+UFSECP_API ufsecp_error_t ufsecp_pedersen_switch_commit(
+    ufsecp_ctx* ctx,
+    const uint8_t value[32],
+    const uint8_t blinding[32],
+    const uint8_t switch_blind[32],
+    uint8_t commitment33_out[33]);
+
+/* ===========================================================================
+ * Zero-knowledge proofs
+ * =========================================================================== */
+
+#define UFSECP_ZK_KNOWLEDGE_PROOF_LEN  64  /**< 32 rx + 32 s */
+#define UFSECP_ZK_DLEQ_PROOF_LEN       64  /**< 32 e + 32 s */
+#define UFSECP_ZK_RANGE_PROOF_MAX_LEN  675 /**< max Bulletproof range proof */
+
+/** Knowledge proof: prove knowledge of discrete log. */
+UFSECP_API ufsecp_error_t ufsecp_zk_knowledge_prove(
+    ufsecp_ctx* ctx,
+    const uint8_t secret[32],
+    const uint8_t pubkey33[33],
+    const uint8_t msg32[32],
+    const uint8_t aux_rand[32],
+    uint8_t proof_out[UFSECP_ZK_KNOWLEDGE_PROOF_LEN]);
+
+/** Verify knowledge proof. */
+UFSECP_API ufsecp_error_t ufsecp_zk_knowledge_verify(
+    ufsecp_ctx* ctx,
+    const uint8_t proof[UFSECP_ZK_KNOWLEDGE_PROOF_LEN],
+    const uint8_t pubkey33[33],
+    const uint8_t msg32[32]);
+
+/** DLEQ proof: prove that P/G == Q/H (same discrete log).
+ *  G, H, P, Q: 33-byte compressed points. */
+UFSECP_API ufsecp_error_t ufsecp_zk_dleq_prove(
+    ufsecp_ctx* ctx,
+    const uint8_t secret[32],
+    const uint8_t G33[33], const uint8_t H33[33],
+    const uint8_t P33[33], const uint8_t Q33[33],
+    const uint8_t aux_rand[32],
+    uint8_t proof_out[UFSECP_ZK_DLEQ_PROOF_LEN]);
+
+/** Verify DLEQ proof. */
+UFSECP_API ufsecp_error_t ufsecp_zk_dleq_verify(
+    ufsecp_ctx* ctx,
+    const uint8_t proof[UFSECP_ZK_DLEQ_PROOF_LEN],
+    const uint8_t G33[33], const uint8_t H33[33],
+    const uint8_t P33[33], const uint8_t Q33[33]);
+
+/** Bulletproof range proof: prove commitment hides value in [0, 2^64).
+ *  proof_len: in = buffer size, out = actual proof size. */
+UFSECP_API ufsecp_error_t ufsecp_zk_range_prove(
+    ufsecp_ctx* ctx,
+    uint64_t value,
+    const uint8_t blinding[32],
+    const uint8_t commitment33[33],
+    const uint8_t aux_rand[32],
+    uint8_t* proof_out, size_t* proof_len);
+
+/** Verify Bulletproof range proof. */
+UFSECP_API ufsecp_error_t ufsecp_zk_range_verify(
+    ufsecp_ctx* ctx,
+    const uint8_t commitment33[33],
+    const uint8_t* proof, size_t proof_len);
+
+/* ===========================================================================
+ * Multi-coin wallet infrastructure
+ * =========================================================================== */
+
+/** Maximum address string length for any supported coin. */
+#define UFSECP_COIN_ADDR_MAX_LEN 128
+
+/** Coin identifiers (BIP-44 coin_type). */
+#define UFSECP_COIN_BITCOIN      0
+#define UFSECP_COIN_LITECOIN     2
+#define UFSECP_COIN_DOGECOIN     3
+#define UFSECP_COIN_DASH         5
+#define UFSECP_COIN_ETHEREUM     60
+#define UFSECP_COIN_BITCOIN_CASH 145
+#define UFSECP_COIN_TRON         195
+
+/** Get default address for a coin from a compressed public key.
+ *  coin_type: BIP-44 coin type index.
+ *  addr_out: buffer for NUL-terminated address.
+ *  addr_len: in = buffer size, out = strlen. */
+UFSECP_API ufsecp_error_t ufsecp_coin_address(
+    ufsecp_ctx* ctx,
+    const uint8_t pubkey33[33],
+    uint32_t coin_type, int testnet,
+    char* addr_out, size_t* addr_len);
+
+/** Derive full key from seed for a specific coin.
+ *  Derives using best_purpose for the coin.
+ *  privkey32_out, pubkey33_out: optional (NULL to skip). */
+UFSECP_API ufsecp_error_t ufsecp_coin_derive_from_seed(
+    ufsecp_ctx* ctx,
+    const uint8_t* seed, size_t seed_len,
+    uint32_t coin_type, uint32_t account, int change, uint32_t index,
+    int testnet,
+    uint8_t* privkey32_out,
+    uint8_t* pubkey33_out,
+    char* addr_out, size_t* addr_len);
+
+/** Encode WIF for any supported coin. */
+UFSECP_API ufsecp_error_t ufsecp_coin_wif_encode(
+    ufsecp_ctx* ctx,
+    const uint8_t privkey[32],
+    uint32_t coin_type, int testnet,
+    char* wif_out, size_t* wif_len);
+
+/** Bitcoin message signing (BIP-137).
+ *  base64_out: buffer for base64-encoded signature.
+ *  base64_len: in = buffer size, out = strlen. */
+UFSECP_API ufsecp_error_t ufsecp_btc_message_sign(
+    ufsecp_ctx* ctx,
+    const uint8_t* msg, size_t msg_len,
+    const uint8_t privkey[32],
+    char* base64_out, size_t* base64_len);
+
+/** Bitcoin message verify.
+ *  Returns UFSECP_OK if signature is valid. */
+UFSECP_API ufsecp_error_t ufsecp_btc_message_verify(
+    ufsecp_ctx* ctx,
+    const uint8_t* msg, size_t msg_len,
+    const uint8_t pubkey33[33],
+    const char* base64_sig);
+
+/** Bitcoin message hash (double SHA-256 with prefix). */
+UFSECP_API ufsecp_error_t ufsecp_btc_message_hash(
+    const uint8_t* msg, size_t msg_len,
+    uint8_t digest32_out[32]);
+
+/* ===========================================================================
+ * BIP-352 Silent Payments
+ * =========================================================================== */
+
+/** Generate a Silent Payment address from scan and spend private keys.
+ *  scan_privkey:  32-byte scan private key.
+ *  spend_privkey: 32-byte spend private key.
+ *  scan_pubkey33_out:  33-byte compressed scan public key (B_scan).
+ *  spend_pubkey33_out: 33-byte compressed spend public key (B_spend).
+ *  addr_out: buffer for bech32m-encoded address (min 128 bytes).
+ *  addr_len: in = buffer size, out = strlen (excl. NUL). */
+UFSECP_API ufsecp_error_t ufsecp_silent_payment_address(
+    ufsecp_ctx* ctx,
+    const uint8_t scan_privkey[32],
+    const uint8_t spend_privkey[32],
+    uint8_t scan_pubkey33_out[33],
+    uint8_t spend_pubkey33_out[33],
+    char* addr_out, size_t* addr_len);
+
+/** Create a Silent Payment output (sender side).
+ *  Computes the tweaked output pubkey for the recipient.
+ *  input_privkeys: array of 32-byte private keys (N keys, one per input).
+ *  n_inputs: number of input private keys.
+ *  scan_pubkey33:  33-byte recipient scan pubkey (B_scan).
+ *  spend_pubkey33: 33-byte recipient spend pubkey (B_spend).
+ *  k: output index (for multiple outputs to same recipient).
+ *  output_pubkey33_out: 33-byte compressed tweaked output pubkey.
+ *  tweak32_out: 32-byte tweak scalar (optional, may be NULL). */
+UFSECP_API ufsecp_error_t ufsecp_silent_payment_create_output(
+    ufsecp_ctx* ctx,
+    const uint8_t* input_privkeys, size_t n_inputs,
+    const uint8_t scan_pubkey33[33],
+    const uint8_t spend_pubkey33[33],
+    uint32_t k,
+    uint8_t output_pubkey33_out[33],
+    uint8_t* tweak32_out);
+
+/** Scan for Silent Payment outputs (receiver side).
+ *  scan_privkey:  32-byte scan private key.
+ *  spend_privkey: 32-byte spend private key.
+ *  input_pubkeys33: array of 33-byte compressed pubkeys (sender inputs).
+ *  n_input_pubkeys: number of input pubkeys.
+ *  output_xonly32: array of 32-byte x-only output pubkeys to check.
+ *  n_outputs: number of output pubkeys.
+ *  found_indices_out: array to receive indices of matched outputs.
+ *  found_privkeys_out: array to receive 32-byte spending private keys (one per match).
+ *  n_found: in = array capacity, out = number of matches found. */
+UFSECP_API ufsecp_error_t ufsecp_silent_payment_scan(
+    ufsecp_ctx* ctx,
+    const uint8_t scan_privkey[32],
+    const uint8_t spend_privkey[32],
+    const uint8_t* input_pubkeys33, size_t n_input_pubkeys,
+    const uint8_t* output_xonly32, size_t n_outputs,
+    uint32_t* found_indices_out,
+    uint8_t* found_privkeys_out,
+    size_t* n_found);
+
+/* ===========================================================================
+ * ECIES (Elliptic Curve Integrated Encryption Scheme)
+ * =========================================================================== */
+
+/** ECIES envelope overhead: 33 (ephemeral pubkey) + 16 (IV) + 32 (HMAC) = 81 */
+#define UFSECP_ECIES_OVERHEAD 81
+
+/** ECIES encrypt: encrypt plaintext for a recipient's public key.
+ *  recipient_pubkey33: 33-byte compressed public key.
+ *  plaintext, plaintext_len: message to encrypt.
+ *  envelope_out: buffer for encrypted envelope (min plaintext_len + 81).
+ *  envelope_len: in = buffer size, out = actual envelope size. */
+UFSECP_API ufsecp_error_t ufsecp_ecies_encrypt(
+    ufsecp_ctx* ctx,
+    const uint8_t recipient_pubkey33[33],
+    const uint8_t* plaintext, size_t plaintext_len,
+    uint8_t* envelope_out, size_t* envelope_len);
+
+/** ECIES decrypt: decrypt an ECIES envelope with a private key.
+ *  privkey: 32-byte private key.
+ *  envelope, envelope_len: encrypted envelope.
+ *  plaintext_out: buffer for decrypted plaintext (min envelope_len - 81).
+ *  plaintext_len: in = buffer size, out = actual plaintext size. */
+UFSECP_API ufsecp_error_t ufsecp_ecies_decrypt(
+    ufsecp_ctx* ctx,
+    const uint8_t privkey[32],
+    const uint8_t* envelope, size_t envelope_len,
+    uint8_t* plaintext_out, size_t* plaintext_len);
+
+#ifdef SECP256K1_BUILD_ETHEREUM
+
+/** Ethereum address size (20 bytes). */
+#define UFSECP_ETH_ADDR_LEN 20
+
+/** Keccak-256 hash (Ethereum variant, NOT SHA3-256).
+ *  Output: 32 bytes. */
+UFSECP_API ufsecp_error_t ufsecp_keccak256(const uint8_t* data, size_t len,
+                                           uint8_t digest32_out[32]);
+
+/** Derive Ethereum address (20 bytes) from compressed public key.
+ *  pubkey33: 33-byte compressed public key.
+ *  addr20_out: 20-byte Ethereum address. */
+UFSECP_API ufsecp_error_t ufsecp_eth_address(ufsecp_ctx* ctx,
+                                             const uint8_t pubkey33[33],
+                                             uint8_t addr20_out[20]);
+
+/** Derive EIP-55 checksummed Ethereum address string from compressed pubkey.
+ *  addr_out: buffer for "0x" + 40 hex chars + NUL (min 43 bytes).
+ *  addr_len: in = buffer size, out = strlen (excl. NUL). */
+UFSECP_API ufsecp_error_t ufsecp_eth_address_checksummed(
+    ufsecp_ctx* ctx,
+    const uint8_t pubkey33[33],
+    char* addr_out, size_t* addr_len);
+
+/** EIP-191 personal_sign: hash a message with Ethereum prefix.
+ *  Computes Keccak256("\x19Ethereum Signed Message:\n" + len(msg) + msg).
+ *  digest32_out: 32-byte hash. */
+UFSECP_API ufsecp_error_t ufsecp_eth_personal_hash(const uint8_t* msg, size_t msg_len,
+                                                   uint8_t digest32_out[32]);
+
+/** Sign message hash with ECDSA recovery (Ethereum v,r,s format).
+ *  msg32: 32-byte message hash (pre-hashed, e.g. output of personal_hash).
+ *  privkey: 32-byte private key.
+ *  r_out, s_out: 32 bytes each.
+ *  v_out: EIP-155 v value (27+recid for legacy, 35+2*chainId+recid). */
+UFSECP_API ufsecp_error_t ufsecp_eth_sign(ufsecp_ctx* ctx,
+                                          const uint8_t msg32[32],
+                                          const uint8_t privkey[32],
+                                          uint8_t r_out[32],
+                                          uint8_t s_out[32],
+                                          uint64_t* v_out,
+                                          uint64_t chain_id);
+
+/** ecrecover: recover 20-byte Ethereum address from ECDSA(v,r,s) + msg hash.
+ *  This is Ethereum's ecrecover precompile (address 0x01).
+ *  Returns UFSECP_OK if recovery succeeds. */
+UFSECP_API ufsecp_error_t ufsecp_eth_ecrecover(ufsecp_ctx* ctx,
+                                               const uint8_t msg32[32],
+                                               const uint8_t r[32],
+                                               const uint8_t s[32],
+                                               uint64_t v,
+                                               uint8_t addr20_out[20]);
+
+#endif /* SECP256K1_BUILD_ETHEREUM */
+
 #ifdef __cplusplus
 }
 

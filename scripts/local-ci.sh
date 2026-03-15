@@ -509,20 +509,20 @@ job_bench() {
         -DBUILD_TESTING=ON \
         -DSECP256K1_USE_ASM=ON
 
-    cmake --build "$build_dir" --target bench_comprehensive bench_atomic_operations -j"$NPROC"
+    cmake --build "$build_dir" --target bench_unified bench_atomic_operations -j"$NPROC"
 
     local out_dir="$SRC/local-ci-output"
     mkdir -p "$out_dir"
 
-    echo -e "\n${BOLD}=== bench_comprehensive ===${NC}"
-    "$build_dir/cpu/bench_comprehensive" 2>&1 | tee "$out_dir/bench_comprehensive.txt"
+    echo -e "\n${BOLD}=== bench_unified ===${NC}"
+    "$build_dir/cpu/bench_unified" --quick 2>&1 | tee "$out_dir/bench_unified.txt"
 
     echo -e "\n${BOLD}=== bench_atomic_operations ===${NC}"
     "$build_dir/cpu/bench_atomic_operations" 2>&1 | tee "$out_dir/bench_atomic_operations.txt"
 
     echo -e "\n${YELLOW}NOTE: Docker/VM benchmarks are noisy (shared CPU, no frequency pinning).${NC}"
     echo -e "${YELLOW}      Use GitHub CI bench-regression.yml for authoritative regression detection.${NC}"
-    echo -e "${GREEN}Results saved to: local-ci-output/bench_comprehensive.txt${NC}"
+    echo -e "${GREEN}Results saved to: local-ci-output/bench_unified.txt${NC}"
 
     pass "bench: Snapshot complete (see local-ci-output/)"
 }
