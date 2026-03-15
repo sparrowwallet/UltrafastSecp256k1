@@ -1,0 +1,167 @@
+# Backend Parity Evidence Matrix
+
+**Last updated**: 2026-03-15 | **Version**: 3.22.0
+
+This document tracks feature parity, audit coverage, and benchmark evidence across all GPU backends and the CPU reference implementation.
+
+---
+
+## Backend Summary
+
+| Property | CPU | CUDA | OpenCL | Metal |
+|----------|-----|------|--------|-------|
+| **CMake option** | `SECP256K1_BUILD_CPU` (ON) | `SECP256K1_BUILD_CUDA` (OFF) | `SECP256K1_BUILD_OPENCL` (OFF) | `SECP256K1_BUILD_METAL` (OFF) |
+| **Language** | C++20 | CUDA C++ | C99 (.cl kernels) | Metal Shading Language + ObjC++ |
+| **Interface** | `fastsecp256k1` static lib | `secp256k1_cuda_lib` | `secp256k1_opencl` | `secp256k1_metal_lib` |
+| **Audit runner** | `unified_audit_runner` (49 modules) | `gpu_audit_runner` (35 modules) | `opencl_audit_runner` (27 modules) | `metal_audit_runner` (27 modules) |
+| **Benchmark** | `bench_unified` (8 categories) | `gpu_bench_unified` + 4 specialized | `opencl_benchmark` | `metal_secp256k1_bench_full` |
+| **CTest targets** | 18 core + 27 audit | 3 (`cuda_selftest`, `gpu_audit`, `gpu_ct_smoke`) | 2 (`opencl_selftest`, `opencl_audit`) | 5 (`metal_host_test`, `secp256k1_metal_test`, `secp256k1_metal_bench`, `secp256k1_metal_bench_full`, `secp256k1_metal_audit`) |
+| **Tested hardware** | x86-64, ARM64, RISC-V, ESP32-S3/P4/C6 | RTX 5060 Ti, RTX 4090, RTX 3090 | RTX 5060 Ti (via NVIDIA OpenCL) | Apple M3 Pro, M1 (CI) |
+
+---
+
+## Operation Parity Matrix
+
+Y = implemented + tested in audit runner, K = kernel/shader exists (not in audit), - = not present
+
+| Operation | CPU | CUDA | OpenCL | Metal | Notes |
+|-----------|-----|------|--------|-------|-------|
+| **Core Math** | | | | | |
+| Field arithmetic (mul, sqr, inv, add, sub) | Y | Y | Y | Y | |
+| Scalar arithmetic (mul, inv, add, negate) | Y | Y | Y | Y | |
+| Point arithmetic (add, dbl, mixed add) | Y | Y | Y | Y | |
+| Scalar multiplication (k*G, k*P) | Y | Y | Y | Y | |
+| GLV endomorphism | Y | Y | Y | Y | |
+| Generator table (w8 precomp) | Y | Y | Y | Y | Kernel: `gen_table_w8` |
+| MSM / Pippenger | Y | Y | Y | Y | |
+| **Batch Operations** | | | | | |
+| Batch Montgomery inversion | Y | Y | Y | Y | |
+| Batch Jacobian-to-affine | Y | Y | Y | Y | |
+| Affine batch add | Y | Y | Y | Y | |
+| **Signatures** | | | | | |
+| ECDSA sign (RFC 6979) | Y | Y | Y | Y | GPU: device-side RFC 6979 nonce |
+| ECDSA verify | Y | Y | Y | Y | |
+| ECDSA recovery | Y | Y | Y | Y | |
+| Schnorr sign (BIP-340) | Y | Y | Y | Y | |
+| Schnorr verify (BIP-340) | Y | Y | Y | Y | |
+| BIP-340 midstate optimization | Y | Y | Y | Y | Precomputed SHA-256 midstates |
+| Batch ECDSA verify | Y | Y | - | Y | Metal: kernel 10. OpenCL: not yet. |
+| Batch Schnorr verify | Y | Y | - | Y | Metal: kernel 12. OpenCL: not yet. |
+| **Hashing** | | | | | |
+| SHA-256 | Y | Y | Y | Y | |
+| Hash160 (RIPEMD160(SHA256)) | Y | Y | Y | Y | |
+| Keccak-256 (Ethereum) | Y | Y | Y | Y | |
+| ETH address + EIP-55 | Y | Y | Y | Y | |
+| **HD / Key Derivation** | | | | | |
+| BIP-32 HD derivation | Y | Y | Y | Y | |
+| ECDH (x-only + raw) | Y | Y | Y | Y | |
+| **Advanced Crypto** | | | | | |
+| Pedersen commitment | Y | Y | Y | Y | |
+| ZK proofs (knowledge, DLEQ) | Y | Y | Y | Y | |
+| Bulletproof range proof verify | Y | Y | Y | Y | |
+| Bulletproof generator table | Y | Y | Y | Y | |
+| **Constant-Time Layer** | | | | | |
+| CT field ops | Y | Y | K | K | OCL/Metal: kernel files exist, not in audit |
+| CT scalar ops | Y | Y | K | K | Same |
+| CT point ops | Y | Y | K | K | Same |
+| CT sign (ECDSA + Schnorr) | Y | Y | K | K | Same |
+| CT ZK proofs | Y | Y | K | K | Same |
+| **Utility** | | | | | |
+| Bloom filter lookup | Y | Y | Y | Y | |
+
+---
+
+## Audit Module Comparison
+
+### Sections present per runner
+
+| Section | CPU (unified) | CUDA | OpenCL | Metal |
+|---------|--------------|------|--------|-------|
+| math_invariants | Y (12) | Y (12) | Y (12) | Y (12) |
+| signatures | Y | Y (3) | Y (3) | Y (3) |
+| batch_advanced | Y | Y (4) | Y (2) | Y (2) |
+| differential | Y | Y (1-3) | Y (1) | Y (1) |
+| memory_safety | - | Y (2) | - | - |
+| ct_analysis | Y | Y (6) | - | - |
+| standard_vectors | Y | Y (3) | Y (2) | Y (2) |
+| protocol_security | Y | Y (6) | Y (2) | Y (2) |
+| fuzzing | Y | Y (4) | Y (3) | Y (3) |
+| performance | Y | Y (2) | Y (2) | Y (2) |
+
+### CUDA-only modules (not in OpenCL/Metal)
+
+| Module | Section | Why CUDA-only |
+|--------|---------|---------------|
+| `batch_ecdsa_ver` (16 sigs) | batch_advanced | Batch verify kernel not in OCL |
+| `msm_consistency` | batch_advanced | MSM naive vs expected |
+| `diff_field_mul` | differential | Requires `HAVE_CPU_LIB` link |
+| `diff_ecdsa` | differential | Requires `HAVE_CPU_LIB` + 64-bit limbs |
+| `mem_stress` | memory_safety | CUDA device memory specific |
+| `error_state` | memory_safety | CUDA error state specific |
+| `ct_field_ops` | ct_analysis | CT test infrastructure |
+| `ct_scalar_ops` | ct_analysis | CT test infrastructure |
+| `ct_point_ops` | ct_analysis | CT test infrastructure |
+| `ct_ecdsa_rt` | ct_analysis | CT ECDSA sign + fast verify |
+| `ct_schnorr_rt` | ct_analysis | CT Schnorr sign + fast verify |
+| `ct_fast_parity` | ct_analysis | CT vs FAST bit-exact parity |
+| `bip32_derivation` | standard_vectors | BIP-32 master+child |
+| `ecdh_commutative` | protocol_security | ECDH shared secret commutativity |
+| `ecdsa_recovery` | protocol_security | Recoverable sig -> pubkey |
+| `bip32_chain` | protocol_security | BIP-32 derivation chain |
+| `hash160_consist` | protocol_security | SHA256+RIPEMD160 consistency |
+| `fuzz_serial_rt` | fuzzing | Point serialization roundtrip |
+
+### CUDA conditional compilation
+
+| Guard | Modules affected | Effect |
+|-------|-----------------|--------|
+| `HAVE_CPU_LIB` | `diff_field_mul`, `diff_ecdsa` | Omitted when CPU lib not linked |
+| `SECP256K1_CUDA_LIMBS_32` | 13 sign/verify modules | Return 0 (skip) on 32-bit limb builds |
+
+---
+
+## Benchmark Evidence
+
+| Backend | Binary | Categories | Output |
+|---------|--------|-----------|--------|
+| CPU | `bench_unified` | 8 (field, scalar, point, ECDSA, Schnorr, CT, libsecp256k1 comparison, OpenSSL comparison) | JSON + stdout |
+| CUDA | `gpu_bench_unified` | 7 (mirrors CPU format) | JSON + stdout |
+| CUDA | `bench_compare` | CPU vs GPU side-by-side | stdout |
+| CUDA | `bench_bip352` | Silent Payments pipeline | stdout |
+| CUDA | `bench_zk` | ZK operations | stdout |
+| OpenCL | `opencl_benchmark` | Core ops | stdout |
+| Metal | `metal_secp256k1_bench_full` | Core ops | stdout |
+
+---
+
+## Parity Gaps (remaining)
+
+| # | Gap | Backends | Severity | Notes |
+|---|-----|----------|----------|-------|
+| 1 | Batch ECDSA/Schnorr verify | OpenCL missing | Low | Search workload; Metal + CUDA have it |
+| 2 | CT audit modules | OpenCL, Metal | Low | Kernel files exist but audit runner doesn't exercise them |
+| 3 | Differential CPU-GPU | OpenCL (1 of 3), Metal (1 of 3) | Low | Only scalar mul differential, not field/ECDSA |
+| 4 | Memory safety tests | OpenCL, Metal | Informational | CUDA-specific (device alloc/error state) |
+
+All gaps are **non-blocking** for release. Core cryptographic operations (sign, verify, key derivation, hashing) have full parity across all three GPU backends.
+
+---
+
+## Verification Commands
+
+```bash
+# CPU unified audit
+./build-linux/audit/unified_audit_runner --report-dir reports/
+
+# CUDA audit
+./build-cuda/cuda/gpu_audit_runner --report-dir reports/
+
+# OpenCL audit (requires --kernel-dir)
+./build-opencl/opencl/opencl_audit_runner --kernel-dir opencl/kernels/
+
+# Metal audit (macOS only)
+./build-metal/metal/metal_audit_runner --report-dir reports/
+
+# CTest (all backends)
+ctest --test-dir build-linux -C Release --output-on-failure
+```

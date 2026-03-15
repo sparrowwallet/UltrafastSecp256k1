@@ -56,6 +56,12 @@ ECDSASignature ecdsa_sign(const std::array<uint8_t, 32>& msg_hash,
     // CT low-S normalization: branchless comparison with n/2 + conditional negate.
     ECDSASignature const sig = ct::ct_normalize_low_s(ECDSASignature{r, s});
 
+    // Erase secret nonce material from stack.
+    secure_erase(&k,     sizeof(k));
+    secure_erase(&k_inv, sizeof(k_inv));
+    secure_erase(&z,     sizeof(z));
+    secure_erase(&s,     sizeof(s));
+
     return sig;
 }
 
@@ -113,6 +119,12 @@ ECDSASignature ecdsa_sign_hedged(const std::array<uint8_t, 32>& msg_hash,
 
     // CT low-S normalization (branchless)
     ECDSASignature const sig = ct::ct_normalize_low_s(ECDSASignature{r, s});
+
+    // Erase secret nonce material from stack.
+    secure_erase(&k,     sizeof(k));
+    secure_erase(&k_inv, sizeof(k_inv));
+    secure_erase(&z,     sizeof(z));
+    secure_erase(&s,     sizeof(s));
 
     return sig;
 }

@@ -428,13 +428,13 @@
 | Batch Montgomery inversion | Y | Y | Y |
 | Batch Jacobian-to-affine | Y | Y | Y |
 | Affine batch add | Y | Y | Y |
-| ECDSA sign (RFC 6979) | Y | - | - |
-| ECDSA verify | Y | - | - |
+| ECDSA sign (RFC 6979) | Y | Y | Y |
+| ECDSA verify | Y | Y | Y |
 | ECDSA recovery | Y | Y | Y |
-| Schnorr sign (BIP-340) | Y | - | - |
-| Schnorr verify (BIP-340) | Y | - | - |
-| BIP-340 midstate optimization | Y | - | - |
-| Batch verify (ECDSA + Schnorr) | Y | - | - |
+| Schnorr sign (BIP-340) | Y | Y | Y |
+| Schnorr verify (BIP-340) | Y | Y | Y |
+| BIP-340 midstate optimization | Y | Y | Y |
+| Batch verify (ECDSA + Schnorr) | Y | - | Y |
 | SHA-256 | Y | Y | Y |
 | Hash160 (RIPEMD160(SHA256)) | Y | Y | Y |
 | Keccak-256 (Ethereum) | Y | Y | Y |
@@ -445,11 +445,11 @@
 | ZK proofs (knowledge, DLEQ) | Y | Y | Y |
 | Bulletproof range proof verify | Y | Y | Y |
 | Bulletproof generator table | Y | Y | Y |
-| CT field ops | - | Y | Y |
-| CT scalar ops | - | Y | Y |
-| CT point ops | - | Y | Y |
-| CT sign (ECDSA + Schnorr) | - | Y | Y |
-| CT ZK proofs | - | Y | Y |
+| CT field ops | Y | Y | Y |
+| CT scalar ops | Y | Y | Y |
+| CT point ops | Y | Y | Y |
+| CT sign (ECDSA + Schnorr) | Y | Y | Y |
+| CT ZK proofs | Y | Y | Y |
 | Bloom filter lookup | Y | Y | Y |
 
 ---

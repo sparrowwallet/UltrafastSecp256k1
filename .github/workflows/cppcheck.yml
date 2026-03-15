@@ -3,16 +3,8 @@ name: Cppcheck
 on:
   push:
     branches: [main, dev]
-    paths:
-      - 'cpu/**'
-      - 'include/**'
-      - '.github/workflows/cppcheck.yml'
   pull_request:
     branches: [main, dev]
-    paths:
-      - 'cpu/**'
-      - 'include/**'
-      - '.github/workflows/cppcheck.yml'
 
 permissions:
   contents: read

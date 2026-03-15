@@ -6,8 +6,11 @@
 #include "secp256k1/sha256.hpp"
 #include "secp256k1/schnorr.hpp"
 #include "secp256k1/ct/point.hpp"
+#include "secp256k1/detail/secure_erase.hpp"
 #include <algorithm>
 #include <cstring>
+
+using secp256k1::detail::secure_erase;
 
 namespace secp256k1 {
 
@@ -160,6 +163,9 @@ frost_keygen_begin(ParticipantId participant_id,
         shares[j].value = poly_eval(coeffs, x);
     }
 
+    // Erase secret polynomial coefficients from heap.
+    for (auto& c : coeffs) secure_erase(&c, sizeof(c));
+
     return {commitment, shares};
 }
 
@@ -305,6 +311,11 @@ frost_sign(const FrostKeyPackage& key_pkg,
     }
 
     Scalar const z_i = d + (my_binding * ei) + (lambda_i * s_i * e);
+
+    // Erase secret nonces and signing share from stack.
+    secure_erase(&d,   sizeof(d));
+    secure_erase(&ei,  sizeof(ei));
+    secure_erase(&s_i, sizeof(s_i));
 
     return FrostPartialSig{key_pkg.id, z_i};
 }

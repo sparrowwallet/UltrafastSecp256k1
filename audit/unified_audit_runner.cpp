@@ -761,7 +761,7 @@ static void write_sarif_report(const char* path,
         } else if (std::strcmp(r.section, "memory_safety") == 0) {
             uri = "audit/test_abi_gate.cpp";
         } else if (std::strcmp(r.section, "performance") == 0) {
-            uri = "cpu/tests/bench_comprehensive.cpp";
+            uri = "cpu/bench/bench_unified.cpp";
         }
 
         (void)std::fprintf(f, "        {\n");
