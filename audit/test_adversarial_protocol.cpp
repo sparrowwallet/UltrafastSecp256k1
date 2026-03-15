@@ -632,9 +632,9 @@ static void test_frost_below_threshold() {
                  "frost keygen_finalize");
     }
 
-    // Extract group pubkey from first keypkg (first 32 bytes are x-only group key)
-    uint8_t group_pub[32];
-    std::memcpy(group_pub, keypkgs[0], 32);
+    // Extract compressed group pubkey from keypkg (offset 77: 33-byte compressed)
+    uint8_t group_pub[33];
+    std::memcpy(group_pub, keypkgs[0] + 77, 33);
 
     uint8_t msg32[32];
     hex_to_bytes(MSG_HEX, msg32, 32);
@@ -658,7 +658,7 @@ static void test_frost_below_threshold() {
                                                      ncommit1, 1,
                                                      group_pub, msg32, final_sig);
         if (arc == UFSECP_OK) {
-            ufsecp_error_t vrc = ufsecp_schnorr_verify(ctx, msg32, final_sig, group_pub);
+            ufsecp_error_t vrc = ufsecp_schnorr_verify(ctx, msg32, final_sig, group_pub + 1);
             CHECK(vrc != UFSECP_OK, "below-threshold sig must not verify");
         } else {
             CHECK(true, "below-threshold aggregate correctly rejected");
@@ -713,8 +713,8 @@ static void test_frost_malformed_commitment() {
                  recv_shares, recv_len,
                  threshold, n_parts, keypkgs[i]);
     }
-    uint8_t group_pub[32];
-    std::memcpy(group_pub, keypkgs[0], 32);
+    uint8_t group_pub[33];
+    std::memcpy(group_pub, keypkgs[0] + 77, 33);
     uint8_t msg32[32];
     hex_to_bytes(MSG_HEX, msg32, 32);
 
@@ -753,7 +753,7 @@ static void test_frost_malformed_commitment() {
                                                      ncommits_bad, 2,
                                                      group_pub, msg32, final_sig);
         if (arc == UFSECP_OK) {
-            ufsecp_error_t vrc = ufsecp_schnorr_verify(ctx, msg32, final_sig, group_pub);
+            ufsecp_error_t vrc = ufsecp_schnorr_verify(ctx, msg32, final_sig, group_pub + 1);
             CHECK(vrc != UFSECP_OK, "sig from corrupted nonce commits must not verify");
         } else {
             CHECK(true, "aggregate correctly rejected corrupted commits");
@@ -850,8 +850,8 @@ static void test_frost_malicious_coordinator() {
                  recv_shares, recv_len,
                  threshold, n_parts, keypkgs[i]);
     }
-    uint8_t group_pub[32];
-    std::memcpy(group_pub, keypkgs[0], 32);
+    uint8_t group_pub[33];
+    std::memcpy(group_pub, keypkgs[0] + 77, 33);
     uint8_t msg32[32];
     hex_to_bytes(MSG_HEX, msg32, 32);
 
@@ -886,7 +886,7 @@ static void test_frost_malicious_coordinator() {
                                                  ncommits_good, 2,
                                                  group_pub, msg32, final_sig);
     if (arc == UFSECP_OK) {
-        ufsecp_error_t vrc = ufsecp_schnorr_verify(ctx, msg32, final_sig, group_pub);
+        ufsecp_error_t vrc = ufsecp_schnorr_verify(ctx, msg32, final_sig, group_pub + 1);
         CHECK(vrc != UFSECP_OK, "sig from inconsistent coordinator views must not verify");
     } else {
         CHECK(true, "aggregate correctly rejected inconsistent partial sigs");
@@ -936,8 +936,8 @@ static void test_frost_duplicate_nonce() {
                  recv_shares, recv_len,
                  threshold, n_parts, keypkgs[i]);
     }
-    uint8_t group_pub[32];
-    std::memcpy(group_pub, keypkgs[0], 32);
+    uint8_t group_pub[33];
+    std::memcpy(group_pub, keypkgs[0] + 77, 33);
     uint8_t msg32[32];
     hex_to_bytes(MSG_HEX, msg32, 32);
 
@@ -964,7 +964,7 @@ static void test_frost_duplicate_nonce() {
                                                      ncommits_dup, 2,
                                                      group_pub, msg32, final_sig);
         if (arc == UFSECP_OK) {
-            ufsecp_error_t vrc = ufsecp_schnorr_verify(ctx, msg32, final_sig, group_pub);
+            ufsecp_error_t vrc = ufsecp_schnorr_verify(ctx, msg32, final_sig, group_pub + 1);
             CHECK(vrc != UFSECP_OK, "sig from duplicate nonces must not verify");
         } else {
             CHECK(true, "aggregate rejected duplicate nonce commits");
@@ -1019,8 +1019,8 @@ static void test_frost_participant_identity_mismatch() {
                  recv_shares, recv_len,
                  threshold, n_parts, keypkgs[i]);
     }
-    uint8_t group_pub[32];
-    std::memcpy(group_pub, keypkgs[0], 32);
+    uint8_t group_pub[33];
+    std::memcpy(group_pub, keypkgs[0] + 77, 33);
     uint8_t msg32[32];
     hex_to_bytes(MSG_HEX, msg32, 32);
 
@@ -1065,7 +1065,7 @@ static void test_frost_participant_identity_mismatch() {
                                                      ncommits_swapped, 2,
                                                      group_pub, msg32, final_sig);
         if (arc == UFSECP_OK) {
-            ufsecp_error_t vrc = ufsecp_schnorr_verify(ctx, msg32, final_sig, group_pub);
+            ufsecp_error_t vrc = ufsecp_schnorr_verify(ctx, msg32, final_sig, group_pub + 1);
             CHECK(vrc != UFSECP_OK, "sig from swapped participant IDs must not verify");
         } else {
             CHECK(true, "aggregate rejected swapped participant IDs");
@@ -1125,7 +1125,7 @@ static void test_frost_participant_identity_mismatch() {
                                                      ncommits_dup_id, 2,
                                                      group_pub, msg32, final_sig);
         if (arc == UFSECP_OK) {
-            ufsecp_error_t vrc = ufsecp_schnorr_verify(ctx, msg32, final_sig, group_pub);
+            ufsecp_error_t vrc = ufsecp_schnorr_verify(ctx, msg32, final_sig, group_pub + 1);
             CHECK(vrc != UFSECP_OK, "sig from duplicate participant IDs must not verify");
         } else {
             CHECK(true, "aggregate rejected duplicate participant IDs (division by zero)");
@@ -1178,8 +1178,8 @@ static void test_frost_stale_commitment_replay() {
                  recv_shares, recv_len,
                  threshold, n_parts, keypkgs[i]);
     }
-    uint8_t group_pub[32];
-    std::memcpy(group_pub, keypkgs[0], 32);
+    uint8_t group_pub[33];
+    std::memcpy(group_pub, keypkgs[0] + 77, 33);
     uint8_t msg32[32];
     hex_to_bytes(MSG_HEX, msg32, 32);
 
@@ -1207,7 +1207,7 @@ static void test_frost_stale_commitment_replay() {
     CHECK_OK(ufsecp_frost_aggregate(ctx, psigs_r1, 2, ncommits_r1, 2,
                                      group_pub, msg32, final_r1),
              "round 1 aggregate should succeed");
-    CHECK_OK(ufsecp_schnorr_verify(ctx, msg32, final_r1, group_pub),
+    CHECK_OK(ufsecp_schnorr_verify(ctx, msg32, final_r1, group_pub + 1),
              "round 1 signature should verify");
 
     // Round 2: NEW nonces for signer 2, but signer 1 replays round 1 stale commit
@@ -1241,7 +1241,7 @@ static void test_frost_stale_commitment_replay() {
                                                      ncommits_stale, 2,
                                                      group_pub, msg32, final_stale);
         if (arc == UFSECP_OK) {
-            ufsecp_error_t vrc = ufsecp_schnorr_verify(ctx, msg32, final_stale, group_pub);
+            ufsecp_error_t vrc = ufsecp_schnorr_verify(ctx, msg32, final_stale, group_pub + 1);
             CHECK(vrc != UFSECP_OK,
                   "sig with stale commitment replay must not verify");
         } else {
