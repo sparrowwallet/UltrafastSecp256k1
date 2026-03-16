@@ -432,7 +432,7 @@ std::pair<ExtendedKey, bool> bip32_derive_path(const ExtendedKey& master,
             has_digit = true;
         }
         if (!has_digit) return {ExtendedKey{}, false};
-        uint32_t index = static_cast<uint32_t>(index64);
+        const auto index = static_cast<uint32_t>(index64);
 
         // Check for hardened marker
         bool hardened = false;
