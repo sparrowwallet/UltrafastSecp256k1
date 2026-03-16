@@ -1050,9 +1050,13 @@ static void test_bip39_round_trip() {
     // Validate
     CHECK_OK(ufsecp_bip39_validate(ctx, mnemonic), "bip39_validate");
 
-    // Invalid mnemonic
-    CHECK(ufsecp_bip39_validate(ctx, "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon") == UFSECP_OK,
+    // Known valid 12-word mnemonic (BIP-39 test vector)
+    CHECK(ufsecp_bip39_validate(ctx, "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about") == UFSECP_OK,
           "bip39_validate accepts valid 12-word mnemonic");
+
+    // Invalid checksum variant
+    CHECK(ufsecp_bip39_validate(ctx, "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon") == UFSECP_ERR_BAD_INPUT,
+          "bip39_validate rejects invalid checksum mnemonic");
 
     // To seed
     uint8_t seed[64];

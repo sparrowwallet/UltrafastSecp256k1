@@ -513,7 +513,10 @@ static std::uint64_t cashaddr_polymod(const std::vector<std::uint8_t>& v) {
 static std::vector<std::uint8_t> cashaddr_prefix_expand(const std::string& prefix) {
     std::vector<std::uint8_t> ret;
     ret.reserve(prefix.size() + 1);
-    for (const char c : prefix) ret.push_back(static_cast<std::uint8_t>(c & 0x1f));    ret.push_back(0);
+    for (const char c : prefix) {
+        ret.push_back(static_cast<std::uint8_t>(c & 0x1f));
+    }
+    ret.push_back(0);
     return ret;
 }
 

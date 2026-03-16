@@ -133,7 +133,11 @@ Point multi_scalar_mul(const Scalar* scalars,
         // Build tables using Point-level operations (handles all edge cases)
         std::vector<Point> base_pts(n);
         for (std::size_t i = 0; i < n; ++i) {
-            base_pts[i] = glv_info[i].neg1 ? points[i].negate() : points[i];
+            if (glv_info[i].neg1) {
+                base_pts[i] = points[i].negate();
+            } else {
+                base_pts[i] = points[i];
+            }
         }
 
         // Build odd-multiple tables: [1Q, 3Q, 5Q, ..., (2T-1)Q]
