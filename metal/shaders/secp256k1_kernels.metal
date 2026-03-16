@@ -141,7 +141,7 @@ kernel void scalar_mul_batch(
     AffinePoint base = bases[tid];
     Scalar256 k = scalars[tid];
 
-    JacobianPoint jac = scalar_mul(base, k);
+    JacobianPoint jac = scalar_mul_glv(base, k);
     results[tid] = jacobian_to_affine(jac);
 }
 
