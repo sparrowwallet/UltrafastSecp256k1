@@ -100,7 +100,7 @@ struct AES256 {
 
         for (int i = 8; i < 60; ++i) {
             std::uint8_t tmp[4];
-            std::memcpy(tmp, W + (i - 1) * 4, 4);
+            std::memcpy(tmp, W + static_cast<std::size_t>(i - 1) * 4, 4);
 
             if (i % 8 == 0) {
                 std::uint8_t const t = tmp[0];
@@ -112,12 +112,14 @@ struct AES256 {
                 for (int j = 0; j < 4; ++j) tmp[j] = SBOX[tmp[j]];
             }
 
-            for (int j = 0; j < 4; ++j)
+            for (int j = 0; j < 4; ++j) {
                 W[i * 4 + j] = W[(i - 8) * 4 + j] ^ tmp[j];
+            }
         }
 
-        for (int r = 0; r < 15; ++r)
-            std::memcpy(round_keys[r], W + r * 16, 16);
+        for (int r = 0; r < 15; ++r) {
+            std::memcpy(round_keys[r], W + static_cast<std::size_t>(r) * 16, 16);
+        }
 
         secp256k1::detail::secure_erase(W, sizeof(W));
     }
@@ -135,7 +137,7 @@ struct AES256 {
             for (int i = 0; i < 16; ++i) state[i] = SBOX[state[i]];
 
             // ShiftRows
-            std::uint8_t t;
+            std::uint8_t t = 0;
             t = state[1]; state[1] = state[5]; state[5] = state[9];
             state[9] = state[13]; state[13] = t;
             t = state[2]; state[2] = state[10]; state[10] = t;
@@ -184,8 +186,9 @@ void aes256_ctr(const std::uint8_t key[32],
         aes.encrypt_block(counter, keystream);
 
         std::size_t const chunk = (len - pos < 16) ? (len - pos) : 16;
-        for (std::size_t i = 0; i < chunk; ++i)
+        for (std::size_t i = 0; i < chunk; ++i) {
             output[pos + i] = input[pos + i] ^ keystream[i];
+        }
 
         pos += chunk;
 
@@ -340,8 +343,9 @@ std::vector<std::uint8_t>
 ecies_decrypt(const Scalar& privkey,
               const std::uint8_t* envelope, std::size_t envelope_len) {
     // Minimum envelope: 33 (pubkey) + 16 (IV) + 1 (ciphertext) + 32 (HMAC) = 82
-    if (privkey.is_zero() || !envelope || envelope_len < 82)
+    if (privkey.is_zero() || !envelope || envelope_len < 82) {
         return {};
+    }
 
     std::size_t const ciphertext_len = envelope_len - 33 - 16 - 32;
 
@@ -372,8 +376,9 @@ ecies_decrypt(const Scalar& privkey,
 
     // Constant-time compare
     std::uint8_t diff = 0;
-    for (std::size_t i = 0; i < 32; ++i)
+    for (std::size_t i = 0; i < 32; ++i) {
         diff = static_cast<std::uint8_t>(diff | (expected_tag[i] ^ tag[i]));
+    }
     if (diff != 0) {
         secp256k1::detail::secure_erase(kdf.data(), 64);
         return {}; // Authentication failed

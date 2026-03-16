@@ -2529,7 +2529,7 @@ static void test_ffi_overlapping_buffers() {
 
     // Now use overlapping: input at overlap_buf, output at overlap_buf
     // The function should either work correctly or reject -- not crash
-    ufsecp_error_t rc = ufsecp_pubkey_create(ctx, overlap_buf, overlap_buf);
+    const ufsecp_error_t rc = ufsecp_pubkey_create(ctx, overlap_buf, overlap_buf);
     if (rc == UFSECP_OK) {
         // If it "worked", check result is valid (may or may not match reference
         // since input was overwritten partway through)

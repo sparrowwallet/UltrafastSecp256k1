@@ -153,10 +153,10 @@ static void test_ecies_truncated_envelope(ufsecp_ctx* ctx) {
     for (size_t sz : truncated_sizes) {
         size_t pt_len = 256;
         uint8_t pt_out[256];
-        ufsecp_error_t err = ufsecp_ecies_decrypt(ctx, TEST_PRIVKEY,
+        const ufsecp_error_t err = ufsecp_ecies_decrypt(ctx, TEST_PRIVKEY,
             junk, sz, pt_out, &pt_len);
         char msg[64];
-        std::snprintf(msg, sizeof(msg), "truncated len=%zu -> fails cleanly", sz);
+        (void)std::snprintf(msg, sizeof(msg), "truncated len=%zu -> fails cleanly", sz);
         CHECK(err != UFSECP_OK, msg);
     }
 }
@@ -185,15 +185,16 @@ static void test_ecies_tamper_matrix(ufsecp_ctx* ctx) {
 
     for (auto& f : fields) {
         auto tampered = envelope;
-        if (f.offset < tampered.size())
+        if (f.offset < tampered.size()) {
             tampered[f.offset] ^= 0x01; // flip one bit
+        }
 
         size_t pt_len = ct_len;
         std::vector<uint8_t> pt_out(pt_len);
-        ufsecp_error_t err = ufsecp_ecies_decrypt(ctx, TEST_PRIVKEY,
+        const ufsecp_error_t err = ufsecp_ecies_decrypt(ctx, TEST_PRIVKEY,
             tampered.data(), tampered.size(), pt_out.data(), &pt_len);
         char msg[80];
-        std::snprintf(msg, sizeof(msg), "tamper %s -> decrypt fails", f.name);
+        (void)std::snprintf(msg, sizeof(msg), "tamper %s -> decrypt fails", f.name);
         CHECK(err != UFSECP_OK, msg);
     }
 }
@@ -215,7 +216,7 @@ static void test_ecies_roundtrip_kat(ufsecp_ctx* ctx) {
     };
 
     for (const char* pt_str : test_vectors) {
-        size_t pt_len = std::strlen(pt_str);
+        const size_t pt_len = std::strlen(pt_str);
         size_t env_len = pt_len + UFSECP_ECIES_OVERHEAD;
         std::vector<uint8_t> envelope(env_len);
 
@@ -259,7 +260,7 @@ static void test_abi_prefix_rejection(ufsecp_ctx* ctx) {
     uint8_t good_pubkey33[33];
     get_pubkey(ctx, TEST_PRIVKEY, good_pubkey33);
 
-    for (uint8_t prefix : bad_prefixes) {
+    for (const uint8_t prefix : bad_prefixes) {
         uint8_t bad_pk[33];
         std::memcpy(bad_pk, good_pubkey33, 33);
         bad_pk[0] = prefix;
@@ -269,8 +270,8 @@ static void test_abi_prefix_rejection(ufsecp_ctx* ctx) {
         // F1: ufsecp_ecdh
         {
             uint8_t secret[32];
-            ufsecp_error_t err = ufsecp_ecdh(ctx, TEST_PRIVKEY2, bad_pk, secret);
-            std::snprintf(msg, sizeof(msg), "ecdh rejects prefix 0x%02X", prefix);
+            const ufsecp_error_t err = ufsecp_ecdh(ctx, TEST_PRIVKEY2, bad_pk, secret);
+            (void)std::snprintf(msg, sizeof(msg), "ecdh rejects prefix 0x%02X", prefix);
             CHECK(err == UFSECP_ERR_BAD_PUBKEY, msg);
         }
 
@@ -279,33 +280,33 @@ static void test_abi_prefix_rejection(ufsecp_ctx* ctx) {
             uint8_t pt[] = "test";
             size_t env_len = sizeof(pt) - 1 + UFSECP_ECIES_OVERHEAD;
             std::vector<uint8_t> env(env_len);
-            ufsecp_error_t err = ufsecp_ecies_encrypt(ctx, bad_pk, pt, sizeof(pt)-1,
+            const ufsecp_error_t err = ufsecp_ecies_encrypt(ctx, bad_pk, pt, sizeof(pt)-1,
                                                        env.data(), &env_len);
-            std::snprintf(msg, sizeof(msg), "ecies_encrypt rejects prefix 0x%02X", prefix);
+            (void)std::snprintf(msg, sizeof(msg), "ecies_encrypt rejects prefix 0x%02X", prefix);
             CHECK(err == UFSECP_ERR_BAD_PUBKEY, msg);
         }
 
         // F3: ufsecp_pubkey_parse (should reject or produce different error)
         {
             uint8_t parsed[33];
-            ufsecp_error_t err = ufsecp_pubkey_parse(ctx, bad_pk, 33, parsed);
-            std::snprintf(msg, sizeof(msg), "pubkey_parse rejects prefix 0x%02X", prefix);
+            const ufsecp_error_t err = ufsecp_pubkey_parse(ctx, bad_pk, 33, parsed);
+            (void)std::snprintf(msg, sizeof(msg), "pubkey_parse rejects prefix 0x%02X", prefix);
             CHECK(err != UFSECP_OK, msg);
         }
 
         // F4: ufsecp_ecdh_xonly
         {
             uint8_t secret[32];
-            ufsecp_error_t err = ufsecp_ecdh_xonly(ctx, TEST_PRIVKEY2, bad_pk, secret);
-            std::snprintf(msg, sizeof(msg), "ecdh_xonly rejects prefix 0x%02X", prefix);
+            const ufsecp_error_t err = ufsecp_ecdh_xonly(ctx, TEST_PRIVKEY2, bad_pk, secret);
+            (void)std::snprintf(msg, sizeof(msg), "ecdh_xonly rejects prefix 0x%02X", prefix);
             CHECK(err == UFSECP_ERR_BAD_PUBKEY, msg);
         }
 
         // F5: ufsecp_ecdh_raw
         {
             uint8_t secret[32];
-            ufsecp_error_t err = ufsecp_ecdh_raw(ctx, TEST_PRIVKEY2, bad_pk, secret);
-            std::snprintf(msg, sizeof(msg), "ecdh_raw rejects prefix 0x%02X", prefix);
+            const ufsecp_error_t err = ufsecp_ecdh_raw(ctx, TEST_PRIVKEY2, bad_pk, secret);
+            (void)std::snprintf(msg, sizeof(msg), "ecdh_raw rejects prefix 0x%02X", prefix);
             CHECK(err == UFSECP_ERR_BAD_PUBKEY, msg);
         }
     }
@@ -351,32 +352,32 @@ static void test_pubkey_parser_consistency(ufsecp_ctx* ctx) {
 
         // All endpoints must reject consistently
         uint8_t parsed[33];
-        ufsecp_error_t e_parse = ufsecp_pubkey_parse(ctx, bk, 33, parsed);
+        const ufsecp_error_t e_parse = ufsecp_pubkey_parse(ctx, bk, 33, parsed);
 
         uint8_t secret[32];
-        ufsecp_error_t e_ecdh = ufsecp_ecdh(ctx, TEST_PRIVKEY, bk, secret);
+        const ufsecp_error_t e_ecdh = ufsecp_ecdh(ctx, TEST_PRIVKEY, bk, secret);
 
         uint8_t pt[] = "x";
         size_t env_len = 1 + UFSECP_ECIES_OVERHEAD;
         std::vector<uint8_t> env(env_len);
-        ufsecp_error_t e_ecies = ufsecp_ecies_encrypt(ctx, bk, pt, 1,
+        const ufsecp_error_t e_ecies = ufsecp_ecies_encrypt(ctx, bk, pt, 1,
                                                        env.data(), &env_len);
 
         // All must fail (none should be UFSECP_OK)
-        std::snprintf(msg, sizeof(msg), "%s: pubkey_parse fails", names[i]);
+        (void)std::snprintf(msg, sizeof(msg), "%s: pubkey_parse fails", names[i]);
         CHECK(e_parse != UFSECP_OK, msg);
 
-        std::snprintf(msg, sizeof(msg), "%s: ecdh fails", names[i]);
+        (void)std::snprintf(msg, sizeof(msg), "%s: ecdh fails", names[i]);
         CHECK(e_ecdh != UFSECP_OK, msg);
 
-        std::snprintf(msg, sizeof(msg), "%s: ecies_encrypt fails", names[i]);
+        (void)std::snprintf(msg, sizeof(msg), "%s: ecies_encrypt fails", names[i]);
         CHECK(e_ecies != UFSECP_OK, msg);
 
         // Consistency: all should return same error category (BAD_PUBKEY)
-        std::snprintf(msg, sizeof(msg), "%s: ecdh returns BAD_PUBKEY", names[i]);
+        (void)std::snprintf(msg, sizeof(msg), "%s: ecdh returns BAD_PUBKEY", names[i]);
         CHECK(e_ecdh == UFSECP_ERR_BAD_PUBKEY, msg);
 
-        std::snprintf(msg, sizeof(msg), "%s: ecies returns BAD_PUBKEY", names[i]);
+        (void)std::snprintf(msg, sizeof(msg), "%s: ecies returns BAD_PUBKEY", names[i]);
         CHECK(e_ecies == UFSECP_ERR_BAD_PUBKEY, msg);
     }
 }
@@ -392,7 +393,7 @@ static void test_rng_fail_closed(ufsecp_ctx* ctx) {
     uint8_t pubkey33[33];
     get_pubkey(ctx, TEST_PRIVKEY, pubkey33);
 
-    pid_t pid = fork();
+    const pid_t pid = fork();
     if (pid == 0) {
         // Child: install seccomp-bpf filter that makes getrandom return ENOSYS
         struct sock_filter filter[] = {
@@ -466,7 +467,7 @@ int test_ecies_regression_run() {
 
 #ifdef STANDALONE_ECIES_REGRESSION
 int main() {
-    int fails = test_ecies_regression_run();
+    const int fails = test_ecies_regression_run();
     return fails ? 1 : 0;
 }
 #endif
