@@ -29,6 +29,8 @@ using fast::FieldElement;
 
 namespace {
 
+constexpr std::size_t kSchnorrBatchIndividualCutoff = 96;
+
 // Generate deterministic weights for batch verification.
 // batch_seed: SHA256 over all signature data (binds to entire batch).
 // Returns a_i = SHA256(batch_seed || i) interpreted as scalar.
@@ -135,7 +137,7 @@ bool schnorr_batch_verify_impl(const Entry* entries, std::size_t n,
     // still wins through moderate batch sizes on this CPU. Past that point,
     // the randomized MSM path becomes competitive enough to justify the extra
     // setup work.
-    if (n <= 128) {
+    if (n <= kSchnorrBatchIndividualCutoff) {
         for (std::size_t i = 0; i < n; ++i) {
             if (!verify_one(entries[i])) {
                 return false;
