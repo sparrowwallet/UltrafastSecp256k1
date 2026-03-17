@@ -104,19 +104,14 @@ std::pair<bool, Point> lift_x(const std::array<uint8_t, 32>& pubkey_x) {
 #endif
 }
 
-} // anonymous namespace
-
-// -- Schnorr Batch Verification -----------------------------------------------
-// Equation: sum(a_i * s_i) * G = sum(a_i * R_i) + sum(a_i * e_i * P_i)
-// Rearranged: sum(a_i * s_i) * G - sum(a_i * e_i) * P_i - sum(a_i) * R_i = O
-// We verify: (sum(a_i * s_i)) * G + sum(-a_i * e_i * P_i) + sum(-a_i * R_i) = infinity
-
-bool schnorr_batch_verify(const SchnorrBatchEntry* entries, std::size_t n) {
+template <typename Entry, typename VerifyOneFn, typename ResolvePubkeyFn,
+          typename PubkeyBytesFn>
+bool schnorr_batch_verify_impl(const Entry* entries, std::size_t n,
+                               VerifyOneFn&& verify_one,
+                               ResolvePubkeyFn&& resolve_pubkey,
+                               PubkeyBytesFn&& pubkey_bytes) {
     if (n == 0) return true;
-    if (n == 1) {
-        return schnorr_verify(entries[0].pubkey_x, entries[0].message,
-                              entries[0].signature);
-    }
+    if (n == 1) return verify_one(entries[0]);
 
     // ---- Small-batch fast path: individual verification ----
     // For small N, individual schnorr_verify uses the highly-optimized
@@ -126,8 +121,7 @@ bool schnorr_batch_verify(const SchnorrBatchEntry* entries, std::size_t n) {
     // setup work.
     if (n <= 128) {
         for (std::size_t i = 0; i < n; ++i) {
-            if (!schnorr_verify(entries[i].pubkey_x, entries[i].message,
-                                entries[i].signature)) {
+            if (!verify_one(entries[i])) {
                 return false;
             }
         }
@@ -138,65 +132,41 @@ bool schnorr_batch_verify(const SchnorrBatchEntry* entries, std::size_t n) {
     // Compute batch seed = SHA256(all signature data)
     SHA256 seed_ctx;
     for (std::size_t i = 0; i < n; ++i) {
+        auto const* const pubkey_x = pubkey_bytes(entries[i]);
+        if (pubkey_x == nullptr) return false;
+
         seed_ctx.update(entries[i].signature.r.data(), 32);
         auto s_bytes = entries[i].signature.s.to_bytes();
         seed_ctx.update(s_bytes.data(), 32);
-        seed_ctx.update(entries[i].pubkey_x.data(), 32);
+        seed_ctx.update(pubkey_x->data(), 32);
         seed_ctx.update(entries[i].message.data(), 32);
     }
     auto batch_seed = seed_ctx.finalize();
 
-    // Collect: scalars and points for multi_scalar_mul (non-generator only)
-    // Layout: [P_0, ..., P_{n-1}, R_0, ..., R_{n-1}]
-    // Scalars: [-a_0*e_0, ..., -a_{n-1}*e_{n-1}, -a_0, ..., -a_{n-1}]
     std::vector<Scalar> scalars(2 * n);
     std::vector<Point> points(2 * n);
-    std::vector<SchnorrXonlyPubkey> pubkey_cache;
-    pubkey_cache.reserve((n < 64) ? n : 64);
 
-    // G coefficient: sum(a_i * s_i)
     Scalar g_coeff = Scalar::zero();
 
-    // Build the non-generator MSM inputs in one pass to avoid extra vectors
-    // and the second/third fill passes for weights/challenges/lifted points.
     for (std::size_t i = 0; i < n; ++i) {
         Scalar const weight = batch_weight(batch_seed, static_cast<uint32_t>(i));
 
-        // Lift R from x-only
         auto [r_ok, R_pt] = lift_x(entries[i].signature.r);
-        if (!r_ok) return false; // invalid R, batch fails
+        if (!r_ok) return false;
 
-        // Pubkeys often repeat across large batches. Cache lifted x-only
-        // pubkeys within the batch so duplicate keys don't re-run sqrt.
         Point P_pt = Point::infinity();
-        bool p_ok = false;
-        for (const auto& cached : pubkey_cache) {
-            if (cached.x_bytes == entries[i].pubkey_x) {
-                P_pt = cached.point;
-                p_ok = true;
-                break;
-            }
-        }
-        if (!p_ok) {
-            SchnorrXonlyPubkey parsed;
-            if (!schnorr_xonly_pubkey_parse(parsed, entries[i].pubkey_x)) {
-                return false;
-            }
-            P_pt = parsed.point;
-            pubkey_cache.push_back(parsed);
-        }
+        if (!resolve_pubkey(entries[i], P_pt)) return false;
 
-        // e_i = tagged_hash("BIP0340/challenge", R.x || pubkey_x || msg)
-        // Uses precomputed midstate and streams directly from source buffers,
-        // avoiding the temporary 96-byte memcpy bundle per signature.
+        auto const* const pubkey_x = pubkey_bytes(entries[i]);
+        if (pubkey_x == nullptr) return false;
+
         SHA256 challenge_ctx = detail::g_challenge_midstate;
         challenge_ctx.update(entries[i].signature.r.data(), 32);
-        challenge_ctx.update(entries[i].pubkey_x.data(), 32);
+        challenge_ctx.update(pubkey_x->data(), 32);
         challenge_ctx.update(entries[i].message.data(), 32);
         auto e_hash = challenge_ctx.finalize();
         Scalar const challenge = Scalar::from_bytes(e_hash);
 
-        // Accumulate G coefficient: sum(a_i * s_i)
         g_coeff += weight * entries[i].signature.s;
 
         scalars[i] = (weight * challenge).negate();
@@ -205,28 +175,91 @@ bool schnorr_batch_verify(const SchnorrBatchEntry* entries, std::size_t n) {
         points[n + i] = R_pt;
     }
 
-    // ---- Optimization: separate G coefficient from MSM ----
-    // G has a precomputed comb table (~6us via scalar_mul), while generic
-    // points cost ~25us each in MSM.  By computing g_coeff*G separately
-    // we avoid treating the generator as a generic point, gaining ~19us
-    // and keeping the remaining 2*n points in the MSM range for Strauss.
-
-    // Step 1: g_coeff * G  (uses precomputed comb table -- fast path)
     auto G_term = Point::generator().scalar_mul(g_coeff);
-
-    // Step 2: Build MSM for non-generator points only (2*n points)
-    //   scalars: [-a_0*e_0, ..., -a_{n-1}*e_{n-1}, -a_0, ..., -a_{n-1}]
-    //   points:  [P_0, ..., P_{n-1}, R_0, ..., R_{n-1}]
-    // Step 3: Compute MSM for P_i and R_i terms
-    // msm() auto-selects Strauss (n<=128) or Pippenger (n>128)
     auto rest = msm(scalars, points);
-
-    // Step 4: Verify g_coeff*G + rest = infinity
     auto result = G_term.add(rest);
     return result.is_infinity();
 }
 
+template <typename Entry, typename VerifyOneFn>
+std::vector<std::size_t> schnorr_batch_identify_invalid_impl(
+    const Entry* entries, std::size_t n, VerifyOneFn&& verify_one) {
+    std::vector<std::size_t> invalid;
+    for (std::size_t i = 0; i < n; ++i) {
+        if (!verify_one(entries[i])) {
+            invalid.push_back(i);
+        }
+    }
+    return invalid;
+}
+
+} // anonymous namespace
+
+// -- Schnorr Batch Verification -----------------------------------------------
+// Equation: sum(a_i * s_i) * G = sum(a_i * R_i) + sum(a_i * e_i * P_i)
+// Rearranged: sum(a_i * s_i) * G - sum(a_i * e_i) * P_i - sum(a_i) * R_i = O
+// We verify: (sum(a_i * s_i)) * G + sum(-a_i * e_i * P_i) + sum(-a_i * R_i) = infinity
+
+bool schnorr_batch_verify(const SchnorrBatchEntry* entries, std::size_t n) {
+    std::vector<SchnorrXonlyPubkey> pubkey_cache;
+    pubkey_cache.reserve((n < 64) ? n : 64);
+
+    auto verify_one = [](const SchnorrBatchEntry& entry) {
+        return schnorr_verify(entry.pubkey_x, entry.message, entry.signature);
+    };
+    auto resolve_pubkey = [&pubkey_cache](const SchnorrBatchEntry& entry,
+                                          Point& out_point) {
+        for (const auto& cached : pubkey_cache) {
+            if (cached.x_bytes == entry.pubkey_x) {
+                out_point = cached.point;
+                return true;
+            }
+        }
+
+        SchnorrXonlyPubkey parsed;
+        if (!schnorr_xonly_pubkey_parse(parsed, entry.pubkey_x)) {
+            return false;
+        }
+        out_point = parsed.point;
+        pubkey_cache.push_back(parsed);
+        return true;
+    };
+    auto pubkey_bytes = [](const SchnorrBatchEntry& entry)
+        -> const std::array<uint8_t, 32>* {
+        return &entry.pubkey_x;
+    };
+
+    return schnorr_batch_verify_impl(entries, n, verify_one, resolve_pubkey,
+                                     pubkey_bytes);
+}
+
 bool schnorr_batch_verify(const std::vector<SchnorrBatchEntry>& entries) {
+    return schnorr_batch_verify(entries.data(), entries.size());
+}
+
+bool schnorr_batch_verify(const SchnorrBatchCachedEntry* entries, std::size_t n) {
+    auto verify_one = [](const SchnorrBatchCachedEntry& entry) {
+        return entry.pubkey != nullptr &&
+               schnorr_verify(*entry.pubkey, entry.message, entry.signature);
+    };
+    auto resolve_pubkey = [](const SchnorrBatchCachedEntry& entry,
+                             Point& out_point) {
+        if (entry.pubkey == nullptr) {
+            return false;
+        }
+        out_point = entry.pubkey->point;
+        return true;
+    };
+    auto pubkey_bytes = [](const SchnorrBatchCachedEntry& entry)
+        -> const std::array<uint8_t, 32>* {
+        return (entry.pubkey == nullptr) ? nullptr : &entry.pubkey->x_bytes;
+    };
+
+    return schnorr_batch_verify_impl(entries, n, verify_one, resolve_pubkey,
+                                     pubkey_bytes);
+}
+
+bool schnorr_batch_verify(const std::vector<SchnorrBatchCachedEntry>& entries) {
     return schnorr_batch_verify(entries.data(), entries.size());
 }
 
@@ -367,14 +400,21 @@ bool ecdsa_batch_verify(const std::vector<ECDSABatchEntry>& entries) {
 
 std::vector<std::size_t> schnorr_batch_identify_invalid(
     const SchnorrBatchEntry* entries, std::size_t n) {
-    std::vector<std::size_t> invalid;
-    for (std::size_t i = 0; i < n; ++i) {
-        if (!schnorr_verify(entries[i].pubkey_x, entries[i].message,
-                            entries[i].signature)) {
-            invalid.push_back(i);
-        }
-    }
-    return invalid;
+    return schnorr_batch_identify_invalid_impl(
+        entries, n, [](const SchnorrBatchEntry& entry) {
+            return schnorr_verify(entry.pubkey_x, entry.message,
+                                  entry.signature);
+        });
+}
+
+std::vector<std::size_t> schnorr_batch_identify_invalid(
+    const SchnorrBatchCachedEntry* entries, std::size_t n) {
+    return schnorr_batch_identify_invalid_impl(
+        entries, n, [](const SchnorrBatchCachedEntry& entry) {
+            return entry.pubkey != nullptr &&
+                   schnorr_verify(*entry.pubkey, entry.message,
+                                  entry.signature);
+        });
 }
 
 std::vector<std::size_t> ecdsa_batch_identify_invalid(

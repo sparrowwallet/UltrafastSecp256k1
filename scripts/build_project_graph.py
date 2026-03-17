@@ -1047,8 +1047,28 @@ def populate_edges(cur: sqlite3.Cursor):
         'field_52': ['cpu/src/field_52.cpp', 'cpu/src/field.cpp'],
         'field_26': ['cpu/src/field_26.cpp'],
         'selftest': ['cpu/src/selftest.cpp'],
-        'comprehensive': ['cpu/src/ecdsa.cpp', 'cpu/src/schnorr.cpp', 'cpu/src/point.cpp'],
-        'exhaustive': ['cpu/src/field.cpp', 'cpu/src/scalar.cpp', 'cpu/src/point.cpp'],
+        'comprehensive': [
+            'cpu/src/ecdsa.cpp',
+            'cpu/src/schnorr.cpp',
+            'cpu/src/point.cpp',
+            'cpu/src/glv.cpp',
+            'cpu/src/batch_verify.cpp',
+            'cpu/src/multiscalar.cpp',
+            'cpu/src/pippenger.cpp',
+            'cpu/src/ecmult_gen_comb.cpp',
+            'cpu/src/precompute.cpp',
+            'cpu/src/recovery.cpp',
+            'cpu/src/field_asm.cpp',
+            'cpu/src/field_asm_arm64.cpp',
+            'cpu/src/field_asm_riscv64.cpp',
+        ],
+        'exhaustive': [
+            'cpu/src/field.cpp',
+            'cpu/src/scalar.cpp',
+            'cpu/src/point.cpp',
+            'cpu/src/pippenger.cpp',
+            'cpu/src/ecmult_gen_comb.cpp',
+        ],
         'bip340_vectors': ['cpu/src/schnorr.cpp'],
         'bip340_strict': ['cpu/src/schnorr.cpp'],
         'bip32_vectors': ['cpu/src/bip32.cpp'],
@@ -1057,7 +1077,7 @@ def populate_edges(cur: sqlite3.Cursor):
         'ecc_properties': ['cpu/src/point.cpp', 'cpu/src/scalar.cpp'],
         'ethereum': ['cpu/src/ethereum.cpp', 'cpu/src/eth_signing.cpp', 'cpu/src/keccak256.cpp'],
         'zk_proofs': ['cpu/src/zk.cpp', 'cpu/src/pedersen.cpp'],
-        'wallet': ['cpu/src/wallet.cpp', 'cpu/src/coin_address.cpp'],
+        'wallet': ['cpu/src/wallet.cpp', 'cpu/src/coin_address.cpp', 'cpu/src/message_signing.cpp'],
         'ct_equivalence': ['cpu/src/ct_field.cpp', 'cpu/src/ct_scalar.cpp', 'cpu/src/ct_point.cpp', 'cpu/src/ct_sign.cpp'],
         'ct_sidechannel': ['cpu/src/ct_sign.cpp', 'cpu/src/ct_point.cpp'],
         'adversarial_protocol': ['cpu/src/musig2.cpp', 'cpu/src/frost.cpp', 'cpu/src/adaptor.cpp', 'cpu/src/ecdsa.cpp'],
@@ -1068,6 +1088,8 @@ def populate_edges(cur: sqlite3.Cursor):
         'wycheproof_ecdh': ['cpu/src/ecdh.cpp'],
         'fault_injection': ['cpu/src/ecdsa.cpp', 'cpu/src/schnorr.cpp'],
         'batch_add_affine': ['cpu/src/batch_add_affine.cpp'],
+        'hash_accel': ['cpu/src/hash_accel.cpp'],
+        'edge_cases': ['cpu/src/precompute.cpp'],
     }
     for test, files in test_coverage.items():
         for f in files:
@@ -1075,6 +1097,24 @@ def populate_edges(cur: sqlite3.Cursor):
                 (src_type, src_id, dst_type, dst_id, relation)
                 VALUES (?,?,?,?,?)""",
                 ('test_target', test, 'source_file', f, 'covers'))
+            count += 1
+
+    # Unified-audit module -> source file coverage edges.
+    # These are real executed modules inside unified_audit_runner, even when
+    # they are not individual CTest entries.
+    audit_coverage = {
+        'multiscalar': ['cpu/src/multiscalar.cpp', 'cpu/src/batch_verify.cpp'],
+        'ecdh_recovery': ['cpu/src/recovery.cpp', 'cpu/src/taproot.cpp'],
+        'v4_features': ['cpu/src/address.cpp'],
+        'coins': ['cpu/src/coin_hd.cpp', 'cpu/src/address.cpp', 'cpu/src/taproot.cpp'],
+        'ethereum': ['cpu/src/address.cpp'],
+    }
+    for module, files in audit_coverage.items():
+        for f in files:
+            cur.execute("""INSERT OR IGNORE INTO edges
+                (src_type, src_id, dst_type, dst_id, relation)
+                VALUES (?,?,?,?,?)""",
+                ('audit_module', module, 'source_file', f, 'covers'))
             count += 1
     
     # C ABI -> source implementation edges

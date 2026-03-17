@@ -21,6 +21,7 @@ namespace secp256k1::fast {
 namespace {
 
 constexpr std::size_t kSmallPrecomputeTable = 64;
+constexpr std::size_t kSmallBatchAddScratch = 64;
 
 struct PrecomputeBuffers {
     std::array<FieldElement, kSmallPrecomputeTable> jac_x_stack{};
@@ -49,6 +50,39 @@ struct PrecomputeBuffers {
     }
 };
 
+void batch_add_affine_x_impl(
+    const FieldElement& base_x,
+    const FieldElement& base_y,
+    const AffinePointCompact* offsets,
+    FieldElement* out_x,
+    std::size_t count,
+    FieldElement* scratch)
+{
+    const FieldElement zero = FieldElement::zero();
+
+    for (std::size_t i = 0; i < count; ++i) {
+        FieldElement const dx = offsets[i].x - base_x;
+        bool const is_zero = (dx == zero);
+        scratch[i] = is_zero ? FieldElement::one() : dx;
+    }
+
+    fe_batch_inverse(scratch, count);
+
+    for (std::size_t i = 0; i < count; ++i) {
+        FieldElement const dx_original = offsets[i].x - base_x;
+        if (dx_original == zero) {
+            out_x[i] = zero;
+            continue;
+        }
+
+        FieldElement const dy = offsets[i].y - base_y;
+        FieldElement const lambda = dy * scratch[i];
+        FieldElement lambda_sq = lambda;
+        lambda_sq.square_inplace();
+        out_x[i] = lambda_sq - base_x - offsets[i].x;
+    }
+}
+
 } // namespace
 
 // ============================================================================
@@ -65,45 +99,12 @@ void batch_add_affine_x(
 {
     if (count == 0) return;
 
-    // scratch is used for dx values -> then inverted in-place
     if (scratch.size() < count) {
         scratch.resize(count);
     }
 
-    const FieldElement zero = FieldElement::zero();
-
-    // Phase 1: Compute dx[i] = x_T[i] - x_base
-    //          Replace any zeros with ONE to avoid corrupting batch inverse chain.
-    //          Zero dx means P == +/-T[i] (astronomically rare in search; ~2^{-128}).
-    for (std::size_t i = 0; i < count; ++i) {
-        FieldElement const dx = offsets[i].x - base_x;
-        // Branchless: if dx==0, substitute ONE so batch inverse stays valid.
-        // We detect and sentinel the output in Phase 3.
-        bool const is_zero = (dx == zero);
-        scratch[i] = is_zero ? FieldElement::one() : dx;
-    }
-
-    // Phase 2: Montgomery batch inversion on dx values
-    // Cost: 3*(N-1) multiplications + 1 inversion
-    fe_batch_inverse(scratch.data(), count);
-
-    // Phase 3: Compute affine addition for each offset
-    // lambda[i] = (y_T[i] - y_base) * dx_inv[i]
-    // x3[i] = lambda^2 - x_base - x_T[i]
-    for (std::size_t i = 0; i < count; ++i) {
-        // Handle degenerate case: original dx was zero (P == T[i] or P == -T[i])
-        FieldElement const dx_original = offsets[i].x - base_x;
-        if (dx_original == zero) {
-            out_x[i] = zero;  // Sentinel: never a valid curve X
-            continue;
-        }
-
-        FieldElement const dy = offsets[i].y - base_y;      // dy = y_T - y_base
-        FieldElement const lambda = dy * scratch[i];         // lambda = dy / dx  [1M]
-        FieldElement lambda_sq = lambda;
-        lambda_sq.square_inplace();                    // lambda^2            [1S]
-        out_x[i] = lambda_sq - base_x - offsets[i].x; // x3 = lambda^2 - x_P - x_T
-    }
+    batch_add_affine_x_impl(base_x, base_y, offsets, out_x, count,
+                            scratch.data());
 }
 
 // ============================================================================
@@ -169,8 +170,18 @@ void batch_add_affine_x(
     FieldElement* out_x,
     std::size_t count)
 {
+    if (count == 0) return;
+
+    if (count <= kSmallBatchAddScratch) {
+        std::array<FieldElement, kSmallBatchAddScratch> scratch{};
+        batch_add_affine_x_impl(base_x, base_y, offsets, out_x, count,
+                                scratch.data());
+        return;
+    }
+
     std::vector<FieldElement> scratch(count);
-    batch_add_affine_x(base_x, base_y, offsets, out_x, count, scratch);
+    batch_add_affine_x_impl(base_x, base_y, offsets, out_x, count,
+                            scratch.data());
 }
 
 // ============================================================================
