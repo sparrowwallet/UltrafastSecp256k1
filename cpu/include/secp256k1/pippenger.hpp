@@ -9,7 +9,7 @@
 // Computes: R = s_1*P_1 + s_2*P_2 + ... + s_n*P_n
 //
 // Algorithm (bucket method, a.k.a. Pippenger):
-//   1. Choose window width c = floor(log2(n)) (adaptive).
+//   1. Choose window width c from an empirically tuned CPU heuristic.
 //   2. Represent each scalar s in base-2^c digits.
 //   3. For each digit position j (from MSB to LSB):
 //      a. Scatter: place P into bucket[digit_j(s)] for all i.
@@ -18,11 +18,11 @@
 //      c. Combine: R = R*2^c + Sum
 //
 // Complexity: O(n/c + 2^c + 256*dbl) vs Strauss O(256 + n*2^(w-1))
-// Crossover: Pippenger wins for n > ~128 (verified empirically).
+// Current CPU crossover: Pippenger wins around n ~= 48.
 //
 // This implementation:
 //   - Pre-allocates all buckets in a single flat array (no heap per iteration)
-//   - Supports signed digits (2NAF-style) for halved bucket count
+//   - Uses predecoded digits and bucket reuse on the optimized CPU path
 //   - Falls back to Strauss for small n
 //
 // Reference: Bernstein, Doumen, Lange, Oosterwijk (2012),
@@ -46,7 +46,7 @@ namespace secp256k1 {
 //   points   - array of n points
 //   n        - number of scalar-point pairs
 //
-// Performance: O(n/c + 2^c) per window, c ~= log2(n).
+// Performance: O(n/c + 2^c) per window, with c chosen from measured bands.
 //   n=256:   ~4x faster than Strauss
 //   n=1024:  ~8x faster than Strauss
 //   n=4096:  ~12x faster than Strauss
@@ -61,11 +61,11 @@ fast::Point pippenger_msm(const std::vector<fast::Scalar>& scalars,
 
 // -- Optimal Window Width -----------------------------------------------------
 // Returns the optimal bucket window width c for n points.
-// Minimizes: floor(256/c) * (n + 2^c) total point operations.
+// Uses measured CPU bands, not just the textbook floor(log2(n)) heuristic.
 unsigned pippenger_optimal_window(std::size_t n);
 
 // -- Unified MSM (auto-selects best algorithm) --------------------------------
-// Automatically picks Strauss (n <= 128) or Pippenger (n > 128).
+// Automatically picks Strauss for very small MSMs and Pippenger from n >= 48.
 fast::Point msm(const fast::Scalar* scalars,
                 const fast::Point* points,
                 std::size_t n);

@@ -22,6 +22,7 @@
 #include "secp256k1/ct/ops.hpp"
 #include "secp256k1/ct_utils.hpp"
 #include "secp256k1/sanitizer_scale.hpp"
+#include "secp256k1/coins/wallet.hpp"
 
 using namespace secp256k1::fast;
 
@@ -93,6 +94,53 @@ static void test_zero_key_handling() {
             threw = true;
         }
         CHECK(threw || true, "fe_inv(0) either throws or returns 0");
+    }
+
+    printf("    %d checks\n\n", g_pass);
+}
+
+static void test_wallet_private_key_strictness() {
+    g_section = "wallet_strict";
+    printf("[1b] Wallet private key strictness\n");
+
+    using secp256k1::coins::wallet::from_private_key;
+
+    static constexpr std::array<uint8_t, 32> ORDER_N = {
+        0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,
+        0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFE,
+        0xBA,0xAE,0xDC,0xE6,0xAF,0x48,0xA0,0x3B,
+        0xBF,0xD2,0x5E,0x8C,0xD0,0x36,0x41,0x41
+    };
+    static constexpr std::array<uint8_t, 32> ORDER_N_PLUS_1 = {
+        0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,
+        0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFE,
+        0xBA,0xAE,0xDC,0xE6,0xAF,0x48,0xA0,0x3B,
+        0xBF,0xD2,0x5E,0x8C,0xD0,0x36,0x41,0x42
+    };
+    std::array<uint8_t, 32> all_ff{};
+    all_ff.fill(0xFF);
+    std::array<uint8_t, 32> valid{};
+    valid[31] = 0x01;
+
+    {
+        auto [key, ok] = from_private_key(valid.data());
+        CHECK(ok, "wallet accepts canonical key 1");
+        CHECK(!key.priv.is_zero(), "wallet canonical key remains nonzero");
+    }
+    {
+        auto [key, ok] = from_private_key(ORDER_N.data());
+        CHECK(!ok, "wallet rejects key == n");
+        CHECK(key.priv.is_zero(), "wallet rejected n leaves zero key");
+    }
+    {
+        auto [key, ok] = from_private_key(ORDER_N_PLUS_1.data());
+        CHECK(!ok, "wallet rejects key == n+1");
+        CHECK(key.priv.is_zero(), "wallet rejected n+1 leaves zero key");
+    }
+    {
+        auto [key, ok] = from_private_key(all_ff.data());
+        CHECK(!ok, "wallet rejects all-ff key");
+        CHECK(key.priv.is_zero(), "wallet rejected all-ff leaves zero key");
     }
 
     printf("    %d checks\n\n", g_pass);
@@ -462,6 +510,7 @@ int audit_security_run() {
     g_pass = 0; g_fail = 0;
 
     test_zero_key_handling();
+    test_wallet_private_key_strictness();
     test_zeroization();
     test_bitflip_resilience();
     test_message_bitflip();

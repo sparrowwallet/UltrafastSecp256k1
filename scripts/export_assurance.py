@@ -145,6 +145,58 @@ def export_routing_summary(conn):
     return {r['layer']: r['count'] for r in rows}
 
 
+def export_semantic_tags(conn):
+    """Semantic tag inventory and densest entities."""
+    tags = conn.execute("""
+        SELECT st.tag, st.domain, st.description, COUNT(et.id) AS entities
+        FROM semantic_tags st
+        LEFT JOIN entity_tags et ON et.tag = st.tag
+        GROUP BY st.tag, st.domain, st.description
+        ORDER BY entities DESC, st.tag
+    """).fetchall()
+    top_entities = conn.execute("""
+        SELECT entity_type, entity_id, COUNT(*) AS tag_count,
+               GROUP_CONCAT(tag, ', ') AS tags
+        FROM entity_tags
+        GROUP BY entity_type, entity_id
+        ORDER BY tag_count DESC, entity_type, entity_id
+        LIMIT 25
+    """).fetchall()
+    return {
+        'inventory': [dict(r) for r in tags],
+        'top_entities': [dict(r) for r in top_entities],
+    }
+
+
+def export_symbol_reasoning(conn):
+    """Reasoning-oriented symbol inventory for optimization and audit workflows."""
+    summary = conn.execute("""
+        SELECT category, backend, COUNT(*) AS symbols,
+               AVG(risk_score) AS avg_risk,
+               AVG(gain_score) AS avg_gain
+        FROM v_symbol_reasoning
+        GROUP BY category, backend
+        ORDER BY symbols DESC, category, backend
+    """).fetchall()
+    optimize = conn.execute("""
+        SELECT symbol_name, file_path, category, backend, risk_score, gain_score, optimization_priority
+        FROM v_symbol_reasoning
+        ORDER BY optimization_priority DESC, gain_score DESC
+        LIMIT 25
+    """).fetchall()
+    risk = conn.execute("""
+        SELECT symbol_name, file_path, category, secret_class, risk_score, gain_score
+        FROM v_symbol_reasoning
+        ORDER BY risk_score DESC, gain_score DESC
+        LIMIT 25
+    """).fetchall()
+    return {
+        'summary': [dict(r) for r in summary],
+        'optimization_candidates': [dict(r) for r in optimize],
+        'risk_hotspots': [dict(r) for r in risk],
+    }
+
+
 def export_graph_meta(conn):
     """Graph metadata."""
     meta = {}
@@ -181,6 +233,8 @@ def main():
         'security_density': export_security_density(conn),
         'protocol_status': export_protocol_status(conn),
         'routing_summary': export_routing_summary(conn),
+        'semantic_tags': export_semantic_tags(conn),
+        'symbol_reasoning': export_symbol_reasoning(conn),
     }
 
     conn.close()

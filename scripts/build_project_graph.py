@@ -20,6 +20,7 @@ import re
 import sys
 import json
 import hashlib
+import subprocess
 from pathlib import Path
 from datetime import datetime, timezone
 
@@ -205,6 +206,24 @@ CREATE TABLE IF NOT EXISTS docs (
     topics   TEXT                           -- JSON array of topic tags
 );
 
+-- Semantic tags for richer project navigation and AI retrieval
+CREATE TABLE IF NOT EXISTS semantic_tags (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    tag         TEXT UNIQUE NOT NULL,
+    domain      TEXT,
+    description TEXT
+);
+
+CREATE TABLE IF NOT EXISTS entity_tags (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    entity_type TEXT NOT NULL,              -- source_file, c_abi_function, doc
+    entity_id   TEXT NOT NULL,              -- path / symbol / doc path
+    tag         TEXT NOT NULL,
+    confidence  REAL DEFAULT 1.0,
+    origin      TEXT DEFAULT 'derived',
+    UNIQUE(entity_type, entity_id, tag)
+);
+
 -- C++ public methods (extracted from headers)
 CREATE TABLE IF NOT EXISTS cpp_methods (
     id         INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -287,6 +306,10 @@ CREATE VIRTUAL TABLE IF NOT EXISTS fts_functions USING fts5(
 
 CREATE VIRTUAL TABLE IF NOT EXISTS fts_docs USING fts5(
     path, title, category, topics, content=docs, content_rowid=id
+);
+
+CREATE VIRTUAL TABLE IF NOT EXISTS fts_tags USING fts5(
+    entity_type, entity_id, tag, domain, description
 );
 
 -- Triggers to keep FTS in sync
@@ -406,6 +429,222 @@ CREATE VIEW IF NOT EXISTS v_abi_security AS
   FROM abi_routing ar
   WHERE ar.layer = 'ct'
   ORDER BY ar.abi_function;
+
+-- ---------------------------------------------------------------------------
+-- PHASE 4 ADDITIONS: call graph, config bindings, symbol aliases, hotspot
+--                    scores, reachability, runtime entrypoints, function-test
+-- ---------------------------------------------------------------------------
+
+-- IMPROVEMENT 1: Function-level call graph (who calls whom)
+CREATE TABLE IF NOT EXISTS call_edges (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    caller_file TEXT NOT NULL,
+    caller_func TEXT NOT NULL,
+    callee_func TEXT NOT NULL,
+    callee_file TEXT,
+    call_line INTEGER,
+    UNIQUE(caller_file, caller_func, callee_func, call_line)
+);
+
+-- IMPROVEMENT 2: Config / CMake option -> code symbol binding
+CREATE TABLE IF NOT EXISTS config_bindings (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    config_file TEXT NOT NULL,      -- CMakeLists.txt, config.json, etc.
+    config_key TEXT NOT NULL,       -- option name / JSON field
+    code_symbol TEXT NOT NULL,      -- #define / function / macro that handles it
+    code_file TEXT,
+    binding_type TEXT,              -- cmake_option, json_field, build_flag, project_constant
+    description TEXT,
+    UNIQUE(config_file, config_key, code_symbol)
+);
+
+-- IMPROVEMENT 3: Symbol aliases and typo/variant detection
+CREATE TABLE IF NOT EXISTS symbol_aliases (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    canonical TEXT NOT NULL,
+    alias TEXT NOT NULL,
+    similarity REAL,                -- 0.0-1.0 SequenceMatcher ratio
+    kind TEXT,                      -- typo, variant, abbreviation
+    source_file TEXT,
+    UNIQUE(canonical, alias)
+);
+
+-- IMPROVEMENT 4: Per-file hotspot risk scores
+CREATE TABLE IF NOT EXISTS hotspot_scores (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    file_path TEXT UNIQUE NOT NULL,
+    coupling_score REAL DEFAULT 0,      -- fan-in + fan-out from include_deps
+    security_density REAL DEFAULT 0,    -- security_patterns / lines * 100
+    null_risk_score REAL DEFAULT 0,     -- raw pointer / reinterpret patterns
+    test_coverage_gap REAL DEFAULT 0,   -- 1 = no tests, 0 = covered
+    hotspot_score REAL DEFAULT 0,       -- weighted composite (0-10)
+    reasons TEXT                        -- JSON array of contributing factors
+);
+
+-- IMPROVEMENT 5: Dead-code / reachability analysis
+CREATE TABLE IF NOT EXISTS reachability (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    symbol TEXT NOT NULL,
+    file_path TEXT NOT NULL,
+    is_reachable INTEGER DEFAULT 1,
+    reach_via TEXT,                 -- caller that makes it reachable
+    dead_reason TEXT,               -- no_caller_in_call_graph, etc.
+    UNIQUE(symbol, file_path)
+);
+
+-- IMPROVEMENT 6: Runtime entrypoints and startup file loaders
+CREATE TABLE IF NOT EXISTS runtime_entrypoints (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    binary TEXT NOT NULL,
+    entrypoint_func TEXT NOT NULL,
+    loads_file TEXT,
+    load_mechanism TEXT,            -- fopen, compiled-in, cmake-option, string_ref
+    source_file TEXT,
+    line_no INTEGER
+);
+
+-- IMPROVEMENT 7: Function -> test target mapping (function-level coverage)
+CREATE TABLE IF NOT EXISTS function_test_map (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    function_name TEXT NOT NULL,
+    function_file TEXT NOT NULL,
+    test_target TEXT NOT NULL,
+    coverage_type TEXT,             -- indirect, kat, fuzzing
+    UNIQUE(function_name, function_file, test_target)
+);
+
+-- Phase 5: crypto reasoning layers for symbol-level analysis
+CREATE TABLE IF NOT EXISTS symbol_semantics (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    symbol_name TEXT NOT NULL,
+    file_path TEXT NOT NULL,
+    category TEXT,
+    math_core TEXT,
+    backend TEXT,
+    coordinate_model TEXT,
+    secret_class TEXT,
+    abi_surface INTEGER DEFAULT 0,
+    generator_path INTEGER DEFAULT 0,
+    varpoint_path INTEGER DEFAULT 0,
+    bip340_related INTEGER DEFAULT 0,
+    bip352_related INTEGER DEFAULT 0,
+    UNIQUE(symbol_name, file_path)
+);
+
+CREATE TABLE IF NOT EXISTS symbol_security (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    symbol_name TEXT NOT NULL,
+    file_path TEXT NOT NULL,
+    uses_secret_input INTEGER DEFAULT 0,
+    must_be_constant_time INTEGER DEFAULT 0,
+    public_data_only INTEGER DEFAULT 0,
+    device_secret_upload INTEGER DEFAULT 0,
+    requires_zeroization INTEGER DEFAULT 0,
+    invalid_input_sensitive INTEGER DEFAULT 0,
+    notes TEXT,
+    UNIQUE(symbol_name, file_path)
+);
+
+CREATE TABLE IF NOT EXISTS symbol_performance (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    symbol_name TEXT NOT NULL,
+    file_path TEXT NOT NULL,
+    hotness_score REAL DEFAULT 0,
+    estimated_cost REAL DEFAULT 0,
+    batchable INTEGER DEFAULT 0,
+    vectorizable INTEGER DEFAULT 0,
+    gpu_candidate INTEGER DEFAULT 0,
+    memory_bound INTEGER DEFAULT 0,
+    compute_bound INTEGER DEFAULT 0,
+    duplicated_backends INTEGER DEFAULT 0,
+    UNIQUE(symbol_name, file_path)
+);
+
+CREATE TABLE IF NOT EXISTS symbol_audit_coverage (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    symbol_name TEXT NOT NULL,
+    file_path TEXT NOT NULL,
+    covered_by_unit_test INTEGER DEFAULT 0,
+    covered_by_fuzz INTEGER DEFAULT 0,
+    covered_by_invalid_vectors INTEGER DEFAULT 0,
+    covered_by_ct_test INTEGER DEFAULT 0,
+    covered_by_cross_impl_diff INTEGER DEFAULT 0,
+    covered_by_gpu_equivalence INTEGER DEFAULT 0,
+    covered_by_regression_test INTEGER DEFAULT 0,
+    last_audit_result TEXT DEFAULT 'unknown',
+    times_failed_historically INTEGER DEFAULT 0,
+    known_fragile INTEGER DEFAULT 0,
+    UNIQUE(symbol_name, file_path)
+);
+
+CREATE TABLE IF NOT EXISTS symbol_history (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    symbol_name TEXT NOT NULL,
+    file_path TEXT NOT NULL,
+    times_modified INTEGER DEFAULT 0,
+    recently_modified INTEGER DEFAULT 0,
+    bug_fix_count INTEGER DEFAULT 0,
+    performance_tuning_count INTEGER DEFAULT 0,
+    audit_related_changes INTEGER DEFAULT 0,
+    last_modified TEXT,
+    UNIQUE(symbol_name, file_path)
+);
+
+CREATE TABLE IF NOT EXISTS symbol_scores (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    symbol_name TEXT NOT NULL,
+    file_path TEXT NOT NULL,
+    risk_score REAL DEFAULT 0,
+    gain_score REAL DEFAULT 0,
+    optimization_priority REAL DEFAULT 0,
+    risk_reasons TEXT,
+    gain_reasons TEXT,
+    UNIQUE(symbol_name, file_path)
+);
+
+-- Views for new tables
+CREATE VIEW IF NOT EXISTS v_call_graph AS
+    SELECT caller_file, caller_func, callee_func, callee_file, call_line
+    FROM call_edges ORDER BY caller_file, caller_func, call_line;
+
+CREATE VIEW IF NOT EXISTS v_hotspot_top AS
+    SELECT file_path, hotspot_score, coupling_score, security_density,
+           test_coverage_gap, null_risk_score, reasons
+    FROM hotspot_scores ORDER BY hotspot_score DESC LIMIT 30;
+
+CREATE VIEW IF NOT EXISTS v_dead_code AS
+    SELECT symbol, file_path, dead_reason
+    FROM reachability WHERE is_reachable = 0
+    ORDER BY file_path, symbol;
+
+CREATE VIEW IF NOT EXISTS v_function_coverage AS
+    SELECT ftm.function_name, ftm.function_file, ftm.test_target, ftm.coverage_type,
+           fi.start_line, fi.end_line
+    FROM function_test_map ftm
+    LEFT JOIN function_index fi ON fi.file_path = ftm.function_file
+        AND fi.name = ftm.function_name
+    ORDER BY ftm.function_file, ftm.function_name;
+
+CREATE VIEW IF NOT EXISTS v_symbol_reasoning AS
+    SELECT ss.symbol_name, ss.file_path, ss.category, ss.math_core, ss.backend,
+           ss.coordinate_model, ss.secret_class, ss.abi_surface,
+           sec.uses_secret_input, sec.must_be_constant_time, sec.public_data_only,
+           perf.hotness_score, perf.gpu_candidate, perf.batchable,
+           perf.compute_bound, perf.memory_bound,
+           cov.covered_by_unit_test, cov.covered_by_fuzz, cov.covered_by_ct_test,
+           hist.times_modified, hist.recently_modified,
+           score.risk_score, score.gain_score, score.optimization_priority
+    FROM symbol_semantics ss
+    LEFT JOIN symbol_security sec
+      ON sec.symbol_name = ss.symbol_name AND sec.file_path = ss.file_path
+    LEFT JOIN symbol_performance perf
+      ON perf.symbol_name = ss.symbol_name AND perf.file_path = ss.file_path
+    LEFT JOIN symbol_audit_coverage cov
+      ON cov.symbol_name = ss.symbol_name AND cov.file_path = ss.file_path
+    LEFT JOIN symbol_history hist
+      ON hist.symbol_name = ss.symbol_name AND hist.file_path = ss.file_path
+    LEFT JOIN symbol_scores score
+      ON score.symbol_name = ss.symbol_name AND score.file_path = ss.file_path;
 """
 
 # ---------------------------------------------------------------------------
@@ -427,6 +666,11 @@ def count_lines(filepath: Path) -> int:
             return sum(1 for _ in f)
     except Exception:
         return 0
+
+
+def should_skip_dir(dirname: str) -> bool:
+    """Filter generated or irrelevant directories during graph traversal."""
+    return dirname.startswith('.') or dirname in SKIP_DIRS or dirname.startswith('build')
 
 def classify_file(rel_path: str):
     """Return (category, subsystem, layer) for a relative path."""
@@ -580,6 +824,302 @@ def abi_layer(name: str):
         return 'fast'
     return 'both'
 
+
+SEMANTIC_TAGS = {
+    'constant_time': ('security', 'Touches secret-bearing constant-time paths or CT verification logic.'),
+    'verification': ('crypto', 'Signature, proof, or validity verification logic.'),
+    'signing': ('crypto', 'Secret-key signing, nonce generation, or signing session flow.'),
+    'parser_boundary': ('security', 'Strict parsing, decoding, or malformed-input boundary handling.'),
+    'wallet_flow': ('protocol', 'Wallet, address, mnemonic, or HD derivation user-facing flow.'),
+    'protocol_multisig': ('protocol', 'MuSig2, FROST, adaptor, or multi-party signing logic.'),
+    'privacy_protocol': ('protocol', 'Silent payments, ECIES, Pedersen, or privacy-preserving flow.'),
+    'zk_proof': ('protocol', 'Zero-knowledge proof generation or verification.'),
+    'gpu_acceleration': ('platform', 'GPU backend, kernels, host API, or backend dispatch logic.'),
+    'cross_platform': ('platform', 'Platform dispatch, compatibility, or architecture-specific implementation.'),
+    'ffi_surface': ('ecosystem', 'Public C ABI, bindings, or host-language interop surface.'),
+    'audit_evidence': ('tooling', 'Audit runner, assurance export, CI evidence, or self-audit infrastructure.'),
+    'benchmarking': ('tooling', 'Benchmark harness, performance measurement, or regression gate.'),
+    'build_release': ('tooling', 'Build, release, packaging, or reproducibility flow.'),
+    'hashing': ('crypto', 'SHA-2, Keccak, tagged hash, hash160, or hash acceleration paths.'),
+    'ethereum_stack': ('protocol', 'Ethereum signing, recovery, addressing, or Keccak-backed APIs.'),
+    'taproot_stack': ('protocol', 'Taproot, BIP-340, x-only pubkeys, or taproot tweaking logic.'),
+    'differential_testing': ('tooling', 'Cross-lib differential, KAT, vector, or equivalence testing.'),
+}
+
+
+def derive_semantic_tags_for_source(path: str, category: str, subsystem: str, layer: str):
+    """Derive semantic tags for a source/docs artifact from path/category/layer hints."""
+    p = path.lower()
+    tags = {}
+
+    def add(tag: str, confidence: float = 1.0):
+        if tag in SEMANTIC_TAGS:
+            tags[tag] = max(tags.get(tag, 0.0), confidence)
+
+    if layer == 'ct' or 'ct_' in p or '/ct/' in p:
+        add('constant_time', 1.0)
+    if category in ('abi', 'binding') or p.startswith('bindings/') or 'ufsecp' in p:
+        add('ffi_surface', 0.95)
+    if category in ('audit', 'cpu_test', 'fuzz', 'test_integration') or 'audit' in p:
+        add('audit_evidence', 0.95)
+    if category == 'benchmark' or 'bench' in p:
+        add('benchmarking', 0.95)
+    if category in ('cuda', 'opencl', 'metal') or p.startswith('gpu/'):
+        add('gpu_acceleration', 1.0)
+    if category in ('compat', 'android', 'wasm') or any(x in p for x in ('arm64', 'riscv', 'esp32', 'wasm', 'msvc', 'cross_platform')):
+        add('cross_platform', 0.9)
+    if category in ('script',) or any(x in p for x in ('release', 'package', 'build', 'cmake', 'preset', 'reproducible')):
+        add('build_release', 0.8)
+
+    if subsystem in ('ecdsa', 'schnorr'):
+        add('signing', 0.9)
+        add('verification', 0.85)
+    if subsystem in ('wallet', 'bip32', 'bip39'):
+        add('wallet_flow', 1.0)
+    if subsystem in ('musig2', 'frost', 'adaptor'):
+        add('protocol_multisig', 1.0)
+    if subsystem in ('ecies', 'pedersen'):
+        add('privacy_protocol', 0.95)
+    if subsystem == 'zk':
+        add('zk_proof', 1.0)
+    if subsystem == 'ethereum':
+        add('ethereum_stack', 1.0)
+    if subsystem == 'taproot' or 'bip340' in p or 'taproot' in p:
+        add('taproot_stack', 0.95)
+    if subsystem == 'hash' or any(x in p for x in ('sha256', 'sha512', 'hash160', 'keccak', 'tagged_hash', 'hash_accel')):
+        add('hashing', 1.0)
+
+    if any(x in p for x in ('parse', 'parser', 'der', 'ffi_round_trip', 'boundary', 'normalize', 'strict')):
+        add('parser_boundary', 0.9)
+    if any(x in p for x in ('wycheproof', 'differential', 'fiat_crypto', 'equivalence', 'cross_platform_kat', 'vectors')):
+        add('differential_testing', 0.9)
+
+    return tags
+
+
+def derive_semantic_tags_for_abi(name: str, category: str, layer: str):
+    """Derive semantic tags for a C ABI function."""
+    n = name.lower()
+    tags = {'ffi_surface': 1.0}
+
+    def add(tag: str, confidence: float = 1.0):
+        if tag in SEMANTIC_TAGS:
+            tags[tag] = max(tags.get(tag, 0.0), confidence)
+
+    if layer == 'ct':
+        add('constant_time', 1.0)
+    if category in ('ecdsa', 'schnorr'):
+        if 'sign' in n:
+            add('signing', 1.0)
+        if 'verify' in n:
+            add('verification', 1.0)
+    if category in ('wallet', 'bip32', 'bip39', 'address', 'wif'):
+        add('wallet_flow', 1.0)
+    if category in ('musig2', 'frost', 'adaptor'):
+        add('protocol_multisig', 1.0)
+    if category in ('ecies', 'silent_payments', 'pedersen'):
+        add('privacy_protocol', 0.95)
+    if category == 'zk':
+        add('zk_proof', 1.0)
+    if category == 'ethereum':
+        add('ethereum_stack', 1.0)
+    if category == 'taproot':
+        add('taproot_stack', 1.0)
+    if category == 'hash':
+        add('hashing', 1.0)
+    if 'parse' in n or 'from_der' in n or 'validate' in n:
+        add('parser_boundary', 0.9)
+    return tags
+
+
+def infer_backend_from_path(path: str) -> str:
+    p = path.lower()
+    if p.startswith('cuda/') or p.startswith('gpu/'):
+        return 'cuda'
+    if p.startswith('opencl/'):
+        return 'opencl'
+    if p.startswith('metal/'):
+        return 'metal'
+    if p.startswith('wasm/'):
+        return 'wasm'
+    if p.startswith('scripts/'):
+        return 'script'
+    return 'cpu'
+
+
+def infer_coordinate_model(symbol_name: str, file_path: str) -> str:
+    s = f"{symbol_name} {file_path}".lower()
+    if 'jacobian' in s:
+        return 'jacobian'
+    if 'affine' in s:
+        return 'affine'
+    if 'point' in s or 'scalar_mul' in s or 'ecmult' in s:
+        return 'mixed'
+    return 'n/a'
+
+
+def classify_symbol_category(symbol_name: str, file_path: str):
+    s = f"{symbol_name} {file_path}".lower()
+    if any(x in s for x in ('field', 'fe52', 'fe_')):
+        return 'field_arithmetic', 'field'
+    if any(x in s for x in ('scalar', 'safegcd', 'wnaf')):
+        return 'scalar_arithmetic', 'scalar'
+    if any(x in s for x in ('point', 'ecmult', 'generator_mul', 'scalar_mul', 'multiscalar', 'pippenger', 'shamir')):
+        return 'point_arithmetic', 'point'
+    if any(x in s for x in ('inverse', 'modinv', 'safegcd')):
+        return 'modinv', 'scalar'
+    if 'batch_inversion' in s:
+        return 'batch_inversion', 'field'
+    if 'ecdsa' in s:
+        return 'ecdsa', 'protocol'
+    if 'schnorr' in s or 'bip340' in s:
+        return 'schnorr', 'protocol'
+    if 'ecdh' in s:
+        return 'ecdh', 'protocol'
+    if 'bip352' in s or 'silent_payment' in s:
+        return 'bip352', 'protocol'
+    if any(x in s for x in ('sha256', 'sha512', 'keccak', 'hash160', 'tagged_hash', 'hash_accel')):
+        return 'hashing', 'hash'
+    if any(x in s for x in ('kernel', '.cl', '.metal', '.cu')):
+        return 'gpu_kernel', 'gpu'
+    if any(x in s for x in ('ufsecp_', 'ffi', 'binding')):
+        return 'ffi_abi', 'abi'
+    if any(x in s for x in ('test_', '/tests/', '/audit/')):
+        return 'test', 'tool'
+    if '/audit/' in s or 'audit_' in s:
+        return 'audit', 'tool'
+    if '/fuzz/' in s or 'fuzz' in s:
+        return 'fuzz', 'tool'
+    if any(x in s for x in ('bip32', 'bip39', 'wallet', 'address', 'coin_', 'wif')):
+        return 'wallet', 'wallet'
+    return 'general', 'tool'
+
+
+def derive_symbol_semantics(symbol_name: str, file_path: str):
+    category, math_core = classify_symbol_category(symbol_name, file_path)
+    s = f"{symbol_name} {file_path}".lower()
+    secret_class = 'public_only'
+    if any(x in s for x in ('sign', 'nonce', 'seckey', 'ecdh', 'decrypt', 'derive', 'blind', 'adaptor', 'silent_payment', 'frost', 'musig2')):
+        secret_class = 'ct_sensitive'
+    elif any(x in s for x in ('aggregate', 'combine', 'session', 'tweak', 'commit')):
+        secret_class = 'mixed'
+    return {
+        'category': category,
+        'math_core': math_core,
+        'backend': infer_backend_from_path(file_path),
+        'coordinate_model': infer_coordinate_model(symbol_name, file_path),
+        'secret_class': secret_class,
+        'abi_surface': 1 if symbol_name.startswith('ufsecp_') or '/ufsecp_' in file_path else 0,
+        'generator_path': 1 if any(x in s for x in ('generator_mul', 'gen_mul', '*g', 'output_key')) else 0,
+        'varpoint_path': 1 if any(x in s for x in ('scalar_mul', 'varpoint', 'pippenger', 'shamir', 'point_mul')) else 0,
+        'bip340_related': 1 if any(x in s for x in ('bip340', 'schnorr', 'taproot')) else 0,
+        'bip352_related': 1 if any(x in s for x in ('bip352', 'silent_payment')) else 0,
+    }
+
+
+def derive_symbol_security(symbol_name: str, file_path: str, semantics: dict):
+    s = f"{symbol_name} {file_path}".lower()
+    uses_secret = 1 if semantics['secret_class'] in ('ct_sensitive', 'mixed') else 0
+    must_ct = 1 if semantics['secret_class'] == 'ct_sensitive' or 'ct_' in s or '/ct/' in s else 0
+    public_only = 1 if semantics['secret_class'] == 'public_only' else 0
+    device_secret = 1 if semantics['backend'] in ('cuda', 'opencl', 'metal') and uses_secret else 0
+    zeroize = 1 if any(x in s for x in ('sign', 'nonce', 'ecdh', 'decrypt', 'blind', 'derive', 'seed', 'mnemonic')) else 0
+    invalid_input = 1 if any(x in s for x in ('parse', 'verify', 'validate', 'from_der', 'pubkey', 'sig', 'address', 'decode', 'ecies')) else 0
+    notes = []
+    if device_secret:
+        notes.append('secret-bearing symbol reaches GPU/backend memory')
+    if invalid_input:
+        notes.append('parser or validation boundary')
+    if must_ct:
+        notes.append('constant-time sensitive')
+    return {
+        'uses_secret_input': uses_secret,
+        'must_be_constant_time': must_ct,
+        'public_data_only': public_only,
+        'device_secret_upload': device_secret,
+        'requires_zeroization': zeroize,
+        'invalid_input_sensitive': invalid_input,
+        'notes': '; '.join(notes),
+    }
+
+
+def derive_symbol_performance(symbol_name: str, file_path: str, semantics: dict):
+    s = f"{symbol_name} {file_path}".lower()
+    hotness = 20.0
+    if semantics['math_core'] in ('field', 'scalar', 'point'):
+        hotness += 25.0
+    if any(x in s for x in ('mul', 'verify', 'scan', 'msm', 'pippenger', 'batch', 'kernel')):
+        hotness += 20.0
+    if any(x in s for x in ('generator_mul', 'scalar_mul', 'ecdh', 'bip352', 'silent_payment')):
+        hotness += 15.0
+    estimated_cost = min(100.0, hotness + (15.0 if any(x in s for x in ('msm', 'pippenger', 'verify', 'batch')) else 0.0))
+    batchable = 1 if any(x in s for x in ('batch', 'msm', 'verify', 'scan', 'aggregate', 'combine')) else 0
+    vectorizable = 1 if semantics['math_core'] in ('field', 'scalar', 'point', 'hash') else 0
+    gpu_candidate = 1 if semantics['backend'] == 'cpu' and (
+        semantics['math_core'] in ('field', 'scalar', 'point', 'hash', 'protocol') and batchable
+        or any(x in s for x in ('msm', 'batch', 'verify', 'scan', 'hash160', 'keccak', 'ecdh'))
+    ) else 0
+    memory_bound = 1 if any(x in s for x in ('parse', 'serialize', 'decode', 'encode', 'address', 'wallet', 'seed')) else 0
+    compute_bound = 1 if any(x in s for x in ('mul', 'verify', 'msm', 'inverse', 'kernel', 'hash', 'scan')) else 0
+    duplicated_backends = 1 if semantics['backend'] in ('cuda', 'opencl', 'metal') or any(x in s for x in ('gpu_', 'opencl', 'metal', 'cuda')) else 0
+    return {
+        'hotness_score': min(100.0, hotness),
+        'estimated_cost': estimated_cost,
+        'batchable': batchable,
+        'vectorizable': vectorizable,
+        'gpu_candidate': gpu_candidate,
+        'memory_bound': memory_bound,
+        'compute_bound': compute_bound,
+        'duplicated_backends': duplicated_backends,
+    }
+
+
+def get_file_history(file_path: str, cache: dict):
+    if file_path in cache:
+        return cache[file_path]
+    try:
+        proc = subprocess.run(
+            ['git', '-C', str(LIB_ROOT), 'log', '--follow', '--format=%H%x09%ct%x09%s', '--', file_path],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        lines = [line for line in proc.stdout.splitlines() if line.strip()]
+    except Exception:
+        lines = []
+    history = {
+        'times_modified': len(lines),
+        'recently_modified': 0,
+        'bug_fix_count': 0,
+        'performance_tuning_count': 0,
+        'audit_related_changes': 0,
+        'last_modified': None,
+    }
+    if lines:
+        now_ts = int(datetime.now(timezone.utc).timestamp())
+        first = lines[0].split('\t', 2)
+        if len(first) >= 2:
+            history['last_modified'] = first[1]
+        for entry in lines:
+            parts = entry.split('\t', 2)
+            if len(parts) < 3:
+                continue
+            _, ts, subject = parts
+            try:
+                if now_ts - int(ts) <= 30 * 24 * 3600:
+                    history['recently_modified'] = 1
+            except Exception:
+                pass
+            lowered = subject.lower()
+            if any(x in lowered for x in ('fix', 'bug', 'regression', 'correct', 'repair')):
+                history['bug_fix_count'] += 1
+            if any(x in lowered for x in ('perf', 'opt', 'speed', 'fast', 'vector', 'batch', 'gpu')):
+                history['performance_tuning_count'] += 1
+            if any(x in lowered for x in ('audit', 'security', 'ct', 'fuzz', 'wycheproof', 'sanitizer')):
+                history['audit_related_changes'] += 1
+    cache[file_path] = history
+    return history
+
 # ---------------------------------------------------------------------------
 # POPULATION FUNCTIONS
 # ---------------------------------------------------------------------------
@@ -589,7 +1129,7 @@ def populate_source_files(cur: sqlite3.Cursor):
     count = 0
     for root, dirs, files in os.walk(LIB_ROOT):
         # Skip build dirs
-        dirs[:] = [d for d in dirs if d not in SKIP_DIRS and not d.startswith('.')]
+        dirs[:] = [d for d in dirs if not should_skip_dir(d)]
         for fname in sorted(files):
             ext = os.path.splitext(fname)[1].lower()
             if ext not in SOURCE_EXTS:
@@ -654,7 +1194,7 @@ def populate_include_deps(cur: sqlite3.Cursor):
     """Extract include dependencies from all .cpp/.cu/.mm files."""
     count = 0
     for root, dirs, files in os.walk(LIB_ROOT):
-        dirs[:] = [d for d in dirs if d not in SKIP_DIRS and not d.startswith('.')]
+        dirs[:] = [d for d in dirs if not should_skip_dir(d)]
         for fname in sorted(files):
             ext = os.path.splitext(fname)[1].lower()
             if ext not in ('.cpp', '.cu', '.mm', '.c'):
@@ -1038,6 +1578,57 @@ def populate_docs(cur: sqlite3.Cursor):
             count += 1
     return count
 
+
+def populate_semantic_tags(cur: sqlite3.Cursor):
+    """Populate semantic tags and entity mappings for files, ABI functions, and docs."""
+    cur.execute("DELETE FROM fts_tags")
+    cur.execute("DELETE FROM entity_tags")
+    cur.execute("DELETE FROM semantic_tags")
+    count = 0
+
+    for tag, (domain, description) in SEMANTIC_TAGS.items():
+        cur.execute("""INSERT OR IGNORE INTO semantic_tags (tag, domain, description)
+                       VALUES (?,?,?)""", (tag, domain, description))
+        count += 1
+
+    cur.execute("SELECT path, category, subsystem, layer FROM source_files")
+    for path, category, subsystem, layer in cur.fetchall():
+        for tag, confidence in derive_semantic_tags_for_source(path, category, subsystem, layer).items():
+            cur.execute("""INSERT OR IGNORE INTO entity_tags
+                           (entity_type, entity_id, tag, confidence, origin)
+                           VALUES (?,?,?,?,?)""",
+                        ('source_file', path, tag, confidence, 'derived'))
+            cur.execute("""INSERT INTO fts_tags(entity_type, entity_id, tag, domain, description)
+                           VALUES (?,?,?,?,?)""",
+                        ('source_file', path, tag, SEMANTIC_TAGS[tag][0], SEMANTIC_TAGS[tag][1]))
+            count += 1
+
+    cur.execute("SELECT name, category, layer FROM c_abi_functions")
+    for name, category, layer in cur.fetchall():
+        for tag, confidence in derive_semantic_tags_for_abi(name, category, layer).items():
+            cur.execute("""INSERT OR IGNORE INTO entity_tags
+                           (entity_type, entity_id, tag, confidence, origin)
+                           VALUES (?,?,?,?,?)""",
+                        ('c_abi_function', name, tag, confidence, 'derived'))
+            cur.execute("""INSERT INTO fts_tags(entity_type, entity_id, tag, domain, description)
+                           VALUES (?,?,?,?,?)""",
+                        ('c_abi_function', name, tag, SEMANTIC_TAGS[tag][0], SEMANTIC_TAGS[tag][1]))
+            count += 1
+
+    cur.execute("SELECT path, category FROM docs")
+    for path, category in cur.fetchall():
+        for tag, confidence in derive_semantic_tags_for_source(path, category, None, 'tool').items():
+            cur.execute("""INSERT OR IGNORE INTO entity_tags
+                           (entity_type, entity_id, tag, confidence, origin)
+                           VALUES (?,?,?,?,?)""",
+                        ('doc', path, tag, confidence, 'derived'))
+            cur.execute("""INSERT INTO fts_tags(entity_type, entity_id, tag, domain, description)
+                           VALUES (?,?,?,?,?)""",
+                        ('doc', path, tag, SEMANTIC_TAGS[tag][0], SEMANTIC_TAGS[tag][1]))
+            count += 1
+
+    return count
+
 def populate_edges(cur: sqlite3.Cursor):
     """Build cross-reference edges between entities."""
     count = 0
@@ -1338,7 +1929,7 @@ def populate_security_patterns(cur: sqlite3.Cursor):
         if not dirpath.exists():
             continue
         for root, dirs, files in os.walk(dirpath):
-            dirs[:] = [d for d in dirs if not d.startswith('.')]
+            dirs[:] = [d for d in dirs if not should_skip_dir(d)]
             for fname in files:
                 ext = os.path.splitext(fname)[1].lower()
                 if ext not in ('.cpp', '.hpp', '.h'):
@@ -1783,6 +2374,572 @@ def populate_function_index(cur):
 
 
 # ---------------------------------------------------------------------------
+# PHASE 4 BUILDERS
+# ---------------------------------------------------------------------------
+
+def populate_call_edges(cur: sqlite3.Cursor):
+    """Build function-level call graph by scanning .cpp source files."""
+    # Load all known function names -> canonical file mappings
+    known: dict = {}
+    cur.execute("SELECT file_path, name FROM function_index")
+    for fpath, name in cur.fetchall():
+        if name not in known:
+            known[name] = fpath
+    cur.execute("SELECT name FROM c_abi_functions")
+    for (name,) in cur.fetchall():
+        if name not in known:
+            known[name] = 'include/ufsecp/ufsecp_impl.cpp'
+
+    # Build file -> sorted list of (start_line, end_line, func_name)
+    ranges: dict = {}
+    cur.execute("SELECT file_path, name, start_line, end_line FROM function_index ORDER BY file_path, start_line")
+    for fpath, name, sl, el in cur.fetchall():
+        ranges.setdefault(fpath, []).append((sl, el, name))
+
+    SKIP_WORDS = frozenset([
+        'if', 'for', 'while', 'switch', 'return', 'sizeof', 'static_assert',
+        'alignas', 'alignof', 'throw', 'catch', 'try', 'delete', 'new',
+        'else', 'case', 'do', 'goto', 'break', 'continue', 'decltype',
+        'static_cast', 'reinterpret_cast', 'const_cast', 'dynamic_cast',
+        'assert', 'ASSERT', 'CHECK', 'memset', 'memcpy', 'memmove', 'memcmp',
+        'printf', 'fprintf', 'puts', 'fopen', 'fclose', 'fread', 'strlen',
+        'std', 'secp256k1', 'ct', 'fast', 'detail', 'hash', 'coins',
+    ])
+
+    call_re = re.compile(r'\b([a-zA-Z_]\w*)\s*\(')
+    count = 0
+
+    for rel_path, func_list in sorted(ranges.items()):
+        full = LIB_ROOT / rel_path
+        if not full.exists():
+            continue
+        try:
+            lines = full.read_text(encoding='utf-8', errors='replace').split('\n')
+        except Exception:
+            continue
+
+        for lineno, line in enumerate(lines, 1):
+            s = line.strip()
+            if not s or s.startswith('//') or s.startswith('#') or \
+               s.startswith('/*') or s.startswith('*'):
+                continue
+
+            # Find which function this line belongs to
+            caller = None
+            for sl, el, fname in func_list:
+                if sl <= lineno <= el:
+                    caller = fname
+                    break
+            if not caller:
+                continue
+
+            for m in call_re.finditer(line):
+                callee = m.group(1)
+                if callee in SKIP_WORDS or callee == caller:
+                    continue
+                if callee not in known:
+                    continue
+                callee_file = known[callee]
+                try:
+                    cur.execute("""INSERT OR IGNORE INTO call_edges
+                        (caller_file, caller_func, callee_func, callee_file, call_line)
+                        VALUES (?,?,?,?,?)""",
+                        (rel_path, caller, callee, callee_file, lineno))
+                    count += 1
+                except Exception:
+                    pass
+
+    return count
+
+
+def populate_config_bindings(cur: sqlite3.Cursor):
+    """Map CMake options and project constants to the code symbols that implement them."""
+    count = 0
+
+    # 1. Scan CMakeLists.txt for option() declarations
+    cmake_files = [LIB_ROOT / 'CMakeLists.txt']
+    opt_re = re.compile(r'option\s*\(\s*(\w+)\s+"([^"]*)"')
+    for cmake_f in cmake_files:
+        if not cmake_f.exists():
+            continue
+        text = cmake_f.read_text(errors='replace')
+        for m in opt_re.finditer(text):
+            opt_name, opt_desc = m.group(1), m.group(2)
+            cur.execute("""INSERT OR IGNORE INTO config_bindings
+                (config_file, config_key, code_symbol, code_file, binding_type, description)
+                VALUES (?,?,?,?,?,?)""",
+                ('CMakeLists.txt', opt_name, opt_name, 'CMakeLists.txt',
+                 'cmake_option', opt_desc))
+            count += 1
+            # Find which source files reference this option symbol
+            for root, dirs, files in os.walk(LIB_ROOT / 'cpu'):
+                dirs[:] = [d for d in dirs if not should_skip_dir(d)]
+                for fname in files:
+                    if os.path.splitext(fname)[1].lower() not in ('.cpp', '.hpp', '.h'):
+                        continue
+                    fpath = Path(root) / fname
+                    try:
+                        if opt_name in fpath.read_text(errors='replace'):
+                            rel = str(fpath.relative_to(LIB_ROOT))
+                            cur.execute("""INSERT OR IGNORE INTO config_bindings
+                                (config_file, config_key, code_symbol, code_file, binding_type, description)
+                                VALUES (?,?,?,?,?,?)""",
+                                ('CMakeLists.txt', opt_name, opt_name, rel,
+                                 'build_flag', f'Referenced in {rel}'))
+                            count += 1
+                    except Exception:
+                        pass
+
+    # 2. Insert project constants as config bindings
+    cur.execute("SELECT name, value, category, context FROM constants")
+    for cname, cval, ccat, cctx in cur.fetchall():
+        cur.execute("""INSERT OR IGNORE INTO config_bindings
+            (config_file, config_key, code_symbol, code_file, binding_type, description)
+            VALUES (?,?,?,?,?,?)""",
+            ('constants', cname, cname, None, 'project_constant', cctx or ''))
+        count += 1
+
+    # 3. Map error codes as config bindings (value -> symbol)
+    cur.execute("SELECT code, symbol, meaning FROM error_codes")
+    for code, symbol, meaning in cur.fetchall():
+        cur.execute("""INSERT OR IGNORE INTO config_bindings
+            (config_file, config_key, code_symbol, code_file, binding_type, description)
+            VALUES (?,?,?,?,?,?)""",
+            ('error_codes', str(code), symbol, 'include/ufsecp/ufsecp_error.h',
+             'error_code', meaning or ''))
+        count += 1
+
+    return count
+
+
+def populate_symbol_aliases(cur: sqlite3.Cursor):
+    """Find similar symbol names (variant/typo detection) using string similarity."""
+    from difflib import SequenceMatcher
+    from collections import defaultdict
+
+    # Collect all function names from function_index + c_abi_functions
+    names: set = set()
+    cur.execute("SELECT DISTINCT name FROM function_index WHERE kind IN ('function','method')")
+    for (n,) in cur.fetchall():
+        if len(n) > 4:  # skip very short identifiers
+            names.add(n)
+    cur.execute("SELECT name FROM c_abi_functions")
+    for (n,) in cur.fetchall():
+        names.add(n)
+
+    # Group by leading prefix (first 2 underscore segments) for scalability
+    groups: dict = defaultdict(list)
+    for n in sorted(names):
+        parts = n.split('_')
+        key = '_'.join(parts[:2]) if len(parts) >= 2 else parts[0]
+        groups[key].append(n)
+
+    count = 0
+    for key, group in groups.items():
+        if len(group) < 2:
+            continue
+        for i in range(len(group)):
+            for j in range(i + 1, len(group)):
+                a, b = group[i], group[j]
+                ratio = SequenceMatcher(None, a, b).ratio()
+                if 0.72 <= ratio < 1.0:
+                    kind = 'typo' if ratio >= 0.90 else 'variant' if ratio >= 0.80 else 'abbreviation'
+                    # canonical = shorter name (assumed more primitive)
+                    canonical, alias = (a, b) if len(a) <= len(b) else (b, a)
+                    try:
+                        cur.execute("""INSERT OR IGNORE INTO symbol_aliases
+                            (canonical, alias, similarity, kind)
+                            VALUES (?,?,?,?)""",
+                            (canonical, alias, round(ratio, 3), kind))
+                        count += 1
+                    except Exception:
+                        pass
+
+    return count
+
+
+def populate_hotspot_scores(cur: sqlite3.Cursor):
+    """Compute per-file hotspot risk scores from existing graph data."""
+    cur.execute("""SELECT path, lines, layer, subsystem FROM source_files
+                   WHERE category IN ('cpu_core', 'abi', 'audit')
+                   AND file_type IN ('cpp', 'source')
+                   AND lines > 0 ORDER BY path""")
+    files = cur.fetchall()
+
+    count = 0
+    for fpath, lines, layer, subsystem in files:
+        # Coupling: fan-in (rdeps) + fan-out (deps)
+        cur.execute("SELECT COUNT(*) FROM include_deps WHERE source_file=?", (fpath,))
+        fan_out = cur.fetchone()[0]
+        fname_only = os.path.basename(fpath)
+        cur.execute("SELECT COUNT(*) FROM include_deps WHERE included_file LIKE ?",
+                    (f'%{fname_only}%',))
+        fan_in = cur.fetchone()[0]
+        coupling = (fan_in + fan_out) / 10.0
+
+        # Security density: patterns per 100 lines
+        cur.execute("SELECT COUNT(*) FROM security_patterns WHERE source_file=?", (fpath,))
+        sec_count = cur.fetchone()[0]
+        security_density = (sec_count / lines) * 100.0
+
+        # Test coverage gap: 0 = covered, 1 = not covered
+        cur.execute("""SELECT COUNT(*) FROM edges
+                       WHERE dst_type='source_file' AND dst_id=? AND relation='covers'""",
+                    (fpath,))
+        test_gap = 0.0 if cur.fetchone()[0] > 0 else 1.0
+
+        # Pointer/null risk: scan source for risky patterns
+        null_risk = 0.0
+        full_path = LIB_ROOT / fpath
+        if full_path.exists():
+            try:
+                text = full_path.read_text(errors='replace')
+                null_count = len(re.findall(r'\*\s*\w+\s*(?:==|!=)\s*nullptr', text))
+                null_count += len(re.findall(r'reinterpret_cast<', text))
+                null_count += len(re.findall(r'\bfree\s*\(', text))
+                null_risk = min(null_count / 10.0, 1.0)
+            except Exception:
+                pass
+
+        # CT layer is more critical
+        ct_mult = 1.5 if layer == 'ct' else 1.0
+        score = ct_mult * (coupling * 0.25 + security_density * 4.0 +
+                           test_gap * 3.0 + null_risk * 0.5)
+        score = min(score, 10.0)
+
+        reasons = []
+        if fan_in + fan_out > 20:
+            reasons.append(f'high_coupling:{fan_in}in+{fan_out}out')
+        if sec_count > 5:
+            reasons.append(f'security_critical:{sec_count}_patterns')
+        if test_gap > 0:
+            reasons.append('no_test_coverage')
+        if null_risk > 0.3:
+            reasons.append('pointer_risk')
+        if layer == 'ct':
+            reasons.append('ct_layer')
+
+        cur.execute("""INSERT OR REPLACE INTO hotspot_scores
+            (file_path, coupling_score, security_density, null_risk_score,
+             test_coverage_gap, hotspot_score, reasons)
+            VALUES (?,?,?,?,?,?,?)""",
+            (fpath, round(coupling, 3), round(security_density, 3),
+             round(null_risk, 3), test_gap, round(score, 3),
+             json.dumps(reasons)))
+        count += 1
+
+    return count
+
+
+def populate_reachability(cur: sqlite3.Cursor):
+    """Mark functions as reachable/dead using BFS from ABI entry points."""
+    # Seed: all public ABI entry points
+    reachable: set = set()
+    cur.execute("SELECT name FROM c_abi_functions")
+    for (name,) in cur.fetchall():
+        reachable.add(name)
+
+    # Also seed from test executables (they independently exercise code)
+    cur.execute("SELECT name, executable FROM test_targets")
+    for name, exe in cur.fetchall():
+        reachable.add(name)
+        if exe:
+            reachable.add(exe)
+
+    # BFS through call_edges
+    queue = list(reachable)
+    visited = set(reachable)
+    reach_via: dict = {}
+
+    while queue:
+        caller = queue.pop(0)
+        cur.execute("SELECT callee_func FROM call_edges WHERE caller_func=?", (caller,))
+        for (callee,) in cur.fetchall():
+            if callee not in visited:
+                visited.add(callee)
+                reachable.add(callee)
+                reach_via[callee] = caller
+                queue.append(callee)
+
+    # Insert reachability for all indexed functions
+    cur.execute("SELECT file_path, name FROM function_index")
+    all_funcs = cur.fetchall()
+
+    count = 0
+    for fpath, name in all_funcs:
+        is_r = 1 if name in reachable else 0
+        via = reach_via.get(name)
+        dead_reason = None if is_r else 'no_caller_in_call_graph'
+        try:
+            cur.execute("""INSERT OR IGNORE INTO reachability
+                (symbol, file_path, is_reachable, reach_via, dead_reason)
+                VALUES (?,?,?,?,?)""",
+                (name, fpath, is_r, via, dead_reason))
+            count += 1
+        except Exception:
+            pass
+
+    return count
+
+
+def populate_runtime_entrypoints(cur: sqlite3.Cursor):
+    """Find main() entrypoints and config-loading patterns in app source files."""
+    count = 0
+    app_dirs = ['apps', 'cpu/tests', 'cpu/bench', 'audit', 'examples']
+    main_re = re.compile(r'\bint\s+main\s*\(')
+    config_re = re.compile(r'"config\.json"|"config_path"|"database"|fopen\s*\(')
+
+    for app_dir in app_dirs:
+        dirpath = LIB_ROOT / app_dir
+        if not dirpath.exists():
+            continue
+        for root, dirs, files in os.walk(dirpath):
+            dirs[:] = [d for d in dirs if not should_skip_dir(d)]
+            for fname in sorted(files):
+                if os.path.splitext(fname)[1].lower() not in ('.cpp', '.c', '.cu', '.mm'):
+                    continue
+                fpath = Path(root) / fname
+                rel = str(fpath.relative_to(LIB_ROOT))
+                binary = os.path.splitext(fname)[0]
+                try:
+                    lines = fpath.read_text(errors='replace').split('\n')
+                except Exception:
+                    continue
+                for i, line in enumerate(lines, 1):
+                    if main_re.search(line):
+                        cur.execute("""INSERT OR IGNORE INTO runtime_entrypoints
+                            (binary, entrypoint_func, loads_file, load_mechanism, source_file, line_no)
+                            VALUES (?,?,?,?,?,?)""",
+                            (binary, 'main', None, 'compiled-in', rel, i))
+                        count += 1
+                    elif config_re.search(line):
+                        loads = 'config.json' if 'config.json' in line else None
+                        mech = 'fopen' if 'fopen' in line else 'string_ref'
+                        cur.execute("""INSERT OR IGNORE INTO runtime_entrypoints
+                            (binary, entrypoint_func, loads_file, load_mechanism, source_file, line_no)
+                            VALUES (?,?,?,?,?,?)""",
+                            (binary, 'config_load', loads, mech, rel, i))
+                        count += 1
+
+    # ufsecp_ctx_create always runs selftest on startup
+    cur.execute("""INSERT OR IGNORE INTO runtime_entrypoints
+        (binary, entrypoint_func, loads_file, load_mechanism, source_file, line_no)
+        VALUES (?,?,?,?,?,?)""",
+        ('libufsecp', 'ufsecp_ctx_create', None, 'compiled-in',
+         'include/ufsecp/ufsecp_impl.cpp', 223))
+    count += 1
+
+    return count
+
+
+def populate_function_test_map(cur: sqlite3.Cursor):
+    """Map functions to test targets at function level (derived from test-covers-file edges)."""
+    count = 0
+
+    # Derive from existing test -> source_file edges
+    cur.execute("""SELECT src_id, dst_id FROM edges
+                   WHERE src_type='test_target' AND dst_type='source_file'
+                   AND relation='covers'""")
+    pairs = cur.fetchall()
+
+    for test_name, source_file in pairs:
+        cur.execute("SELECT name FROM function_index WHERE file_path=?", (source_file,))
+        for (func_name,) in cur.fetchall():
+            try:
+                cur.execute("""INSERT OR IGNORE INTO function_test_map
+                    (function_name, function_file, test_target, coverage_type)
+                    VALUES (?,?,?,?)""",
+                    (func_name, source_file, test_name, 'indirect'))
+                count += 1
+            except Exception:
+                pass
+
+    # Additional KAT linkage: test -> abi_routing -> impl file -> functions
+    cur.execute("""SELECT name, category FROM test_targets
+                   WHERE category IN ('cpu_core', 'audit_always')""")
+    for test_name, cat in cur.fetchall():
+        parts = test_name.split('_')
+        pattern = f'%{parts[0]}%' if parts else '%'
+        cur.execute("SELECT abi_function FROM abi_routing WHERE abi_function LIKE ?",
+                    (pattern,))
+        for (abi_fn,) in cur.fetchall():
+            impl = cur.execute("""SELECT dst_id FROM edges WHERE src_id=?
+                                  AND relation='implements'""", (abi_fn,)).fetchone()
+            if not impl:
+                continue
+            impl_file = impl[0]
+            cur.execute("SELECT name FROM function_index WHERE file_path=?", (impl_file,))
+            for (func_name,) in cur.fetchall():
+                try:
+                    cur.execute("""INSERT OR IGNORE INTO function_test_map
+                        (function_name, function_file, test_target, coverage_type)
+                        VALUES (?,?,?,?)""",
+                        (func_name, impl_file, test_name, 'kat'))
+                    count += 1
+                except Exception:
+                    pass
+
+    return count
+
+
+def populate_symbol_reasoning(cur: sqlite3.Cursor):
+    """Populate symbol-level semantic, security, performance, audit, history, and score layers."""
+    for table in (
+        'symbol_semantics',
+        'symbol_security',
+        'symbol_performance',
+        'symbol_audit_coverage',
+        'symbol_history',
+        'symbol_scores',
+    ):
+        cur.execute(f"DELETE FROM {table}")
+
+    history_cache = {}
+    count = 0
+
+    rows = cur.execute("""
+        SELECT DISTINCT file_path, name
+        FROM function_index
+        ORDER BY file_path, name
+    """).fetchall()
+
+    for file_path, symbol_name in rows:
+        semantics = derive_symbol_semantics(symbol_name, file_path)
+        security = derive_symbol_security(symbol_name, file_path, semantics)
+        performance = derive_symbol_performance(symbol_name, file_path, semantics)
+        history = get_file_history(file_path, history_cache)
+
+        test_rows = cur.execute("""
+            SELECT DISTINCT test_target, coverage_type
+            FROM function_test_map
+            WHERE function_name=? AND function_file=?
+        """, (symbol_name, file_path)).fetchall()
+        test_names = [r[0] for r in test_rows]
+        test_blob = ' '.join(test_names).lower()
+        coverage = {
+            'covered_by_unit_test': 1 if test_names else 0,
+            'covered_by_fuzz': 1 if any('fuzz' in t for t in test_names) else 0,
+            'covered_by_invalid_vectors': 1 if any(x in test_blob for x in ('wycheproof', 'vectors', 'strict', 'bip340', 'frost_kat', 'bip327')) else 0,
+            'covered_by_ct_test': 1 if any(x in test_blob for x in ('ct_', 'ct-', 'ctsidechannel', 'ct_sidechannel', 'ct_equivalence', 'ct_verif')) else 0,
+            'covered_by_cross_impl_diff': 1 if any(x in test_blob for x in ('differential', 'cross_', 'fiat_crypto', 'equivalence')) else 0,
+            'covered_by_gpu_equivalence': 1 if any(x in test_blob for x in ('gpu_', 'opencl_', 'metal_')) else 0,
+            'covered_by_regression_test': 1 if any(x in test_blob for x in ('regression', 'fault_injection', 'adversarial')) else 0,
+            'last_audit_result': 'covered' if test_names else 'uncovered',
+            'times_failed_historically': history['bug_fix_count'],
+            'known_fragile': 1 if any(x in test_blob for x in ('fault_injection', 'regression', 'adversarial')) or history['bug_fix_count'] >= 3 else 0,
+        }
+
+        low_audit = 1 if (coverage['covered_by_unit_test'] + coverage['covered_by_fuzz'] + coverage['covered_by_ct_test']) <= 1 else 0
+        risk_reasons = []
+        gain_reasons = []
+        risk = 0.0
+        gain = 0.0
+
+        if security['must_be_constant_time']:
+            risk += 5.0
+            risk_reasons.append('ct_sensitive')
+        if security['invalid_input_sensitive']:
+            risk += 4.0
+            risk_reasons.append('invalid_input_sensitive')
+        if low_audit:
+            risk += 3.0
+            risk_reasons.append('low_audit_coverage')
+        if history['recently_modified']:
+            risk += 2.0
+            risk_reasons.append('recently_modified')
+        if coverage['times_failed_historically']:
+            risk += min(12.0, coverage['times_failed_historically'] * 1.5)
+            risk_reasons.append('historical_failures')
+
+        gain += performance['hotness_score'] * 0.4
+        if performance['batchable']:
+            gain += 12.0
+            gain_reasons.append('batchable')
+        if performance['gpu_candidate']:
+            gain += 18.0
+            gain_reasons.append('gpu_candidate')
+        if performance['duplicated_backends']:
+            gain += 8.0
+            gain_reasons.append('duplicated_backends')
+        if performance['compute_bound']:
+            gain += 6.0
+            gain_reasons.append('compute_bound')
+
+        optimization_priority = max(0.0, min(100.0, gain - (risk * 0.35)))
+
+        cur.execute("""
+            INSERT INTO symbol_semantics
+            (symbol_name, file_path, category, math_core, backend, coordinate_model,
+             secret_class, abi_surface, generator_path, varpoint_path, bip340_related, bip352_related)
+            VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
+        """, (
+            symbol_name, file_path, semantics['category'], semantics['math_core'], semantics['backend'],
+            semantics['coordinate_model'], semantics['secret_class'], semantics['abi_surface'],
+            semantics['generator_path'], semantics['varpoint_path'], semantics['bip340_related'],
+            semantics['bip352_related'],
+        ))
+
+        cur.execute("""
+            INSERT INTO symbol_security
+            (symbol_name, file_path, uses_secret_input, must_be_constant_time, public_data_only,
+             device_secret_upload, requires_zeroization, invalid_input_sensitive, notes)
+            VALUES (?,?,?,?,?,?,?,?,?)
+        """, (
+            symbol_name, file_path, security['uses_secret_input'], security['must_be_constant_time'],
+            security['public_data_only'], security['device_secret_upload'], security['requires_zeroization'],
+            security['invalid_input_sensitive'], security['notes'],
+        ))
+
+        cur.execute("""
+            INSERT INTO symbol_performance
+            (symbol_name, file_path, hotness_score, estimated_cost, batchable, vectorizable,
+             gpu_candidate, memory_bound, compute_bound, duplicated_backends)
+            VALUES (?,?,?,?,?,?,?,?,?,?)
+        """, (
+            symbol_name, file_path, performance['hotness_score'], performance['estimated_cost'],
+            performance['batchable'], performance['vectorizable'], performance['gpu_candidate'],
+            performance['memory_bound'], performance['compute_bound'], performance['duplicated_backends'],
+        ))
+
+        cur.execute("""
+            INSERT INTO symbol_audit_coverage
+            (symbol_name, file_path, covered_by_unit_test, covered_by_fuzz, covered_by_invalid_vectors,
+             covered_by_ct_test, covered_by_cross_impl_diff, covered_by_gpu_equivalence,
+             covered_by_regression_test, last_audit_result, times_failed_historically, known_fragile)
+            VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
+        """, (
+            symbol_name, file_path, coverage['covered_by_unit_test'], coverage['covered_by_fuzz'],
+            coverage['covered_by_invalid_vectors'], coverage['covered_by_ct_test'],
+            coverage['covered_by_cross_impl_diff'], coverage['covered_by_gpu_equivalence'],
+            coverage['covered_by_regression_test'], coverage['last_audit_result'],
+            coverage['times_failed_historically'], coverage['known_fragile'],
+        ))
+
+        cur.execute("""
+            INSERT INTO symbol_history
+            (symbol_name, file_path, times_modified, recently_modified, bug_fix_count,
+             performance_tuning_count, audit_related_changes, last_modified)
+            VALUES (?,?,?,?,?,?,?,?)
+        """, (
+            symbol_name, file_path, history['times_modified'], history['recently_modified'],
+            history['bug_fix_count'], history['performance_tuning_count'],
+            history['audit_related_changes'], history['last_modified'],
+        ))
+
+        cur.execute("""
+            INSERT INTO symbol_scores
+            (symbol_name, file_path, risk_score, gain_score, optimization_priority, risk_reasons, gain_reasons)
+            VALUES (?,?,?,?,?,?,?)
+        """, (
+            symbol_name, file_path, round(min(100.0, risk * 5.0), 2), round(min(100.0, gain), 2),
+            round(optimization_priority, 2), json.dumps(risk_reasons), json.dumps(gain_reasons),
+        ))
+        count += 1
+
+    return count
+
+
+# ---------------------------------------------------------------------------
 # MAIN
 # ---------------------------------------------------------------------------
 def build_graph(rebuild=False):
@@ -1801,8 +2958,8 @@ def build_graph(rebuild=False):
     now = datetime.now(timezone.utc).isoformat()
     cur.execute("INSERT OR REPLACE INTO meta VALUES ('built_at', ?)", (now,))
     cur.execute("INSERT OR REPLACE INTO meta VALUES ('lib_root', ?)", (str(LIB_ROOT),))
-    cur.execute("INSERT OR REPLACE INTO meta VALUES ('version', '3.22.0')", ())
-    cur.execute("INSERT OR REPLACE INTO meta VALUES ('schema_version', '1')", ())
+    cur.execute("INSERT OR REPLACE INTO meta VALUES ('version', '4.29.0')", ())
+    cur.execute("INSERT OR REPLACE INTO meta VALUES ('schema_version', '4')", ())
     
     stats = {}
     stats['source_files'] = populate_source_files(cur)
@@ -1819,6 +2976,7 @@ def build_graph(rebuild=False):
     stats['build_configs'] = populate_build_configs(cur)
     stats['platform_dispatch'] = populate_platform_dispatch(cur)
     stats['docs'] = populate_docs(cur)
+    stats['semantic_tags'] = populate_semantic_tags(cur)
     stats['cpp_methods'] = populate_cpp_methods(cur)
     stats['security_patterns'] = populate_security_patterns(cur)
     stats['abi_routing'] = populate_abi_routing(cur)
@@ -1827,6 +2985,15 @@ def build_graph(rebuild=False):
     stats['file_summaries'] = populate_file_summaries(cur)
     stats['function_index'] = populate_function_index(cur)
     stats['edges'] = populate_edges(cur)
+    # Phase 4: new intelligence layers
+    stats['call_edges'] = populate_call_edges(cur)
+    stats['config_bindings'] = populate_config_bindings(cur)
+    stats['symbol_aliases'] = populate_symbol_aliases(cur)
+    stats['hotspot_scores'] = populate_hotspot_scores(cur)
+    stats['reachability'] = populate_reachability(cur)
+    stats['runtime_entrypoints'] = populate_runtime_entrypoints(cur)
+    stats['function_test_map'] = populate_function_test_map(cur)
+    stats['symbol_reasoning'] = populate_symbol_reasoning(cur)
     
     cur.execute("INSERT OR REPLACE INTO meta VALUES ('stats', ?)", (json.dumps(stats),))
     

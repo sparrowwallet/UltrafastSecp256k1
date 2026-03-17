@@ -143,7 +143,7 @@ For computing `sum(k_i * P_i)`:
 | Multi-scalar (Straus) | 250 us | 1,800 us |
 | Multi-scalar (Pippenger) | -- | 900 us |
 
-Pippenger is automatically selected when N > 64.
+Pippenger is automatically selected when `N >= 48` on the current optimized CPU path, with predecoded digits and bucket reuse to reduce scatter/aggregate overhead.
 
 ---
 

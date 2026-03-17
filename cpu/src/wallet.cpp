@@ -52,8 +52,10 @@ std::pair<WalletKey, bool> from_private_key(const std::uint8_t* priv32) {
     WalletKey key{};
 
     // Parse and validate private key
-    auto scalar = fast::Scalar::from_bytes(priv32);
-    if (scalar.is_zero()) return {key, false};
+    fast::Scalar scalar;
+    if (!fast::Scalar::parse_bytes_strict_nonzero(priv32, scalar)) {
+        return {key, false};
+    }
 
     key.priv = scalar;
     key.pub = derive_public_key(scalar);

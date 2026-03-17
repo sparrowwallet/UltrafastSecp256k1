@@ -333,7 +333,28 @@ static void test_empty() {
     check(true, "empty batch: no crash");
 }
 
-// -- Test 9: Negate table correctness -----------------------------------------
+// -- Test 9: Small precompute edge cases -------------------------------------
+
+static void test_precompute_small_edge_cases() {
+    (void)std::printf("[BatchAffine] Small precompute edge cases...\n");
+
+    auto empty_g = precompute_g_multiples(0);
+    check(empty_g.empty(), "precompute_g_multiples(0) empty");
+
+    auto one_g = precompute_g_multiples(1);
+    check(one_g.size() == 1, "precompute_g_multiples(1) size");
+    Point const G = scalar_mul_generator(Scalar::one());
+    check(one_g[0].x == G.x(), "precompute_g_multiples(1) x == G.x");
+    check(one_g[0].y == G.y(), "precompute_g_multiples(1) y == G.y");
+
+    Point const Q = scalar_mul_generator(Scalar::from_uint64(9));
+    auto one_q = precompute_point_multiples(Q.x(), Q.y(), 1);
+    check(one_q.size() == 1, "precompute_point_multiples(1) size");
+    check(one_q[0].x == Q.x(), "precompute_point_multiples(1) x == Q.x");
+    check(one_q[0].y == Q.y(), "precompute_point_multiples(1) y == Q.y");
+}
+
+// -- Test 10: Negate table correctness ----------------------------------------
 
 static void test_negate_table() {
     (void)std::printf("[BatchAffine] Negate table...\n");
@@ -369,6 +390,7 @@ int test_batch_add_affine_run() {
     test_bidirectional();
     test_parity();
     test_arbitrary_point_table();
+    test_precompute_small_edge_cases();
     test_negate_table();
     test_large_batch();
 

@@ -84,6 +84,10 @@ static void hex_to_bytes(const char* hex, uint8_t* out, size_t len) {
 // Well-known test private key (Bitcoin wiki example)
 static constexpr const char* TEST_PRIVKEY_HEX =
     "e8f32e723decf4051aefac8e2c93c9c5b214313817cdb01a1494b917c8436b35";
+static constexpr const char* ORDER_N_HEX =
+    "fffffffffffffffffffffffffffffffebaaedce6af48a03bbfd25e8cd0364141";
+static constexpr const char* ORDER_N_PLUS_1_HEX =
+    "fffffffffffffffffffffffffffffffebaaedce6af48a03bbfd25e8cd0364142";
 
 // ============================================================================
 // 1. from_private_key
@@ -105,6 +109,36 @@ static void test_from_private_key_zero() {
     uint8_t priv[32] = {};
     auto [key, ok] = from_private_key(priv);
     ASSERT_TRUE(!ok, "should fail for zero");
+    PASS();
+}
+
+static void test_from_private_key_order_n() {
+    TEST("from_private_key: n rejected");
+    uint8_t priv[32];
+    hex_to_bytes(ORDER_N_HEX, priv, 32);
+    auto [key, ok] = from_private_key(priv);
+    ASSERT_TRUE(!ok, "should fail for n");
+    ASSERT_TRUE(key.priv.is_zero(), "rejected key remains zero");
+    PASS();
+}
+
+static void test_from_private_key_order_n_plus_1() {
+    TEST("from_private_key: n+1 rejected");
+    uint8_t priv[32];
+    hex_to_bytes(ORDER_N_PLUS_1_HEX, priv, 32);
+    auto [key, ok] = from_private_key(priv);
+    ASSERT_TRUE(!ok, "should fail for n+1");
+    ASSERT_TRUE(key.priv.is_zero(), "rejected key remains zero");
+    PASS();
+}
+
+static void test_from_private_key_all_ff() {
+    TEST("from_private_key: all-ff rejected");
+    uint8_t priv[32];
+    std::memset(priv, 0xFF, sizeof(priv));
+    auto [key, ok] = from_private_key(priv);
+    ASSERT_TRUE(!ok, "should fail for all-ff");
+    ASSERT_TRUE(key.priv.is_zero(), "rejected key remains zero");
     PASS();
 }
 
@@ -660,6 +694,9 @@ int test_wallet_run() {
     std::printf("\n--- Key Management ---\n");
     test_from_private_key_valid();
     test_from_private_key_zero();
+    test_from_private_key_order_n();
+    test_from_private_key_order_n_plus_1();
+    test_from_private_key_all_ff();
 
     // Address generation
     std::printf("\n--- Address Generation ---\n");

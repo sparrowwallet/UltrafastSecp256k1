@@ -26,6 +26,12 @@ Usage Examples:
     python3 scripts/query_graph.py gaps
     python3 scripts/query_graph.py summary
     python3 scripts/query_graph.py sql "SELECT * FROM error_codes"
+    python3 scripts/query_graph.py callgraph ecdsa_sign
+    python3 scripts/query_graph.py hotspots 10
+    python3 scripts/query_graph.py dead
+    python3 scripts/query_graph.py aliases ecdsa_sign
+    python3 scripts/query_graph.py coverage field_mul
+    python3 scripts/query_graph.py config cmake_option
 """
 
 import sqlite3
@@ -94,6 +100,15 @@ def cmd_search(query: str):
         print(f"\nDOCS ({len(rows)}):")
         for r in rows:
             print(f"  {r['path']}  ({r['category']})")
+
+    # Semantic tags
+    rows = conn.execute("""SELECT entity_type, entity_id, tag, domain
+                           FROM fts_tags WHERE fts_tags MATCH ?
+                           LIMIT 20""", (fts_query,)).fetchall()
+    if rows:
+        print(f"\nSEMANTIC TAGS ({len(rows)}):")
+        for r in rows:
+            print(f"  [{r['entity_type']}] {r['entity_id']}  ->  {r['tag']} ({r['domain']})")
     
     conn.close()
 
@@ -563,6 +578,358 @@ def cmd_preflight(mode: str = None):
         args.append(mode)
     subprocess.run(args)
 
+
+# ---------------------------------------------------------------------------
+# PHASE 4: new query commands
+# ---------------------------------------------------------------------------
+
+def cmd_callgraph(func_name: str):
+    """Show call graph for a function: who calls it (callers) and who it calls (callees)."""
+    conn = get_conn()
+    print(f"=== Call Graph: {func_name} ===\n")
+
+    # Callers
+    callers = conn.execute("""SELECT DISTINCT caller_func, caller_file, call_line
+        FROM call_edges WHERE callee_func LIKE ?
+        ORDER BY caller_file, call_line""", (f'%{func_name}%',)).fetchall()
+    if callers:
+        print(f"CALLERS ({len(callers)}):")
+        for r in callers:
+            print(f"  {r['caller_func']:40s}  ({r['caller_file']}:L{r['call_line']})")
+    else:
+        print("CALLERS: none found in call graph")
+
+    # Callees
+    callees = conn.execute("""SELECT DISTINCT callee_func, callee_file, call_line
+        FROM call_edges WHERE caller_func LIKE ?
+        ORDER BY call_line""", (f'%{func_name}%',)).fetchall()
+    if callees:
+        print(f"\nCALLEES ({len(callees)}):")
+        for r in callees:
+            print(f"  L{r['call_line'] or '?':4}  {r['callee_func']:40s}  {r['callee_file'] or '(unknown)'}")
+    else:
+        print("\nCALLEES: none found in call graph")
+
+    conn.close()
+
+
+def cmd_hotspots(top_n: str = '15'):
+    """Show top N hotspot files ranked by composite risk score."""
+    try:
+        n = int(top_n)
+    except (TypeError, ValueError):
+        n = 15
+    conn = get_conn()
+    rows = conn.execute("""SELECT file_path, hotspot_score, coupling_score,
+                                  security_density, test_coverage_gap,
+                                  null_risk_score, reasons
+                           FROM hotspot_scores
+                           ORDER BY hotspot_score DESC LIMIT ?""", (n,)).fetchall()
+    if not rows:
+        print("No hotspot data. Rebuild graph with: python3 scripts/build_project_graph.py --rebuild")
+        conn.close()
+        return
+    print(f"=== Top {n} Hotspot Files ===\n")
+    print(f"  {'SCORE':>5}  {'COUP':>5}  {'SEC':>5}  {'GAP':>4}  FILE")
+    print(f"  {'-'*5}  {'-'*5}  {'-'*5}  {'-'*4}  {'-'*50}")
+    for r in rows:
+        reasons = r['reasons'] or '[]'
+        try:
+            rl = json.loads(reasons)
+        except Exception:
+            rl = []
+        tag = ','.join(rl[:2])
+        print(f"  {r['hotspot_score']:>5.2f}  {r['coupling_score']:>5.2f}  "
+              f"{r['security_density']:>5.2f}  {r['test_coverage_gap']:>4.0f}  "
+              f"{r['file_path']}  [{tag}]")
+    conn.close()
+
+
+def cmd_dead(filter_str: str = None):
+    """Show potentially dead/unreachable code from reachability analysis."""
+    conn = get_conn()
+    if filter_str:
+        rows = conn.execute("""SELECT symbol, file_path, dead_reason, reach_via
+            FROM reachability WHERE is_reachable=0 AND (symbol LIKE ? OR file_path LIKE ?)
+            ORDER BY file_path, symbol""",
+            (f'%{filter_str}%', f'%{filter_str}%')).fetchall()
+    else:
+        rows = conn.execute("""SELECT symbol, file_path, dead_reason, reach_via
+            FROM reachability WHERE is_reachable=0 ORDER BY file_path, symbol""").fetchall()
+    total = conn.execute("SELECT COUNT(*) AS cnt FROM reachability WHERE is_reachable=0").fetchone()['cnt']
+    reachable = conn.execute("SELECT COUNT(*) AS cnt FROM reachability WHERE is_reachable=1").fetchone()['cnt']
+    print(f"=== Dead Code Analysis ({total} unreachable / {reachable + total} total) ===\n")
+    if not rows:
+        print("  No unreachable functions found (or graph not built with call edges).")
+        conn.close()
+        return
+    cur_file = None
+    for r in rows[:100]:
+        if r['file_path'] != cur_file:
+            cur_file = r['file_path']
+            print(f"\n  {cur_file}:")
+        print(f"    {r['symbol']:40s}  [{r['dead_reason'] or 'no_caller'}]")
+    if len(rows) > 100:
+        print(f"\n  ... and {len(rows) - 100} more (use filter to narrow down)")
+    conn.close()
+
+
+def cmd_aliases(symbol: str = None):
+    """Show symbol aliases and similar names (variant/typo detection)."""
+    conn = get_conn()
+    if symbol:
+        rows = conn.execute("""SELECT canonical, alias, similarity, kind
+            FROM symbol_aliases
+            WHERE canonical LIKE ? OR alias LIKE ?
+            ORDER BY similarity DESC""",
+            (f'%{symbol}%', f'%{symbol}%')).fetchall()
+    else:
+        rows = conn.execute("""SELECT canonical, alias, similarity, kind
+            FROM symbol_aliases ORDER BY similarity DESC LIMIT 50""").fetchall()
+    total = conn.execute("SELECT COUNT(*) AS cnt FROM symbol_aliases").fetchone()['cnt']
+    print(f"=== Symbol Aliases ({total} total, showing {len(rows)}) ===\n")
+    if not rows:
+        print("  No aliases found. (Rebuild graph to generate.)")
+        conn.close()
+        return
+    for r in rows:
+        print(f"  [{r['kind']:12s}] {r['similarity']:.3f}  {r['canonical']:40s}  ~=  {r['alias']}")
+    conn.close()
+
+
+def cmd_coverage(func_name: str = None):
+    """Show which test targets cover a function (function-level coverage map)."""
+    conn = get_conn()
+    if func_name:
+        rows = conn.execute("""SELECT ftm.function_name, ftm.function_file, ftm.test_target,
+                                      ftm.coverage_type, fi.start_line, fi.end_line
+                               FROM function_test_map ftm
+                               LEFT JOIN function_index fi
+                                   ON fi.file_path = ftm.function_file
+                                   AND fi.name = ftm.function_name
+                               WHERE ftm.function_name LIKE ?
+                               ORDER BY ftm.function_file""",
+                            (f'%{func_name}%',)).fetchall()
+        print(f"=== Test Coverage: *{func_name}* ({len(rows)} mappings) ===\n")
+        for r in rows:
+            span = f"L{r['start_line']}-{r['end_line']}" if r['start_line'] else '?'
+            print(f"  {r['function_name']:40s} {span:12s}  <- {r['test_target']}  [{r['coverage_type']}]")
+    else:
+        # Summary: files covered vs uncovered
+        covered = conn.execute("SELECT COUNT(DISTINCT function_file) AS cnt FROM function_test_map").fetchone()['cnt']
+        total_files = conn.execute("SELECT COUNT(DISTINCT file_path) AS cnt FROM function_index").fetchone()['cnt']
+        total_funcs = conn.execute("SELECT COUNT(*) AS cnt FROM function_test_map").fetchone()['cnt']
+        print(f"=== Function Coverage Summary ===\n")
+        print(f"  Files with coverage: {covered}/{total_files}")
+        print(f"  Total (function, test) mappings: {total_funcs}")
+        print(f"\nTop covered files:")
+        for r in conn.execute("""SELECT function_file, COUNT(DISTINCT test_target) AS tests,
+                                         COUNT(DISTINCT function_name) AS funcs
+                                  FROM function_test_map
+                                  GROUP BY function_file ORDER BY tests DESC LIMIT 15""").fetchall():
+            print(f"  {r['function_file']:55s} {r['tests']:3d} tests  {r['funcs']:4d} functions")
+    conn.close()
+
+
+def cmd_config(filter_type: str = None):
+    """Show config/CMake option -> code symbol bindings."""
+    conn = get_conn()
+    if filter_type:
+        rows = conn.execute("""SELECT config_file, config_key, code_symbol, code_file,
+                                      binding_type, description
+                               FROM config_bindings WHERE binding_type LIKE ? OR config_file LIKE ?
+                               ORDER BY binding_type, config_key""",
+                            (f'%{filter_type}%', f'%{filter_type}%')).fetchall()
+    else:
+        rows = conn.execute("""SELECT config_file, config_key, code_symbol, code_file,
+                                      binding_type, description
+                               FROM config_bindings ORDER BY binding_type, config_key""").fetchall()
+    print(f"=== Config Bindings ({len(rows)}) ===\n")
+    cur_type = None
+    for r in rows:
+        if r['binding_type'] != cur_type:
+            cur_type = r['binding_type']
+            print(f"\n  [{cur_type}]:")
+        file_str = f"  ({r['code_file']})" if r['code_file'] else ''
+        print(f"    {r['config_key']:40s}  ->  {r['code_symbol']}{file_str}")
+    conn.close()
+
+
+def cmd_tags(filter_str: str = None):
+    """List semantic tags and their coverage across entities."""
+    conn = get_conn()
+    if filter_str:
+        rows = conn.execute("""
+            SELECT st.tag, st.domain, st.description, COUNT(et.id) AS tagged_entities
+            FROM semantic_tags st
+            LEFT JOIN entity_tags et ON et.tag = st.tag
+            WHERE st.tag LIKE ? OR st.domain LIKE ? OR st.description LIKE ?
+            GROUP BY st.tag, st.domain, st.description
+            ORDER BY tagged_entities DESC, st.tag
+        """, (f'%{filter_str}%', f'%{filter_str}%', f'%{filter_str}%')).fetchall()
+    else:
+        rows = conn.execute("""
+            SELECT st.tag, st.domain, st.description, COUNT(et.id) AS tagged_entities
+            FROM semantic_tags st
+            LEFT JOIN entity_tags et ON et.tag = st.tag
+            GROUP BY st.tag, st.domain, st.description
+            ORDER BY tagged_entities DESC, st.tag
+        """).fetchall()
+    print(f"=== Semantic Tags ({len(rows)}) ===\n")
+    for r in rows:
+        print(f"  {r['tag']:24s} [{r['domain']}]  entities={r['tagged_entities']}")
+        print(f"    {r['description']}")
+    conn.close()
+
+
+def cmd_tag(tag: str):
+    """Show entities carrying a specific semantic tag."""
+    conn = get_conn()
+    rows = conn.execute("""
+        SELECT entity_type, entity_id, confidence, origin
+        FROM entity_tags
+        WHERE tag LIKE ?
+        ORDER BY entity_type, confidence DESC, entity_id
+    """, (f'%{tag}%',)).fetchall()
+    print(f"=== Semantic Tag: {tag} ({len(rows)} entities) ===\n")
+    if not rows:
+        print("  No entities found.")
+        conn.close()
+        return
+    current_type = None
+    for r in rows:
+        if r['entity_type'] != current_type:
+            current_type = r['entity_type']
+            print(f"\n  [{current_type}]")
+        print(f"    {r['entity_id']}  (confidence={r['confidence']:.2f}, {r['origin']})")
+    conn.close()
+
+
+def cmd_symbol(name: str):
+    """Show the full reasoning profile for a function/symbol."""
+    conn = get_conn()
+    rows = conn.execute("""
+        SELECT *
+        FROM v_symbol_reasoning
+        WHERE symbol_name LIKE ?
+        ORDER BY optimization_priority DESC, risk_score DESC, file_path
+    """, (f'%{name}%',)).fetchall()
+    print(f"=== Symbol Reasoning: {name} ({len(rows)}) ===\n")
+    if not rows:
+        print("  No symbol found.")
+        conn.close()
+        return
+    for r in rows[:20]:
+        print(f"{r['symbol_name']}  [{r['file_path']}]")
+        print(f"  semantic: category={r['category']} math_core={r['math_core']} backend={r['backend']} coord={r['coordinate_model']}")
+        print(f"  security: secret_class={r['secret_class']} secret={r['uses_secret_input']} ct={r['must_be_constant_time']} public_only={r['public_data_only']}")
+        print(f"  perf: hotness={r['hotness_score']:.1f} gpu_candidate={r['gpu_candidate']} batchable={r['batchable']}")
+        print(f"  audit: unit={r['covered_by_unit_test']} fuzz={r['covered_by_fuzz']} ct={r['covered_by_ct_test']}")
+        print(f"  history: modified={r['times_modified']} recent={r['recently_modified']}")
+        print(f"  scores: risk={r['risk_score']:.1f} gain={r['gain_score']:.1f} priority={r['optimization_priority']:.1f}")
+        print()
+    conn.close()
+
+
+def cmd_optimize(top_n: str = '15'):
+    """Show high-gain / lower-risk optimization candidates."""
+    try:
+        n = int(top_n)
+    except (TypeError, ValueError):
+        n = 15
+    conn = get_conn()
+    rows = conn.execute("""
+        SELECT symbol_name, file_path, category, backend, hotness_score, gpu_candidate,
+               batchable, risk_score, gain_score, optimization_priority
+        FROM v_symbol_reasoning
+        WHERE category NOT IN ('test', 'audit', 'fuzz')
+        ORDER BY optimization_priority DESC, gain_score DESC
+        LIMIT ?
+    """, (n,)).fetchall()
+    print(f"=== Optimization Candidates ({len(rows)}) ===\n")
+    for r in rows:
+        print(f"  {r['optimization_priority']:>5.1f}  gain={r['gain_score']:>5.1f}  risk={r['risk_score']:>5.1f}  "
+              f"{r['symbol_name']}  [{r['category']}, {r['backend']}]")
+        print(f"         {r['file_path']}  hotness={r['hotness_score']:.1f} batchable={r['batchable']} gpu_candidate={r['gpu_candidate']}")
+    conn.close()
+
+
+def cmd_risk(top_n: str = '15'):
+    """Show high-risk / high-impact symbols that deserve manual review."""
+    try:
+        n = int(top_n)
+    except (TypeError, ValueError):
+        n = 15
+    conn = get_conn()
+    rows = conn.execute("""
+        SELECT symbol_name, file_path, category, secret_class, risk_score, gain_score,
+               covered_by_unit_test, covered_by_fuzz, covered_by_ct_test, recently_modified
+        FROM v_symbol_reasoning
+        ORDER BY risk_score DESC, gain_score DESC
+        LIMIT ?
+    """, (n,)).fetchall()
+    print(f"=== Risk Hotspots ({len(rows)}) ===\n")
+    for r in rows:
+        print(f"  risk={r['risk_score']:>5.1f}  gain={r['gain_score']:>5.1f}  {r['symbol_name']}  [{r['category']}, {r['secret_class']}]")
+        print(f"       {r['file_path']}  unit={r['covered_by_unit_test']} fuzz={r['covered_by_fuzz']} ct={r['covered_by_ct_test']} recent={r['recently_modified']}")
+    conn.close()
+
+
+def cmd_gpuwork(top_n: str = '15'):
+    """Show top CPU symbols that look like GPU/offload candidates."""
+    try:
+        n = int(top_n)
+    except (TypeError, ValueError):
+        n = 15
+    conn = get_conn()
+    rows = conn.execute("""
+        SELECT symbol_name, file_path, category, hotness_score, batchable,
+               compute_bound, risk_score, gain_score, optimization_priority
+        FROM v_symbol_reasoning
+        WHERE backend='cpu' AND gpu_candidate=1
+        ORDER BY gain_score DESC, optimization_priority DESC
+        LIMIT ?
+    """, (n,)).fetchall()
+    print(f"=== GPU Candidate Symbols ({len(rows)}) ===\n")
+    for r in rows:
+        print(f"  gain={r['gain_score']:>5.1f}  risk={r['risk_score']:>5.1f}  {r['symbol_name']}  [{r['category']}]")
+        print(f"       {r['file_path']}  hotness={r['hotness_score']:.1f} batchable={r['batchable']} compute_bound={r['compute_bound']} priority={r['optimization_priority']:.1f}")
+    conn.close()
+
+
+def cmd_fragile(top_n: str = '15'):
+    """Show ct-sensitive or invalid-input-sensitive symbols with weak coverage and recent churn."""
+    try:
+        n = int(top_n)
+    except (TypeError, ValueError):
+        n = 15
+    conn = get_conn()
+    rows = conn.execute("""
+        SELECT ss.symbol_name, ss.file_path, ss.secret_class,
+               sec.invalid_input_sensitive, cov.covered_by_unit_test,
+               cov.covered_by_fuzz, cov.covered_by_ct_test,
+               cov.known_fragile, hist.recently_modified, score.risk_score
+        FROM symbol_semantics ss
+        JOIN symbol_security sec
+          ON sec.symbol_name = ss.symbol_name AND sec.file_path = ss.file_path
+        JOIN symbol_audit_coverage cov
+          ON cov.symbol_name = ss.symbol_name AND cov.file_path = ss.file_path
+        JOIN symbol_history hist
+          ON hist.symbol_name = ss.symbol_name AND hist.file_path = ss.file_path
+        JOIN symbol_scores score
+          ON score.symbol_name = ss.symbol_name AND score.file_path = ss.file_path
+        WHERE (sec.must_be_constant_time=1 OR sec.invalid_input_sensitive=1)
+          AND (cov.covered_by_fuzz=0 OR cov.covered_by_ct_test=0)
+        ORDER BY score.risk_score DESC, hist.recently_modified DESC, cov.known_fragile DESC
+        LIMIT ?
+    """, (n,)).fetchall()
+    print(f"=== Fragile Symbols ({len(rows)}) ===\n")
+    for r in rows:
+        print(f"  risk={r['risk_score']:>5.1f}  {r['symbol_name']}  [{r['secret_class']}]")
+        print(f"       {r['file_path']}  invalid_input={r['invalid_input_sensitive']} unit={r['covered_by_unit_test']} fuzz={r['covered_by_fuzz']} ct={r['covered_by_ct_test']} recent={r['recently_modified']} fragile={r['known_fragile']}")
+    conn.close()
+
+
 COMMANDS = {
     'search': ('search <query>', cmd_search),
     'file': ('file <path>', cmd_file),
@@ -586,6 +953,20 @@ COMMANDS = {
     'gaps': ('gaps', cmd_gaps),
     'context': ('context <file>', cmd_context),
     'preflight': ('preflight [--security|--coverage|--abi]', cmd_preflight),
+    # Phase 4: new commands
+    'callgraph': ('callgraph <function>', cmd_callgraph),
+    'hotspots': ('hotspots [N]', cmd_hotspots),
+    'dead': ('dead [filter]', cmd_dead),
+    'aliases': ('aliases [symbol]', cmd_aliases),
+    'coverage': ('coverage [function]', cmd_coverage),
+    'config': ('config [type]', cmd_config),
+    'tags': ('tags [filter]', cmd_tags),
+    'tag': ('tag <name>', cmd_tag),
+    'symbol': ('symbol <name>', cmd_symbol),
+    'optimize': ('optimize [N]', cmd_optimize),
+    'risk': ('risk [N]', cmd_risk),
+    'gpuwork': ('gpuwork [N]', cmd_gpuwork),
+    'fragile': ('fragile [N]', cmd_fragile),
 }
 
 if __name__ == '__main__':

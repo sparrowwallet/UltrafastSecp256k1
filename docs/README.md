@@ -17,6 +17,9 @@
 | [ESP32 Setup](ESP32_SETUP.md) | ESP32-S3/PICO-D4 flashing & testing guide |
 | [RISC-V Optimizations](../RISCV_OPTIMIZATIONS.md) | RISC-V assembly & RVV details |
 | [Porting Guide](../PORTING.md) | Add new platforms, architectures, GPU backends |
+| [Project Graph Reasoning](PROJECT_GRAPH_REASONING.md) | SQLite code graph, semantic tags, symbol reasoning, and optimization/audit workflows |
+| `scripts/query_graph.py tags` | Semantic tag inventory from the repository knowledge graph |
+| `scripts/query_graph.py symbol/optimize/risk` | Symbol-level crypto reasoning, gain/risk scoring, and optimization candidates |
 
 ## Security & Audit
 
