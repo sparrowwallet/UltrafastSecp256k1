@@ -1357,16 +1357,31 @@ int main(int argc, char** argv) {
 
             // Prepare batch entries (reuse pool cyclically)
             std::vector<SchnorrBatchEntry> schnorr_batch(static_cast<std::size_t>(batch_n));
+            std::vector<SchnorrBatchCachedEntry> schnorr_batch_cached(
+                static_cast<std::size_t>(batch_n));
             for (int j = 0; j < batch_n; ++j) {
                 schnorr_batch[static_cast<std::size_t>(j)].pubkey_x = schnorr_pubkeys_x[j % POOL];
                 schnorr_batch[static_cast<std::size_t>(j)].message  = msghashes[j % POOL];
                 schnorr_batch[static_cast<std::size_t>(j)].signature = schnorr_sigs[j % POOL];
+
+                schnorr_batch_cached[static_cast<std::size_t>(j)].pubkey =
+                    &schnorr_xonly[j % POOL];
+                schnorr_batch_cached[static_cast<std::size_t>(j)].message =
+                    msghashes[j % POOL];
+                schnorr_batch_cached[static_cast<std::size_t>(j)].signature =
+                    schnorr_sigs[j % POOL];
             }
 
             // Correctness sanity check
             bool batch_ok = schnorr_batch_verify(schnorr_batch);
             if (!batch_ok) {
                 printf("[!] schnorr_batch_verify(%d) FAILED correctness check\n", batch_n);
+            }
+
+            bool cached_batch_ok = schnorr_batch_verify(schnorr_batch_cached);
+            if (!cached_batch_ok) {
+                printf("[!] schnorr_batch_verify(cached,%d) FAILED correctness check\n",
+                       batch_n);
             }
 
             // Bench: fewer iterations for larger batches
@@ -1391,6 +1406,24 @@ int main(int argc, char** argv) {
             printf("| %-44s | %8.2fx  |\n",
                    batch_n <= 9 ? "  -> speedup vs individual" : "  -> speedup vs individual",
                    speedup);
+
+                 const double cached_batch_ns = bench_ns([&]() {
+                  bool ok = schnorr_batch_verify(schnorr_batch_cached);
+                  bench::DoNotOptimize(ok);
+                 }, iters);
+
+                 double cached_per_sig = cached_batch_ns / static_cast<double>(batch_n);
+                 double cached_speedup = u_schnorr_verify / cached_per_sig;
+
+                 snprintf(label, sizeof(label), "schnorr_batch_verify(cached,N=%d)", batch_n);
+                 print_row(label, cached_batch_ns);
+
+                 snprintf(label, sizeof(label), "  -> per-sig cached (N=%d)", batch_n);
+                 print_row(label, cached_per_sig);
+
+                 printf("| %-44s | %8.2fx  |\n",
+                     "  -> cached speedup vs individual",
+                     cached_speedup);
         }
 
         printf("|                                              |            |\n");
