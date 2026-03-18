@@ -88,7 +88,7 @@ coin_derive_key_with_purpose(const ExtendedKey& master,
                              std::uint32_t account,
                              bool change,
                              std::uint32_t address_index) {
-    std::uint32_t const purpose_index = static_cast<std::uint32_t>(purpose);
+    auto const purpose_index = static_cast<std::uint32_t>(purpose);
     std::uint32_t const coin_index = coin.coin_type;
     std::uint32_t const change_index = change ? 1u : 0u;
 
@@ -100,19 +100,19 @@ coin_derive_key_with_purpose(const ExtendedKey& master,
     }
 
     auto [purpose_key, purpose_ok] = master.derive_hardened(purpose_index);
-    ExtendedKeyEraseGuard purpose_guard(purpose_key);
+    const ExtendedKeyEraseGuard purpose_guard(purpose_key);
     if (!purpose_ok) return {ExtendedKey{}, false};
 
     auto [coin_key, coin_ok] = purpose_key.derive_hardened(coin_index);
-    ExtendedKeyEraseGuard coin_guard(coin_key);
+    const ExtendedKeyEraseGuard coin_guard(coin_key);
     if (!coin_ok) return {ExtendedKey{}, false};
 
     auto [account_key, account_ok] = coin_key.derive_hardened(account);
-    ExtendedKeyEraseGuard account_guard(account_key);
+    const ExtendedKeyEraseGuard account_guard(account_key);
     if (!account_ok) return {ExtendedKey{}, false};
 
     auto [change_key, change_ok] = account_key.derive_normal(change_index);
-    ExtendedKeyEraseGuard change_guard(change_key);
+    const ExtendedKeyEraseGuard change_guard(change_key);
     if (!change_ok) return {ExtendedKey{}, false};
 
     return change_key.derive_normal(address_index);
@@ -127,12 +127,12 @@ coin_address_from_seed(const std::uint8_t* seed, std::size_t seed_len,
                        std::uint32_t address_index) {
     // Step 1: Master key from seed
     auto [master, master_ok] = bip32_master_key(seed, seed_len);
-    ExtendedKeyEraseGuard master_guard(master);
+    const ExtendedKeyEraseGuard master_guard(master);
     if (!master_ok) return {{}, false};
     
     // Step 2: Derive coin-specific child
     auto [child, child_ok] = coin_derive_key(master, coin, account, false, address_index);
-    ExtendedKeyEraseGuard child_guard(child);
+    const ExtendedKeyEraseGuard child_guard(child);
     if (!child_ok) return {{}, false};
     
     // Step 3: Generate address

@@ -1762,18 +1762,18 @@ ufsecp_error_t ufsecp_musig2_partial_sign(
     if (!scalar_parse_strict_nonzero(privkey, sk)) {
         return ctx_set_err(ctx, UFSECP_ERR_BAD_KEY, "privkey is zero or >= n");
     }
-    SecureEraseGuard<Scalar> sk_guard(&sk);
+    const SecureEraseGuard<Scalar> sk_guard(&sk);
     secp256k1::MuSig2SecNonce sn;
-    SecureEraseGuard<secp256k1::MuSig2SecNonce> sn_guard(&sn);
+    const SecureEraseGuard<secp256k1::MuSig2SecNonce> sn_guard(&sn);
     Scalar k1, k2;
     if (!scalar_parse_strict_nonzero(secnonce, k1)) {
         return ctx_set_err(ctx, UFSECP_ERR_BAD_INPUT, "invalid secnonce k1");
     }
-    SecureEraseGuard<Scalar> k1_guard(&k1);
+    const SecureEraseGuard<Scalar> k1_guard(&k1);
     if (!scalar_parse_strict_nonzero(secnonce + 32, k2)) {
         return ctx_set_err(ctx, UFSECP_ERR_BAD_INPUT, "invalid secnonce k2");
     }
-    SecureEraseGuard<Scalar> k2_guard(&k2);
+    const SecureEraseGuard<Scalar> k2_guard(&k2);
     sn.k1 = k1;
     sn.k2 = k2;
     secp256k1::MuSig2KeyAggCtx kagg;
@@ -2062,7 +2062,7 @@ ufsecp_error_t ufsecp_frost_sign(
     if (!scalar_parse_strict(keypkg + 12, kp.signing_share)) {
         return ctx_set_err(ctx, UFSECP_ERR_BAD_KEY, "invalid signing share in keypkg");
     }
-    SecureEraseGuard<Scalar> signing_share_guard(&kp.signing_share);
+    const SecureEraseGuard<Scalar> signing_share_guard(&kp.signing_share);
     kp.verification_share = point_from_compressed(keypkg + 44);
     if (kp.verification_share.is_infinity()) {
         return ctx_set_err(ctx, UFSECP_ERR_BAD_KEY, "invalid verification share");
@@ -2076,15 +2076,15 @@ ufsecp_error_t ufsecp_frost_sign(
     if (!scalar_parse_strict(nonce, h)) {
         return ctx_set_err(ctx, UFSECP_ERR_BAD_INPUT, "invalid hiding nonce");
     }
-    SecureEraseGuard<Scalar> h_guard(&h);
+    const SecureEraseGuard<Scalar> h_guard(&h);
     if (!scalar_parse_strict(nonce + 32, b)) {
         return ctx_set_err(ctx, UFSECP_ERR_BAD_INPUT, "invalid binding nonce");
     }
-    SecureEraseGuard<Scalar> b_guard(&b);
+    const SecureEraseGuard<Scalar> b_guard(&b);
     fn.hiding_nonce = h;
     fn.binding_nonce = b;
-    SecureEraseGuard<Scalar> hiding_nonce_guard(&fn.hiding_nonce);
-    SecureEraseGuard<Scalar> binding_nonce_guard(&fn.binding_nonce);
+    const SecureEraseGuard<Scalar> hiding_nonce_guard(&fn.hiding_nonce);
+    const SecureEraseGuard<Scalar> binding_nonce_guard(&fn.binding_nonce);
     std::array<uint8_t, 32> msg_arr;
     std::memcpy(msg_arr.data(), msg32, 32);
     std::vector<secp256k1::FrostNonceCommitment> ncs(n_signers);
@@ -2233,7 +2233,7 @@ ufsecp_error_t ufsecp_schnorr_adaptor_sign(
     if (!scalar_parse_strict_nonzero(privkey, sk)) {
         return ctx_set_err(ctx, UFSECP_ERR_BAD_KEY, "privkey is zero or >= n");
     }
-    SecureEraseGuard<Scalar> sk_guard(&sk);
+    const SecureEraseGuard<Scalar> sk_guard(&sk);
     std::array<uint8_t, 32> msg_arr, aux_arr;
     std::memcpy(msg_arr.data(), msg32, 32);
     std::memcpy(aux_arr.data(), aux_rand, 32);
@@ -2365,7 +2365,7 @@ ufsecp_error_t ufsecp_ecdsa_adaptor_sign(
     if (!scalar_parse_strict_nonzero(privkey, sk)) {
         return ctx_set_err(ctx, UFSECP_ERR_BAD_KEY, "privkey is zero or >= n");
     }
-    SecureEraseGuard<Scalar> sk_guard(&sk);
+    const SecureEraseGuard<Scalar> sk_guard(&sk);
     std::array<uint8_t, 32> msg_arr;
     std::memcpy(msg_arr.data(), msg32, 32);
     auto ap = point_from_compressed(adaptor_point33);
@@ -2629,7 +2629,7 @@ ufsecp_error_t ufsecp_zk_knowledge_prove(
     if (!scalar_parse_strict_nonzero(secret, s)) {
         return ctx_set_err(ctx, UFSECP_ERR_BAD_KEY, "secret is zero or >= n");
     }
-    SecureEraseGuard<Scalar> secret_guard(&s);
+    const SecureEraseGuard<Scalar> secret_guard(&s);
     auto pk = point_from_compressed(pubkey33);
     if (pk.is_infinity()) {
         return ctx_set_err(ctx, UFSECP_ERR_BAD_PUBKEY, "invalid pubkey");
@@ -2681,7 +2681,7 @@ ufsecp_error_t ufsecp_zk_dleq_prove(
     if (!scalar_parse_strict_nonzero(secret, s)) {
         return ctx_set_err(ctx, UFSECP_ERR_BAD_KEY, "secret is zero or >= n");
     }
-    SecureEraseGuard<Scalar> secret_guard(&s);
+    const SecureEraseGuard<Scalar> secret_guard(&s);
     auto G = point_from_compressed(G33);
     auto H = point_from_compressed(H33);
     auto P = point_from_compressed(P33);
@@ -2736,7 +2736,7 @@ ufsecp_error_t ufsecp_zk_range_prove(
     if (!scalar_parse_strict(blinding, b)) {
         return ctx_set_err(ctx, UFSECP_ERR_BAD_INPUT, "blinding >= n");
     }
-    SecureEraseGuard<Scalar> blinding_guard(&b);
+    const SecureEraseGuard<Scalar> blinding_guard(&b);
     auto commit_pt = point_from_compressed(commitment33);
     if (commit_pt.is_infinity()) {
         return ctx_set_err(ctx, UFSECP_ERR_BAD_INPUT, "invalid commitment point");
@@ -3006,11 +3006,11 @@ ufsecp_error_t ufsecp_silent_payment_address(
     if (!scalar_parse_strict_nonzero(scan_privkey, scan_sk)) {
         return ctx_set_err(ctx, UFSECP_ERR_BAD_KEY, "scan privkey is zero or >= n");
     }
-    SecureEraseGuard<Scalar> scan_sk_guard(&scan_sk);
+    const SecureEraseGuard<Scalar> scan_sk_guard(&scan_sk);
     if (!scalar_parse_strict_nonzero(spend_privkey, spend_sk)) {
         return ctx_set_err(ctx, UFSECP_ERR_BAD_KEY, "spend privkey is zero or >= n");
     }
-    SecureEraseGuard<Scalar> spend_sk_guard(&spend_sk);
+    const SecureEraseGuard<Scalar> spend_sk_guard(&spend_sk);
 
     auto spa = secp256k1::silent_payment_address(scan_sk, spend_sk);
     auto scan_comp  = spa.scan_pubkey.to_compressed();
@@ -3108,11 +3108,11 @@ ufsecp_error_t ufsecp_silent_payment_scan(
     if (!scalar_parse_strict_nonzero(scan_privkey, scan_sk)) {
         return ctx_set_err(ctx, UFSECP_ERR_BAD_KEY, "scan privkey is zero or >= n");
     }
-    SecureEraseGuard<Scalar> scan_sk_guard(&scan_sk);
+    const SecureEraseGuard<Scalar> scan_sk_guard(&scan_sk);
     if (!scalar_parse_strict_nonzero(spend_privkey, spend_sk)) {
         return ctx_set_err(ctx, UFSECP_ERR_BAD_KEY, "spend privkey is zero or >= n");
     }
-    SecureEraseGuard<Scalar> spend_sk_guard(&spend_sk);
+    const SecureEraseGuard<Scalar> spend_sk_guard(&spend_sk);
 
     // Parse input pubkeys
     std::vector<Point> input_pks;
