@@ -113,7 +113,7 @@ Point pippenger_msm(const Scalar* scalars,
     std::memset(used, 0, num_buckets * sizeof(std::uint8_t));
 
     // Pre-extract all digits to avoid per-window scalar bit extraction.
-    std::unique_ptr<std::uint16_t[]> digits =
+    const auto digits =
         std::make_unique<std::uint16_t[]>(n * static_cast<std::size_t>(num_windows));
     for (std::size_t i = 0; i < n; ++i) {
         for (unsigned w = 0; w < num_windows; ++w) {
