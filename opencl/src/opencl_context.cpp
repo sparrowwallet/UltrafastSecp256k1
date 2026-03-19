@@ -1680,6 +1680,10 @@ bool Context::Impl::build_program() {
     // NVIDIA-specific optimization flags
     if (device_info.is_nvidia) {
         build_options += " -cl-nv-opt-level=3";
+        // Force-define __NV_CL_C_VERSION so our PTX inline-asm blocks compile.
+        // NVIDIA OpenCL 3.0 CUDA drivers (>=525) may not predefine this macro
+        // even though they support the same PTX inline-asm as CUDA (same PTXAS backend).
+        build_options += " -D__NV_CL_C_VERSION=200";
     }
 
     // Build program
