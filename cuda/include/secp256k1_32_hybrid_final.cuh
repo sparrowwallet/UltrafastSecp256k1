@@ -273,7 +273,8 @@ __device__ __forceinline__ void sqr_256_512_hybrid(
 // throughput is 1/32 of INT32. By doing the main T_hi x K_MOD multiplication
 // in 32-bit, we avoid the INT64 multiply bottleneck.
 // Phase 1+2: fully 32-bit (T_hi x K_MOD + add to T_lo)
-// Phase 3+4: 64-bit (overflow handling + conditional subtraction -- proven code)
+// Phase 3: 32-bit overflow fold (no INT64 multiply -- 64x throughput gain)
+// Phase 4: 64-bit conditional subtraction (64-bit add/sub is free on NVIDIA)
 // ============================================================================
 __device__ __forceinline__ void reduce_512_to_256_32(
     uint32_t t32[16],
@@ -345,22 +346,56 @@ __device__ __forceinline__ void reduce_512_to_256_32(
           "r"(a4), "r"(a5), "r"(a6), "r"(a7)
     );
 
-    // ---- Phase 3: Overflow reduction (64-bit for proven correctness) ----
-    // Pack lower 256 bits to 64-bit
+    // ---- Phase 3: Overflow reduction (fully 32-bit — no INT64 multiply) ----
+    // On consumer NVIDIA GPUs (Turing/Ampere/Ada/Blackwell), INT64 multiply
+    // throughput is 64x lower than INT32. We decompose extra * K_MOD into
+    // pure 32-bit ops using K_MOD = 2^32 + 977.
+    //
+    // extra = a8 + carry + a9 * 2^32  (at most ~2^33)
+    // extra * K_MOD = extra * 977 + extra << 32  (at most ~2^66)
+
+    // Step 1: Decompose extra into 32-bit halves with carry
+    uint32_t e_lo, e_carry;
+    asm volatile(
+        "add.cc.u32 %0, %2, %3;\n\t"
+        "addc.u32 %1, 0, 0;\n\t"
+        : "=r"(e_lo), "=r"(e_carry)
+        : "r"(a8), "r"(carry)
+    );
+    uint32_t e_hi = a9 + e_carry;  // 0, 1, or 2
+
+    // Step 2: (e_hi:e_lo) * 977  →  3 limbs {q+p_hi, p_lo} max ~42 bits
+    uint32_t p_lo, p_hi;
+    asm volatile(
+        "mul.lo.u32 %0, %2, 977;\n\t"
+        "mul.hi.u32 %1, %2, 977;\n\t"
+        : "=r"(p_lo), "=r"(p_hi)
+        : "r"(e_lo)
+    );
+    uint32_t q = e_hi * 977u;            // e_hi <= 2, so q <= 1954
+    uint32_t m1 = p_hi + q;              // <= 1023 + 1954 = 2977, no overflow
+
+    // Step 3: extra * K_MOD = extra*977 + extra<<32
+    //   extra*977  = {0,  m1,   p_lo}
+    //   extra<<32  = {e_hi, e_lo, 0  }
+    //   sum        = {ek2, ek1, ek0  } with carries
+    uint32_t ek0 = p_lo;
+    uint32_t ek1, ek1_carry;
+    asm volatile(
+        "add.cc.u32 %0, %2, %3;\n\t"
+        "addc.u32 %1, 0, 0;\n\t"
+        : "=r"(ek1), "=r"(ek1_carry)
+        : "r"(m1), "r"(e_lo)
+    );
+    uint32_t ek2 = e_hi + ek1_carry;     // <= 2 + 1 = 3
+
+    // Pack to 64-bit for efficient add chain (64-bit add is free on NVIDIA)
     uint64_t r0 = ((uint64_t)t1 << 32) | t0;
     uint64_t r1 = ((uint64_t)t3 << 32) | t2;
     uint64_t r2 = ((uint64_t)t5 << 32) | t4;
     uint64_t r3 = ((uint64_t)t7 << 32) | t6;
-
-    // extra = a8 + carry + a9 * 2^32 (up to ~2^33)
-    uint64_t extra = (uint64_t)a8 + carry + ((uint64_t)a9 << 32);
-    uint64_t ek_lo, ek_hi;
-    asm volatile(
-        "mul.lo.u64 %0, %2, %3;\n\t"
-        "mul.hi.u64 %1, %2, %3;\n\t"
-        : "=l"(ek_lo), "=l"(ek_hi)
-        : "l"(extra), "l"((uint64_t)0x1000003D1ULL)
-    );
+    uint64_t ek_lo = ((uint64_t)ek1 << 32) | ek0;
+    uint64_t ek_hi = (uint64_t)ek2;
 
     uint64_t c;
     asm volatile(
@@ -406,8 +441,8 @@ __device__ __forceinline__ void reduce_512_to_256_32(
 
 // ============================================================================
 // Hybrid field operations: 32-bit mul/sqr + 32-bit reduce (optimized)
-// Consumer GPUs have INT32 multiply throughput 32x higher than INT64.
-// By keeping the main reduction in 32-bit, we avoid the INT64 bottleneck.
+// Consumer GPUs have INT32 multiply throughput 64x higher than INT64.
+// Phases 1-3 are fully 32-bit; only Phase 4 (add/sub chains) uses 64-bit.
 // ============================================================================
 
 __device__ __forceinline__ void field_mul_hybrid(

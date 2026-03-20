@@ -763,8 +763,71 @@ __constant__ static const uint64_t GLV_MINUS_B2[4] = {
 // Compute (a * b) >> 384 with rounding bit (for GLV decomposition)
 // a, b: 256-bit values as LE uint64_t[4]
 // Returns upper ~128 bits as LE uint64_t[4]
+#if SECP256K1_USE_PTX
 __device__ inline void mul_shift_384(const uint64_t a[4], const uint64_t b[4], uint64_t result[4]) {
-    // Full 4x4 schoolbook -> 512-bit product, then take bits [384..511]
+    // 32-bit Comba: avoids INT64 multiply (64x throughput gain on consumer GPUs)
+    uint32_t al[8], bl[8];
+    #pragma unroll
+    for (int i = 0; i < 4; i++) {
+        al[2*i]   = (uint32_t)a[i];
+        al[2*i+1] = (uint32_t)(a[i] >> 32);
+        bl[2*i]   = (uint32_t)b[i];
+        bl[2*i+1] = (uint32_t)(b[i] >> 32);
+    }
+    uint32_t c0 = 0, c1 = 0, c2 = 0;
+
+    // 8x8 Comba: 64 mul.lo/hi.u32 pairs across 16 columns
+    // GLV_MAC: multiply-accumulate one 32x32->64 product into {c0,c1,c2}
+#define GLV_MAC(i, j) do { \
+    uint32_t _lo, _hi; \
+    asm volatile("mul.lo.u32 %0, %2, %3;\n\t" \
+                 "mul.hi.u32 %1, %2, %3;\n\t" \
+                 : "=r"(_lo), "=r"(_hi) : "r"(al[i]), "r"(bl[j])); \
+    asm volatile("add.cc.u32 %0, %0, %3;\n\t" \
+                 "addc.cc.u32 %1, %1, %4;\n\t" \
+                 "addc.u32 %2, %2, 0;\n\t" \
+                 : "+r"(c0), "+r"(c1), "+r"(c2) : "r"(_lo), "r"(_hi)); \
+} while(0)
+#define GLV_EXT(out) do { out = c0; c0 = c1; c1 = c2; c2 = 0; } while(0)
+
+    uint32_t d = 0; // discard for columns 0-10
+    /* col  0 */ GLV_MAC(0,0); GLV_EXT(d);
+    /* col  1 */ GLV_MAC(0,1); GLV_MAC(1,0); GLV_EXT(d);
+    /* col  2 */ GLV_MAC(0,2); GLV_MAC(1,1); GLV_MAC(2,0); GLV_EXT(d);
+    /* col  3 */ GLV_MAC(0,3); GLV_MAC(1,2); GLV_MAC(2,1); GLV_MAC(3,0); GLV_EXT(d);
+    /* col  4 */ GLV_MAC(0,4); GLV_MAC(1,3); GLV_MAC(2,2); GLV_MAC(3,1); GLV_MAC(4,0); GLV_EXT(d);
+    /* col  5 */ GLV_MAC(0,5); GLV_MAC(1,4); GLV_MAC(2,3); GLV_MAC(3,2); GLV_MAC(4,1); GLV_MAC(5,0); GLV_EXT(d);
+    /* col  6 */ GLV_MAC(0,6); GLV_MAC(1,5); GLV_MAC(2,4); GLV_MAC(3,3); GLV_MAC(4,2); GLV_MAC(5,1); GLV_MAC(6,0); GLV_EXT(d);
+    /* col  7 */ GLV_MAC(0,7); GLV_MAC(1,6); GLV_MAC(2,5); GLV_MAC(3,4); GLV_MAC(4,3); GLV_MAC(5,2); GLV_MAC(6,1); GLV_MAC(7,0); GLV_EXT(d);
+    /* col  8 */ GLV_MAC(1,7); GLV_MAC(2,6); GLV_MAC(3,5); GLV_MAC(4,4); GLV_MAC(5,3); GLV_MAC(6,2); GLV_MAC(7,1); GLV_EXT(d);
+    /* col  9 */ GLV_MAC(2,7); GLV_MAC(3,6); GLV_MAC(4,5); GLV_MAC(5,4); GLV_MAC(6,3); GLV_MAC(7,2); GLV_EXT(d);
+    /* col 10 */ GLV_MAC(3,7); GLV_MAC(4,6); GLV_MAC(5,5); GLV_MAC(6,4); GLV_MAC(7,3); GLV_EXT(d);
+    (void)d;
+    // Column 11: MSB is the rounding bit (bit 383)
+    uint32_t p11;
+    /* col 11 */ GLV_MAC(4,7); GLV_MAC(5,6); GLV_MAC(6,5); GLV_MAC(7,4); GLV_EXT(p11);
+    // Columns 12-15: result bits [384..511]
+    uint32_t p12, p13, p14, p15;
+    /* col 12 */ GLV_MAC(5,7); GLV_MAC(6,6); GLV_MAC(7,5); GLV_EXT(p12);
+    /* col 13 */ GLV_MAC(6,7); GLV_MAC(7,6); GLV_EXT(p13);
+    /* col 14 */ GLV_MAC(7,7); GLV_EXT(p14);
+    p15 = c0;
+#undef GLV_MAC
+#undef GLV_EXT
+
+    result[0] = ((uint64_t)p13 << 32) | p12;
+    result[1] = ((uint64_t)p15 << 32) | p14;
+    result[2] = 0;
+    result[3] = 0;
+    // Rounding: bit 383 = bit 31 of p11
+    if (p11 >> 31) {
+        result[0]++;
+        if (result[0] == 0) result[1]++;
+    }
+}
+#else
+__device__ inline void mul_shift_384(const uint64_t a[4], const uint64_t b[4], uint64_t result[4]) {
+    // Portable 64-bit version for HIP/ROCm
     uint64_t prod[8] = {};
     for (int i = 0; i < 4; i++) {
         uint64_t carry = 0;
@@ -779,17 +842,16 @@ __device__ inline void mul_shift_384(const uint64_t a[4], const uint64_t b[4], u
         }
         prod[i + 4] = carry;
     }
-    // Bits 384..511 = prod[6..7] (since 384/64 = 6)
     result[0] = prod[6];
     result[1] = prod[7];
     result[2] = 0;
     result[3] = 0;
-    // Rounding bit: bit 383 = MSB of prod[5]
     if (prod[5] >> 63) {
         result[0]++;
         if (result[0] == 0) result[1]++;
     }
 }
+#endif
 
 // Bit-length of a scalar (for GLV sign selection)
 __device__ inline int scalar_bitlen(const Scalar* s) {

@@ -970,6 +970,50 @@ inline int scalar_bitlen_cl(const Scalar* s) {
 }
 
 // (a * b) >> 384 with rounding (for GLV decomposition)
+#ifdef __NV_CL_C_VERSION
+// 32-bit Comba: avoids INT64 multiply (64x throughput gain on consumer NVIDIA)
+inline void mul_shift_384_cl(const ulong a[4], const ulong b[4], ulong result[4]) {
+    uint al[8], bl[8];
+    for (int i = 0; i < 4; i++) {
+        al[2*i]   = (uint)a[i];        al[2*i+1] = (uint)(a[i] >> 32);
+        bl[2*i]   = (uint)b[i];        bl[2*i+1] = (uint)(b[i] >> 32);
+    }
+    uint c0 = 0, c1 = 0, c2 = 0;
+#define GLV_MAC(i, j) do { uint _lo, _hi; \
+    __asm volatile("mul.lo.u32 %0, %2, %3;\n\t" "mul.hi.u32 %1, %2, %3;\n\t" \
+        : "=r"(_lo), "=r"(_hi) : "r"(al[i]), "r"(bl[j])); \
+    __asm volatile("add.cc.u32 %0, %0, %3;\n\t" "addc.cc.u32 %1, %1, %4;\n\t" "addc.u32 %2, %2, 0;\n\t" \
+        : "+r"(c0), "+r"(c1), "+r"(c2) : "r"(_lo), "r"(_hi)); } while(0)
+#define GLV_EXT(out) do { out = c0; c0 = c1; c1 = c2; c2 = 0; } while(0)
+    uint d;
+    /*  0 */ GLV_MAC(0,0); GLV_EXT(d);
+    /*  1 */ GLV_MAC(0,1); GLV_MAC(1,0); GLV_EXT(d);
+    /*  2 */ GLV_MAC(0,2); GLV_MAC(1,1); GLV_MAC(2,0); GLV_EXT(d);
+    /*  3 */ GLV_MAC(0,3); GLV_MAC(1,2); GLV_MAC(2,1); GLV_MAC(3,0); GLV_EXT(d);
+    /*  4 */ GLV_MAC(0,4); GLV_MAC(1,3); GLV_MAC(2,2); GLV_MAC(3,1); GLV_MAC(4,0); GLV_EXT(d);
+    /*  5 */ GLV_MAC(0,5); GLV_MAC(1,4); GLV_MAC(2,3); GLV_MAC(3,2); GLV_MAC(4,1); GLV_MAC(5,0); GLV_EXT(d);
+    /*  6 */ GLV_MAC(0,6); GLV_MAC(1,5); GLV_MAC(2,4); GLV_MAC(3,3); GLV_MAC(4,2); GLV_MAC(5,1); GLV_MAC(6,0); GLV_EXT(d);
+    /*  7 */ GLV_MAC(0,7); GLV_MAC(1,6); GLV_MAC(2,5); GLV_MAC(3,4); GLV_MAC(4,3); GLV_MAC(5,2); GLV_MAC(6,1); GLV_MAC(7,0); GLV_EXT(d);
+    /*  8 */ GLV_MAC(1,7); GLV_MAC(2,6); GLV_MAC(3,5); GLV_MAC(4,4); GLV_MAC(5,3); GLV_MAC(6,2); GLV_MAC(7,1); GLV_EXT(d);
+    /*  9 */ GLV_MAC(2,7); GLV_MAC(3,6); GLV_MAC(4,5); GLV_MAC(5,4); GLV_MAC(6,3); GLV_MAC(7,2); GLV_EXT(d);
+    /* 10 */ GLV_MAC(3,7); GLV_MAC(4,6); GLV_MAC(5,5); GLV_MAC(6,4); GLV_MAC(7,3); GLV_EXT(d);
+    (void)d;
+    uint p11;
+    /* 11 */ GLV_MAC(4,7); GLV_MAC(5,6); GLV_MAC(6,5); GLV_MAC(7,4); GLV_EXT(p11);
+    uint p12, p13, p14, p15;
+    /* 12 */ GLV_MAC(5,7); GLV_MAC(6,6); GLV_MAC(7,5); GLV_EXT(p12);
+    /* 13 */ GLV_MAC(6,7); GLV_MAC(7,6); GLV_EXT(p13);
+    /* 14 */ GLV_MAC(7,7); GLV_EXT(p14);
+    p15 = c0;
+#undef GLV_MAC
+#undef GLV_EXT
+    result[0] = ((ulong)p13 << 32) | p12;
+    result[1] = ((ulong)p15 << 32) | p14;
+    result[2] = 0; result[3] = 0;
+    if (p11 >> 31) { result[0]++; if (result[0] == 0) result[1]++; }
+}
+#else
+// Portable 64-bit version for non-NVIDIA OpenCL
 inline void mul_shift_384_cl(const ulong a[4], const ulong b[4], ulong result[4]) {
     ulong prod[8] = {0,0,0,0,0,0,0,0};
     for (int i = 0; i < 4; i++) {
@@ -985,6 +1029,7 @@ inline void mul_shift_384_cl(const ulong a[4], const ulong b[4], ulong result[4]
     result[0] = prod[6]; result[1] = prod[7]; result[2] = 0; result[3] = 0;
     if (prod[5] >> 63) { result[0]++; if (result[0] == 0) result[1]++; }
 }
+#endif
 
 // GLV decomposition: k = k1 + k2*lambda mod n, |k1|,|k2| ~ 128 bits
 inline void glv_decompose_cl(const Scalar* k, Scalar* k1, Scalar* k2, int* k1_neg, int* k2_neg) {
@@ -1199,6 +1244,11 @@ __kernel void batch_jacobian_to_affine_kernel(
     affines[gid].x = ax;
     affines[gid].y = ay;
 }
+
+)KERNEL",
+
+// ---- fourth segment (affine batch ops + jacobian_to_affine) ----
+R"KERNEL(
 
 // ---- Affine point addition kernels ----
 
