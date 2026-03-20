@@ -885,6 +885,252 @@ int main(int argc, char* argv[]) {
     }
 
     // ==========================================================================
+    // ZK Proof Benchmarks (kernel-only: knowledge prove/verify + DLEQ prove/verify)
+    // Loads secp256k1_zk.cl, runs batch with valid prove→verify data.
+    // ==========================================================================
+    {
+        cl_context       zk_ctx = (cl_context)ctx->native_context();
+        cl_command_queue zk_q   = (cl_command_queue)ctx->native_queue();
+        cl_int zk_err;
+
+        // Locate secp256k1_zk.cl (same search as signature section above)
+        std::string zk_src;
+        std::string zk_kdir;
+        {
+            auto exe_dir = std::filesystem::path(argv[0]).parent_path();
+            std::vector<std::string> cands = {
+                (exe_dir / "kernels").string(),
+                (exe_dir / "../kernels").string(),
+                (exe_dir / "../../opencl/kernels").string(),
+                "kernels", "../kernels", "../../opencl/kernels",
+            };
+            for (auto& c : cands) {
+                std::string p = c + "/secp256k1_zk.cl";
+                zk_src = load_cl_source(p);
+                if (!zk_src.empty()) { zk_kdir = c; break; }
+            }
+        }
+
+        if (zk_src.empty()) {
+            std::cout << "\n[SKIP] Cannot find secp256k1_zk.cl — ZK benchmarks skipped\n";
+        } else {
+            cl_device_id zk_dev = nullptr;
+            clGetContextInfo(zk_ctx, CL_CONTEXT_DEVICES, sizeof(cl_device_id), &zk_dev, nullptr);
+
+            const char* zk_ptr = zk_src.c_str();
+            size_t zk_len = zk_src.size();
+            cl_program zk_prog = clCreateProgramWithSource(zk_ctx, 1, &zk_ptr, &zk_len, &zk_err);
+            std::string zk_opts = "-cl-std=CL1.2 -cl-fast-relaxed-math -cl-mad-enable -I " + zk_kdir;
+            zk_err = clBuildProgram(zk_prog, 1, &zk_dev, zk_opts.c_str(), nullptr, nullptr);
+            if (zk_err != CL_SUCCESS) {
+                char log[16384] = {};
+                clGetProgramBuildInfo(zk_prog, zk_dev, CL_PROGRAM_BUILD_LOG, sizeof(log), log, nullptr);
+                std::cout << "\n[SKIP] ZK CL build failed:\n" << log << "\n";
+                clReleaseProgram(zk_prog);
+            } else {
+                cl_kernel k_kp = clCreateKernel(zk_prog, "zk_knowledge_prove_batch",  &zk_err);
+                cl_kernel k_kv = clCreateKernel(zk_prog, "zk_knowledge_verify_batch", &zk_err);
+                cl_kernel k_dp = clCreateKernel(zk_prog, "zk_dleq_prove_batch",       &zk_err);
+                cl_kernel k_dv = clCreateKernel(zk_prog, "zk_dleq_verify_batch",      &zk_err);
+
+                if (!k_kp || !k_kv || !k_dp || !k_dv) {
+                    std::cout << "\n[SKIP] ZK kernel creation failed\n";
+                } else {
+                    // Proof struct layouts (must match secp256k1_zk.cl)
+                    struct ZKKnProofH  { uint8_t  rx[32]; uint64_t s[4]; };  // 64 bytes
+                    struct ZKDLEQProfH { uint64_t e[4];   uint64_t s[4]; };  // 64 bytes
+
+                    std::size_t zk_batch = std::min(point_batch, static_cast<std::size_t>(8192));
+                    cl_uint     zk_cnt   = static_cast<cl_uint>(zk_batch);
+                    std::size_t zk_lsz   = 128;
+                    std::size_t zk_gsz   = ((zk_batch + zk_lsz - 1) / zk_lsz) * zk_lsz;
+
+                    // --- Build valid prove inputs ---------------------------------
+                    // secrets: small random scalars (non-zero, < 2^128 to stay below order)
+                    std::vector<Scalar> zk_secrets(zk_batch);
+                    for (std::size_t i = 0; i < zk_batch; ++i) {
+                        uint64_t lo = (rng() & 0xFFFFFFFFFFFFFFFFULL);
+                        if (!lo) lo = 1;
+                        zk_secrets[i] = {{lo, rng() & 0xFFFFFFFFULL, 0, 0}};
+                    }
+
+                    // pubkeys[i] = secrets[i] * G  (knowledge: pubkey = secret * base, base=G)
+                    std::vector<JacobianPoint> zk_pubkeys(zk_batch);
+                    ctx->batch_scalar_mul_generator(zk_secrets.data(), zk_pubkeys.data(), zk_batch);
+
+                    // base = G for all (1*G)
+                    Scalar one_sc = {{1, 0, 0, 0}};
+                    JacobianPoint g_jac;
+                    ctx->batch_scalar_mul_generator(&one_sc, &g_jac, 1);
+                    std::vector<JacobianPoint> zk_bases(zk_batch, g_jac);
+
+                    // DLEQ: H = 5*G; P[i] = secrets[i]*G; Q[i] = secrets[i]*H
+                    Scalar five_sc = {{5, 0, 0, 0}};
+                    JacobianPoint h_jac;
+                    ctx->batch_scalar_mul_generator(&five_sc, &h_jac, 1);
+                    AffinePoint h_aff;
+                    ctx->batch_jacobian_to_affine(&h_jac, &h_aff, 1);
+                    std::vector<AffinePoint> h_aff_arr(zk_batch, h_aff);
+                    std::vector<JacobianPoint> zk_Q(zk_batch);
+                    ctx->batch_scalar_mul(zk_secrets.data(), h_aff_arr.data(), zk_Q.data(), zk_batch);
+
+                    std::vector<JacobianPoint> zk_G(zk_batch, g_jac);
+                    std::vector<JacobianPoint> zk_H(zk_batch, h_jac);
+
+                    // Messages + aux randoms
+                    std::vector<uint8_t> zk_msgs(zk_batch * 32);
+                    std::vector<uint8_t> zk_aux(zk_batch * 32);
+                    for (auto& v : zk_msgs) v = static_cast<uint8_t>(rng());
+                    for (auto& v : zk_aux)  v = static_cast<uint8_t>(rng());
+
+                    // Device buffers
+                    cl_mem d_sec    = clCreateBuffer(zk_ctx, CL_MEM_READ_ONLY|CL_MEM_COPY_HOST_PTR,
+                                                      zk_batch*sizeof(Scalar), zk_secrets.data(), &zk_err);
+                    cl_mem d_pub    = clCreateBuffer(zk_ctx, CL_MEM_READ_ONLY|CL_MEM_COPY_HOST_PTR,
+                                                      zk_batch*sizeof(JacobianPoint), zk_pubkeys.data(), &zk_err);
+                    cl_mem d_base   = clCreateBuffer(zk_ctx, CL_MEM_READ_ONLY|CL_MEM_COPY_HOST_PTR,
+                                                      zk_batch*sizeof(JacobianPoint), zk_bases.data(), &zk_err);
+                    cl_mem d_zmsg   = clCreateBuffer(zk_ctx, CL_MEM_READ_ONLY|CL_MEM_COPY_HOST_PTR,
+                                                      zk_batch*32, zk_msgs.data(), &zk_err);
+                    cl_mem d_zaux   = clCreateBuffer(zk_ctx, CL_MEM_READ_ONLY|CL_MEM_COPY_HOST_PTR,
+                                                      zk_batch*32, zk_aux.data(), &zk_err);
+                    cl_mem d_kproof = clCreateBuffer(zk_ctx, CL_MEM_READ_WRITE,
+                                                      zk_batch*sizeof(ZKKnProofH), nullptr, &zk_err);
+                    cl_mem d_dproof = clCreateBuffer(zk_ctx, CL_MEM_READ_WRITE,
+                                                      zk_batch*sizeof(ZKDLEQProfH), nullptr, &zk_err);
+                    cl_mem d_zok    = clCreateBuffer(zk_ctx, CL_MEM_WRITE_ONLY,
+                                                      zk_batch*sizeof(int), nullptr, &zk_err);
+                    cl_mem d_G      = clCreateBuffer(zk_ctx, CL_MEM_READ_ONLY|CL_MEM_COPY_HOST_PTR,
+                                                      zk_batch*sizeof(JacobianPoint), zk_G.data(), &zk_err);
+                    cl_mem d_H      = clCreateBuffer(zk_ctx, CL_MEM_READ_ONLY|CL_MEM_COPY_HOST_PTR,
+                                                      zk_batch*sizeof(JacobianPoint), zk_H.data(), &zk_err);
+                    cl_mem d_P      = clCreateBuffer(zk_ctx, CL_MEM_READ_ONLY|CL_MEM_COPY_HOST_PTR,
+                                                      zk_batch*sizeof(JacobianPoint), zk_pubkeys.data(), &zk_err);
+                    cl_mem d_Q      = clCreateBuffer(zk_ctx, CL_MEM_READ_ONLY|CL_MEM_COPY_HOST_PTR,
+                                                      zk_batch*sizeof(JacobianPoint), zk_Q.data(), &zk_err);
+                    clFinish(zk_q);
+
+                    // Pre-run prove once so verify kernels have valid proofs
+                    clSetKernelArg(k_kp, 0, sizeof(cl_mem), &d_sec);
+                    clSetKernelArg(k_kp, 1, sizeof(cl_mem), &d_pub);
+                    clSetKernelArg(k_kp, 2, sizeof(cl_mem), &d_base);
+                    clSetKernelArg(k_kp, 3, sizeof(cl_mem), &d_zmsg);
+                    clSetKernelArg(k_kp, 4, sizeof(cl_mem), &d_zaux);
+                    clSetKernelArg(k_kp, 5, sizeof(cl_mem), &d_kproof);
+                    clSetKernelArg(k_kp, 6, sizeof(cl_mem), &d_zok);
+                    clSetKernelArg(k_kp, 7, sizeof(cl_uint), &zk_cnt);
+                    clEnqueueNDRangeKernel(zk_q, k_kp, 1, nullptr, &zk_gsz, &zk_lsz, 0, nullptr, nullptr);
+
+                    clSetKernelArg(k_dp, 0, sizeof(cl_mem), &d_sec);
+                    clSetKernelArg(k_dp, 1, sizeof(cl_mem), &d_G);
+                    clSetKernelArg(k_dp, 2, sizeof(cl_mem), &d_H);
+                    clSetKernelArg(k_dp, 3, sizeof(cl_mem), &d_P);
+                    clSetKernelArg(k_dp, 4, sizeof(cl_mem), &d_Q);
+                    clSetKernelArg(k_dp, 5, sizeof(cl_mem), &d_zaux);
+                    clSetKernelArg(k_dp, 6, sizeof(cl_mem), &d_dproof);
+                    clSetKernelArg(k_dp, 7, sizeof(cl_mem), &d_zok);
+                    clSetKernelArg(k_dp, 8, sizeof(cl_uint), &zk_cnt);
+                    clEnqueueNDRangeKernel(zk_q, k_dp, 1, nullptr, &zk_gsz, &zk_lsz, 0, nullptr, nullptr);
+                    clFinish(zk_q);
+
+                    int zw = 3, zi = 8;
+                    std::cout << "\n" << std::string(60, '=') << "\n";
+                    std::cout << "ZK Proofs (kernel-only, batch=" << zk_batch << "):\n";
+                    std::cout << std::string(60, '-') << "\n";
+
+                    // Knowledge Prove
+                    {
+                        for (int i = 0; i < zw; ++i)
+                            clEnqueueNDRangeKernel(zk_q, k_kp, 1, nullptr, &zk_gsz, &zk_lsz, 0, nullptr, nullptr);
+                        clFinish(zk_q);
+                        auto t0 = std::chrono::high_resolution_clock::now();
+                        for (int i = 0; i < zi; ++i)
+                            clEnqueueNDRangeKernel(zk_q, k_kp, 1, nullptr, &zk_gsz, &zk_lsz, 0, nullptr, nullptr);
+                        clFinish(zk_q);
+                        auto t1 = std::chrono::high_resolution_clock::now();
+                        double ns = std::chrono::duration_cast<std::chrono::nanoseconds>(t1-t0).count();
+                        double ops = static_cast<double>(zk_batch) * zi;
+                        BenchResult r = {"ZK Kn Prove", ns/ops, ops/(ns*1e-9)};
+                        print_result(r); results.push_back(r);
+                    }
+
+                    // Knowledge Verify
+                    clSetKernelArg(k_kv, 0, sizeof(cl_mem), &d_kproof);
+                    clSetKernelArg(k_kv, 1, sizeof(cl_mem), &d_pub);
+                    clSetKernelArg(k_kv, 2, sizeof(cl_mem), &d_base);
+                    clSetKernelArg(k_kv, 3, sizeof(cl_mem), &d_zmsg);
+                    clSetKernelArg(k_kv, 4, sizeof(cl_mem), &d_zok);
+                    clSetKernelArg(k_kv, 5, sizeof(cl_uint), &zk_cnt);
+                    {
+                        for (int i = 0; i < zw; ++i)
+                            clEnqueueNDRangeKernel(zk_q, k_kv, 1, nullptr, &zk_gsz, &zk_lsz, 0, nullptr, nullptr);
+                        clFinish(zk_q);
+                        auto t0 = std::chrono::high_resolution_clock::now();
+                        for (int i = 0; i < zi; ++i)
+                            clEnqueueNDRangeKernel(zk_q, k_kv, 1, nullptr, &zk_gsz, &zk_lsz, 0, nullptr, nullptr);
+                        clFinish(zk_q);
+                        auto t1 = std::chrono::high_resolution_clock::now();
+                        double ns = std::chrono::duration_cast<std::chrono::nanoseconds>(t1-t0).count();
+                        double ops = static_cast<double>(zk_batch) * zi;
+                        BenchResult r = {"ZK Kn Verify", ns/ops, ops/(ns*1e-9)};
+                        print_result(r); results.push_back(r);
+                    }
+
+                    // DLEQ Prove
+                    {
+                        for (int i = 0; i < zw; ++i)
+                            clEnqueueNDRangeKernel(zk_q, k_dp, 1, nullptr, &zk_gsz, &zk_lsz, 0, nullptr, nullptr);
+                        clFinish(zk_q);
+                        auto t0 = std::chrono::high_resolution_clock::now();
+                        for (int i = 0; i < zi; ++i)
+                            clEnqueueNDRangeKernel(zk_q, k_dp, 1, nullptr, &zk_gsz, &zk_lsz, 0, nullptr, nullptr);
+                        clFinish(zk_q);
+                        auto t1 = std::chrono::high_resolution_clock::now();
+                        double ns = std::chrono::duration_cast<std::chrono::nanoseconds>(t1-t0).count();
+                        double ops = static_cast<double>(zk_batch) * zi;
+                        BenchResult r = {"ZK DLEQ Prove", ns/ops, ops/(ns*1e-9)};
+                        print_result(r); results.push_back(r);
+                    }
+
+                    // DLEQ Verify
+                    clSetKernelArg(k_dv, 0, sizeof(cl_mem), &d_dproof);
+                    clSetKernelArg(k_dv, 1, sizeof(cl_mem), &d_G);
+                    clSetKernelArg(k_dv, 2, sizeof(cl_mem), &d_H);
+                    clSetKernelArg(k_dv, 3, sizeof(cl_mem), &d_P);
+                    clSetKernelArg(k_dv, 4, sizeof(cl_mem), &d_Q);
+                    clSetKernelArg(k_dv, 5, sizeof(cl_mem), &d_zok);
+                    clSetKernelArg(k_dv, 6, sizeof(cl_uint), &zk_cnt);
+                    {
+                        for (int i = 0; i < zw; ++i)
+                            clEnqueueNDRangeKernel(zk_q, k_dv, 1, nullptr, &zk_gsz, &zk_lsz, 0, nullptr, nullptr);
+                        clFinish(zk_q);
+                        auto t0 = std::chrono::high_resolution_clock::now();
+                        for (int i = 0; i < zi; ++i)
+                            clEnqueueNDRangeKernel(zk_q, k_dv, 1, nullptr, &zk_gsz, &zk_lsz, 0, nullptr, nullptr);
+                        clFinish(zk_q);
+                        auto t1 = std::chrono::high_resolution_clock::now();
+                        double ns = std::chrono::duration_cast<std::chrono::nanoseconds>(t1-t0).count();
+                        double ops = static_cast<double>(zk_batch) * zi;
+                        BenchResult r = {"ZK DLEQ Verify", ns/ops, ops/(ns*1e-9)};
+                        print_result(r); results.push_back(r);
+                    }
+
+                    // Cleanup
+                    clReleaseMemObject(d_sec);    clReleaseMemObject(d_pub);
+                    clReleaseMemObject(d_base);   clReleaseMemObject(d_zmsg);
+                    clReleaseMemObject(d_zaux);   clReleaseMemObject(d_kproof);
+                    clReleaseMemObject(d_dproof); clReleaseMemObject(d_zok);
+                    clReleaseMemObject(d_G);      clReleaseMemObject(d_H);
+                    clReleaseMemObject(d_P);      clReleaseMemObject(d_Q);
+                    clReleaseKernel(k_kp); clReleaseKernel(k_kv);
+                    clReleaseKernel(k_dp); clReleaseKernel(k_dv);
+                }
+                clReleaseProgram(zk_prog);
+            }
+        }
+    }
+
+    // ==========================================================================
     // Summary Table
     // ==========================================================================
     std::cout << "\n" << std::string(60, '=') << "\n";
