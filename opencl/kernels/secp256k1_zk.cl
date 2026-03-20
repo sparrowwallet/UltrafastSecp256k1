@@ -131,10 +131,21 @@ inline int zk_knowledge_prove_impl(
     zk_derive_nonce_impl(secret, pubkey, msg, aux, &k);
     if (scalar_is_zero(&k)) return 0;
 
-    // R = k * base
+    // R = k * base  (convert base to affine for scalar_mul_glv_impl)
     JacobianPoint R;
-    JacobianPoint base_copy = *base;
-    scalar_mul_impl(&R, &base_copy, &k);
+    AffinePoint base_aff;
+    if (base->z.limbs[0] == 1 && base->z.limbs[1] == 0 &&
+        base->z.limbs[2] == 0 && base->z.limbs[3] == 0) {
+        base_aff.x = base->x; base_aff.y = base->y;
+    } else {
+        FieldElement bzi, bzi2, bzi3;
+        field_inv_impl(&bzi, &base->z);
+        field_sqr_impl(&bzi2, &bzi);
+        field_mul_impl(&bzi3, &bzi2, &bzi);
+        field_mul_impl(&base_aff.x, &base->x, &bzi2);
+        field_mul_impl(&base_aff.y, &base->y, &bzi3);
+    }
+    scalar_mul_glv_impl(&R, &k, &base_aff);
 
     // Convert R to affine
     FieldElement rx_fe, ry_fe;
@@ -192,13 +203,47 @@ inline int zk_knowledge_verify_impl(
     const JacobianPoint* base,
     const uchar msg[32])
 {
-    // Reconstruct challenge e
-    uchar p_comp[33], b_comp[33];
-    JacobianPoint pk_copy = *pubkey;
-    JacobianPoint base_copy = *base;
-    point_to_compressed_impl(&pk_copy, p_comp);
-    point_to_compressed_impl(&base_copy, b_comp);
+    // Convert base and pubkey to affine once (used for hash AND Shamir below)
+    AffinePoint B_aff, P_aff;
+    if (base->z.limbs[0] == 1 && base->z.limbs[1] == 0 &&
+        base->z.limbs[2] == 0 && base->z.limbs[3] == 0) {
+        B_aff.x = base->x; B_aff.y = base->y;
+    } else {
+        FieldElement bz_inv, bz_inv2, bz_inv3;
+        field_inv_impl(&bz_inv, &base->z);
+        field_sqr_impl(&bz_inv2, &bz_inv);
+        field_mul_impl(&bz_inv3, &bz_inv2, &bz_inv);
+        field_mul_impl(&B_aff.x, &base->x, &bz_inv2);
+        field_mul_impl(&B_aff.y, &base->y, &bz_inv3);
+    }
+    if (pubkey->z.limbs[0] == 1 && pubkey->z.limbs[1] == 0 &&
+        pubkey->z.limbs[2] == 0 && pubkey->z.limbs[3] == 0) {
+        P_aff.x = pubkey->x; P_aff.y = pubkey->y;
+    } else {
+        FieldElement pz_inv, pz_inv2, pz_inv3;
+        field_inv_impl(&pz_inv, &pubkey->z);
+        field_sqr_impl(&pz_inv2, &pz_inv);
+        field_mul_impl(&pz_inv3, &pz_inv2, &pz_inv);
+        field_mul_impl(&P_aff.x, &pubkey->x, &pz_inv2);
+        field_mul_impl(&P_aff.y, &pubkey->y, &pz_inv3);
+    }
 
+    // Serialize compressed forms from affine (no extra field_inv)
+    uchar p_comp[33], b_comp[33];
+    {
+        uchar yb[32];
+        field_to_bytes_impl(&B_aff.y, yb);
+        b_comp[0] = (yb[31] & 1) ? 0x03 : 0x02;
+        field_to_bytes_impl(&B_aff.x, b_comp + 1);
+    }
+    {
+        uchar yb[32];
+        field_to_bytes_impl(&P_aff.y, yb);
+        p_comp[0] = (yb[31] & 1) ? 0x03 : 0x02;
+        field_to_bytes_impl(&P_aff.x, p_comp + 1);
+    }
+
+    // Reconstruct challenge e = H("ZK/knowledge" || R.x || P_comp || B_comp || msg)
     uchar buf[32 + 33 + 33 + 32];
     for (int i = 0; i < 32; ++i) buf[i] = proof->rx[i];
     for (int i = 0; i < 33; ++i) buf[32 + i] = p_comp[i];
@@ -212,30 +257,34 @@ inline int zk_knowledge_verify_impl(
     Scalar e;
     scalar_from_bytes_impl(e_hash, &e);
 
-    // Verify: s*B == R + e*P
-    JacobianPoint sB;
-    JacobianPoint base_copy2 = *base;
-    scalar_mul_impl(&sB, &base_copy2, &proof->s);
-
-    JacobianPoint eP;
-    JacobianPoint pk_copy2 = *pubkey;
-    scalar_mul_impl(&eP, &pk_copy2, &e);
-
-    // R = lift_x(proof->rx) with even Y
+    // R = lift_x(proof->rx) → Z=1
     JacobianPoint R_pt;
     if (!lift_x_impl(proof->rx, &R_pt)) return 0;
 
-    // R + e*P
-    JacobianPoint R_plus_eP;
-    jacobian_add_impl(&R_plus_eP, &R_pt, &eP);
+    // Verify: s*B + (-e)*P == R using Shamir's trick
+    Scalar neg_e;
+    scalar_negate_impl(&e, &neg_e);
 
-    // Compare s*B == R + e*P via compressed form
-    uchar comp1[33], comp2[33];
-    point_to_compressed_impl(&sB, comp1);
-    point_to_compressed_impl(&R_plus_eP, comp2);
+    JacobianPoint lhs;
+    shamir_double_mul_glv_impl(&B_aff, &proof->s, &P_aff, &neg_e, &lhs);
+    if (point_is_infinity(&lhs)) return 0;
 
-    for (int i = 0; i < 33; ++i)
-        if (comp1[i] != comp2[i]) return 0;
+    // Cross-multiply comparison: lhs == R_pt (R_pt.z == 1 after lift_x)
+    // lhs.x / Z² == R_pt.x  ↔  lhs.x == R_pt.x * Z²
+    FieldElement lz2, lz3, rx_scaled, ry_scaled;
+    field_sqr_impl(&lz2, &lhs.z);
+    field_mul_impl(&lz3, &lz2, &lhs.z);
+    field_mul_impl(&rx_scaled, &R_pt.x, &lz2);
+    field_mul_impl(&ry_scaled, &R_pt.y, &lz3);
+
+    uchar bx1[32], bx2[32], by1[32], by2[32];
+    field_to_bytes_impl(&lhs.x,    bx1);
+    field_to_bytes_impl(&rx_scaled, bx2);
+    field_to_bytes_impl(&lhs.y,    by1);
+    field_to_bytes_impl(&ry_scaled, by2);
+
+    for (int i = 0; i < 32; ++i)
+        if (bx1[i] != bx2[i] || by1[i] != by2[i]) return 0;
     return 1;
 }
 
@@ -262,11 +311,31 @@ inline int zk_dleq_prove_impl(
     zk_derive_nonce_impl(secret, P_pt, q_comp, aux, &k);
     if (scalar_is_zero(&k)) return 0;
 
-    // R1 = k * G, R2 = k * H
+    // R1 = k * G, R2 = k * H  (convert G, H to affine for scalar_mul_glv_impl)
     JacobianPoint R1, R2;
-    JacobianPoint g_copy = *G_pt, h_copy = *H_pt;
-    scalar_mul_impl(&R1, &g_copy, &k);
-    scalar_mul_impl(&R2, &h_copy, &k);
+    AffinePoint G_aff_prove, H_aff_prove;
+    if (G_pt->z.limbs[0] == 1 && G_pt->z.limbs[1] == 0 &&
+        G_pt->z.limbs[2] == 0 && G_pt->z.limbs[3] == 0) {
+        G_aff_prove.x = G_pt->x; G_aff_prove.y = G_pt->y;
+    } else {
+        FieldElement zi, zi2, zi3;
+        field_inv_impl(&zi, &G_pt->z);
+        field_sqr_impl(&zi2, &zi); field_mul_impl(&zi3, &zi2, &zi);
+        field_mul_impl(&G_aff_prove.x, &G_pt->x, &zi2);
+        field_mul_impl(&G_aff_prove.y, &G_pt->y, &zi3);
+    }
+    if (H_pt->z.limbs[0] == 1 && H_pt->z.limbs[1] == 0 &&
+        H_pt->z.limbs[2] == 0 && H_pt->z.limbs[3] == 0) {
+        H_aff_prove.x = H_pt->x; H_aff_prove.y = H_pt->y;
+    } else {
+        FieldElement zi, zi2, zi3;
+        field_inv_impl(&zi, &H_pt->z);
+        field_sqr_impl(&zi2, &zi); field_mul_impl(&zi3, &zi2, &zi);
+        field_mul_impl(&H_aff_prove.x, &H_pt->x, &zi2);
+        field_mul_impl(&H_aff_prove.y, &H_pt->y, &zi3);
+    }
+    scalar_mul_glv_impl(&R1, &k, &G_aff_prove);
+    scalar_mul_glv_impl(&R2, &k, &H_aff_prove);
 
     // Serialize all 6 points
     uchar g_comp[33], h_comp[33], p_comp[33];
@@ -313,35 +382,97 @@ inline int zk_dleq_verify_impl(
     const JacobianPoint* P_pt,
     const JacobianPoint* Q_pt)
 {
-    // R1 = s*G - e*P, R2 = s*H - e*Q
-    JacobianPoint sG, eP, sH, eQ;
-    JacobianPoint g_copy = *G_pt, h_copy = *H_pt;
-    JacobianPoint p_copy = *P_pt, q_copy = *Q_pt;
-    scalar_mul_impl(&sG, &g_copy, &proof->s);
-    scalar_mul_impl(&eP, &p_copy, &proof->e);
-    scalar_mul_impl(&sH, &h_copy, &proof->s);
-    scalar_mul_impl(&eQ, &q_copy, &proof->e);
+    // Convert G, H, P, Q to affine (fast-path for Z=1, else field_inv)
+    AffinePoint G_aff, H_aff, P_aff, Q_aff;
 
-    // Negate eP and eQ
-    field_neg_impl(&eP.y, &eP.y);
-    field_neg_impl(&eQ.y, &eQ.y);
+    if (G_pt->z.limbs[0]==1 && G_pt->z.limbs[1]==0 &&
+        G_pt->z.limbs[2]==0 && G_pt->z.limbs[3]==0) {
+        G_aff.x = G_pt->x; G_aff.y = G_pt->y;
+    } else {
+        FieldElement zi, zi2, zi3;
+        field_inv_impl(&zi, &G_pt->z);
+        field_sqr_impl(&zi2, &zi); field_mul_impl(&zi3, &zi2, &zi);
+        field_mul_impl(&G_aff.x, &G_pt->x, &zi2);
+        field_mul_impl(&G_aff.y, &G_pt->y, &zi3);
+    }
+    if (H_pt->z.limbs[0]==1 && H_pt->z.limbs[1]==0 &&
+        H_pt->z.limbs[2]==0 && H_pt->z.limbs[3]==0) {
+        H_aff.x = H_pt->x; H_aff.y = H_pt->y;
+    } else {
+        FieldElement zi, zi2, zi3;
+        field_inv_impl(&zi, &H_pt->z);
+        field_sqr_impl(&zi2, &zi); field_mul_impl(&zi3, &zi2, &zi);
+        field_mul_impl(&H_aff.x, &H_pt->x, &zi2);
+        field_mul_impl(&H_aff.y, &H_pt->y, &zi3);
+    }
+    if (P_pt->z.limbs[0]==1 && P_pt->z.limbs[1]==0 &&
+        P_pt->z.limbs[2]==0 && P_pt->z.limbs[3]==0) {
+        P_aff.x = P_pt->x; P_aff.y = P_pt->y;
+    } else {
+        FieldElement zi, zi2, zi3;
+        field_inv_impl(&zi, &P_pt->z);
+        field_sqr_impl(&zi2, &zi); field_mul_impl(&zi3, &zi2, &zi);
+        field_mul_impl(&P_aff.x, &P_pt->x, &zi2);
+        field_mul_impl(&P_aff.y, &P_pt->y, &zi3);
+    }
+    if (Q_pt->z.limbs[0]==1 && Q_pt->z.limbs[1]==0 &&
+        Q_pt->z.limbs[2]==0 && Q_pt->z.limbs[3]==0) {
+        Q_aff.x = Q_pt->x; Q_aff.y = Q_pt->y;
+    } else {
+        FieldElement zi, zi2, zi3;
+        field_inv_impl(&zi, &Q_pt->z);
+        field_sqr_impl(&zi2, &zi); field_mul_impl(&zi3, &zi2, &zi);
+        field_mul_impl(&Q_aff.x, &Q_pt->x, &zi2);
+        field_mul_impl(&Q_aff.y, &Q_pt->y, &zi3);
+    }
+
+    // Negate challenge for Shamir: R1 = s*G + (-e)*P, R2 = s*H + (-e)*Q
+    Scalar neg_e;
+    scalar_negate_impl(&proof->e, &neg_e);
 
     JacobianPoint R1, R2;
-    jacobian_add_impl(&R1, &sG, &eP);
-    jacobian_add_impl(&R2, &sH, &eQ);
+    shamir_double_mul_glv_impl(&G_aff, &proof->s, &P_aff, &neg_e, &R1);
+    shamir_double_mul_glv_impl(&H_aff, &proof->s, &Q_aff, &neg_e, &R2);
 
-    // Serialize all 6 points for challenge recomputation
+    // Serialize G, H, P, Q from their affine forms (no extra field_inv)
     uchar g_comp[33], h_comp[33], p_comp[33], q_comp[33];
     uchar r1_comp[33], r2_comp[33];
-    JacobianPoint g_copy2 = *G_pt, h_copy2 = *H_pt;
-    JacobianPoint p_copy2 = *P_pt, q_copy2 = *Q_pt;
-    point_to_compressed_impl(&g_copy2, g_comp);
-    point_to_compressed_impl(&h_copy2, h_comp);
-    point_to_compressed_impl(&p_copy2, p_comp);
-    point_to_compressed_impl(&q_copy2, q_comp);
-    point_to_compressed_impl(&R1, r1_comp);
-    point_to_compressed_impl(&R2, r2_comp);
+    {
+        uchar yb[32];
+        field_to_bytes_impl(&G_aff.y, yb);
+        g_comp[0] = (yb[31] & 1) ? 0x03 : 0x02;
+        field_to_bytes_impl(&G_aff.x, g_comp + 1);
+    }
+    {
+        uchar yb[32];
+        field_to_bytes_impl(&H_aff.y, yb);
+        h_comp[0] = (yb[31] & 1) ? 0x03 : 0x02;
+        field_to_bytes_impl(&H_aff.x, h_comp + 1);
+    }
+    {
+        uchar yb[32];
+        field_to_bytes_impl(&P_aff.y, yb);
+        p_comp[0] = (yb[31] & 1) ? 0x03 : 0x02;
+        field_to_bytes_impl(&P_aff.x, p_comp + 1);
+    }
+    {
+        uchar yb[32];
+        field_to_bytes_impl(&Q_aff.y, yb);
+        q_comp[0] = (yb[31] & 1) ? 0x03 : 0x02;
+        field_to_bytes_impl(&Q_aff.x, q_comp + 1);
+    }
 
+    // R1 and R2 are newly computed Jacobian points — compress for hash
+    {
+        JacobianPoint r1_copy = R1;
+        point_to_compressed_impl(&r1_copy, r1_comp);
+    }
+    {
+        JacobianPoint r2_copy = R2;
+        point_to_compressed_impl(&r2_copy, r2_comp);
+    }
+
+    // Recompute challenge and verify
     uchar buf[33 * 6];
     for (int i = 0; i < 33; ++i) {
         buf[i]       = g_comp[i];
@@ -359,7 +490,6 @@ inline int zk_dleq_verify_impl(
     Scalar e_check;
     scalar_from_bytes_impl(e_hash, &e_check);
 
-    // e must match
     return scalar_eq_impl(&proof->e, &e_check);
 }
 
@@ -461,6 +591,9 @@ __kernel void zk_dleq_verify_batch(
 // =============================================================================
 // 3. Bulletproof Range Proof (64-bit)
 // =============================================================================
+// Note: Bulletproof section requires OpenCL address-space fixes before enabling.
+// Knowledge and DLEQ proofs above are fully functional.
+#if 0  // Bulletproof: pending address-space fixes for __global/__private params
 // Full Bulletproof range proof verification on OpenCL.
 // Ported from CUDA implementation (commit 02ac59d).
 //
@@ -495,14 +628,26 @@ __constant const ZKTagMidstate ZK_BULLETPROOF_X_MIDSTATE = {{
     0xbaec0bd8U, 0x40cb0ed7U, 0xd1b23b65U, 0x43871df4U
 }};
 
-// Tagged hash using precomputed midstate
+// Tagged hash using precomputed midstate (private address space)
 inline void zk_tagged_hash_midstate_impl(const ZKTagMidstate* midstate,
                                           const uchar* data, uint data_len,
                                           uchar out[32]) {
     SHA256Ctx ctx;
     for (int i = 0; i < 8; i++) ctx.h[i] = midstate->h[i];
     ctx.buf_len = 0;
-    ctx.total = 64;  // already processed 1 block (tag_hash||tag_hash)
+    ctx.total_len = 64;  // already processed 1 block (tag_hash||tag_hash)
+    sha256_update(&ctx, data, data_len);
+    sha256_final(&ctx, out);
+}
+
+// Tagged hash using precomputed __constant midstate (for program-scope constants)
+inline void zk_tagged_hash_midstate_const_impl(__constant const ZKTagMidstate* midstate,
+                                                const uchar* data, uint data_len,
+                                                uchar out[32]) {
+    SHA256Ctx ctx;
+    for (int i = 0; i < 8; i++) ctx.h[i] = midstate->h[i];
+    ctx.buf_len = 0;
+    ctx.total_len = 64;  // already processed 1 block (tag_hash||tag_hash)
     sha256_update(&ctx, data, data_len);
     sha256_final(&ctx, out);
 }
@@ -519,7 +664,7 @@ inline void field_from_bytes_impl(const uchar bytes[32], FieldElement* out) {
 }
 
 // lift_x with even Y from FieldElement (not bytes)
-inline int lift_x_field_even_impl(const FieldElement* x, AffinePoint* out) {
+inline int lift_x_field_even_impl(const FieldElement* x, __global AffinePoint* out) {
     FieldElement x2, x3, y2, seven, y;
     field_sqr_impl(&x2, x);
     field_mul_impl(&x3, &x2, x);
@@ -549,7 +694,7 @@ inline int lift_x_field_even_impl(const FieldElement* x, AffinePoint* out) {
 }
 
 // Try-and-increment: find point on curve starting from x
-inline void hash_to_point_increment_impl(FieldElement* x, AffinePoint* out) {
+inline void hash_to_point_increment_impl(FieldElement* x, __global AffinePoint* out) {
     for (int attempt = 0; attempt < 256; ++attempt) {
         if (lift_x_field_even_impl(x, out)) return;
         // x += 1 (field addition with constant 1)
@@ -612,8 +757,8 @@ inline int range_proof_poly_check_impl(
     }
 
     uchar y_hash[32], z_hash[32];
-    zk_tagged_hash_midstate_impl(&ZK_BULLETPROOF_Y_MIDSTATE, fs_buf, 99, y_hash);
-    zk_tagged_hash_midstate_impl(&ZK_BULLETPROOF_Z_MIDSTATE, fs_buf, 99, z_hash);
+    zk_tagged_hash_midstate_const_impl(&ZK_BULLETPROOF_Y_MIDSTATE, fs_buf, 99, y_hash);
+    zk_tagged_hash_midstate_const_impl(&ZK_BULLETPROOF_Z_MIDSTATE, fs_buf, 99, z_hash);
 
     Scalar y, z;
     scalar_from_bytes_impl(y_hash, &y);
@@ -630,7 +775,7 @@ inline int range_proof_poly_check_impl(
     scalar_to_bytes_impl(&z, x_buf + 98);
 
     uchar x_hash[32];
-    zk_tagged_hash_midstate_impl(&ZK_BULLETPROOF_X_MIDSTATE, x_buf, 130, x_hash);
+    zk_tagged_hash_midstate_const_impl(&ZK_BULLETPROOF_X_MIDSTATE, x_buf, 130, x_hash);
     Scalar x;
     scalar_from_bytes_impl(x_hash, &x);
 
@@ -806,8 +951,8 @@ inline int range_verify_full_impl(
     }
 
     uchar y_hash[32], z_hash[32];
-    zk_tagged_hash_midstate_impl(&ZK_BULLETPROOF_Y_MIDSTATE, fs_buf, 99, y_hash);
-    zk_tagged_hash_midstate_impl(&ZK_BULLETPROOF_Z_MIDSTATE, fs_buf, 99, z_hash);
+    zk_tagged_hash_midstate_const_impl(&ZK_BULLETPROOF_Y_MIDSTATE, fs_buf, 99, y_hash);
+    zk_tagged_hash_midstate_const_impl(&ZK_BULLETPROOF_Z_MIDSTATE, fs_buf, 99, z_hash);
 
     Scalar y, z;
     scalar_from_bytes_impl(y_hash, &y);
@@ -823,7 +968,7 @@ inline int range_verify_full_impl(
     scalar_to_bytes_impl(&z, x_buf + 98);
 
     uchar x_hash[32];
-    zk_tagged_hash_midstate_impl(&ZK_BULLETPROOF_X_MIDSTATE, x_buf, 130, x_hash);
+    zk_tagged_hash_midstate_const_impl(&ZK_BULLETPROOF_X_MIDSTATE, x_buf, 130, x_hash);
     Scalar x;
     scalar_from_bytes_impl(x_hash, &x);
 
@@ -1130,8 +1275,8 @@ inline int range_proof_poly_check_impl(
     }
 
     uchar y_hash[32], z_hash[32];
-    zk_tagged_hash_midstate_impl(&ZK_BULLETPROOF_Y_MIDSTATE, fs_buf, 99, y_hash);
-    zk_tagged_hash_midstate_impl(&ZK_BULLETPROOF_Z_MIDSTATE, fs_buf, 99, z_hash);
+    zk_tagged_hash_midstate_const_impl(&ZK_BULLETPROOF_Y_MIDSTATE, fs_buf, 99, y_hash);
+    zk_tagged_hash_midstate_const_impl(&ZK_BULLETPROOF_Z_MIDSTATE, fs_buf, 99, z_hash);
 
     Scalar y, z;
     scalar_from_bytes_impl(y_hash, &y);
@@ -1148,7 +1293,7 @@ inline int range_proof_poly_check_impl(
     scalar_to_bytes_impl(&z, x_buf + 98);
 
     uchar x_hash[32];
-    zk_tagged_hash_midstate_impl(&ZK_BULLETPROOF_X_MIDSTATE, x_buf, 130, x_hash);
+    zk_tagged_hash_midstate_const_impl(&ZK_BULLETPROOF_X_MIDSTATE, x_buf, 130, x_hash);
 
     Scalar x;
     scalar_from_bytes_impl(x_hash, &x);
@@ -1329,3 +1474,4 @@ __kernel void pedersen_verify_sum(
         if (z_bytes[i] != 0) z_zero = 0;
     *result = (sum.infinity || z_zero);
 }
+#endif  // Bulletproof: pending address-space fixes

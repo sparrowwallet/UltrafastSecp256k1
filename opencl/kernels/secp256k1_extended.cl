@@ -642,6 +642,11 @@ inline void derive_endo_table_impl(const AffinePoint table[8], AffinePoint endo_
     }
 }
 
+// Forward declaration required because shamir_double_mul_glv_impl calls
+// scalar_mul_glv_impl as a degenerate-case fallback, but the full definition
+// of scalar_mul_glv_impl appears later in this file.
+inline void scalar_mul_glv_impl(JacobianPoint* r, const Scalar* k, const AffinePoint* p);
+
 // =============================================================================
 // Shamir's trick double-scalar multiplication with 4-scalar GLV decomposition.
 // Computes r = a*P + b*Q  (both P and Q are affine inputs).

@@ -14,8 +14,20 @@
 #include <string>
 #include <cstdlib>
 #include <random>
+#include <fstream>
+#include <sstream>
+#include <filesystem>
 
 using namespace secp256k1::opencl;
+
+// Load a text file into a string
+static std::string load_cl_source(const std::string& path) {
+    std::ifstream f(path);
+    if (!f.is_open()) return {};
+    std::ostringstream ss;
+    ss << f.rdbuf();
+    return ss.str();
+}
 
 struct BenchResult {
     std::string name;
@@ -637,6 +649,239 @@ int main(int argc, char* argv[]) {
         clReleaseMemObject(buf_jp1);
         clReleaseMemObject(buf_jp2);
         clReleaseMemObject(buf_jpr);
+    }
+
+    // ==========================================================================
+    // Signature Benchmarks (kernel-only: sign + verify with valid pre-computed data)
+    // Loads secp256k1_extended.cl, compiles it, then benchmarks ECDSA+Schnorr.
+    // ==========================================================================
+    {
+        cl_context  sig_ctx = (cl_context)ctx->native_context();
+        cl_command_queue sig_q = (cl_command_queue)ctx->native_queue();
+        cl_int sig_err;
+
+        // Locate secp256k1_extended.cl (same search strategy as audit runner)
+        namespace fs = std::filesystem;
+        std::string ext_src;
+        std::string found_kernel_dir;
+        {
+            auto exe_dir = fs::path(argv[0]).parent_path();
+            std::vector<std::string> candidates = {
+                (exe_dir / "kernels").string(),
+                (exe_dir / "../kernels").string(),
+                (exe_dir / "../../opencl/kernels").string(),
+                "kernels",
+                "../kernels",
+                "../../opencl/kernels",
+            };
+            for (auto& c : candidates) {
+                std::string p = c + "/secp256k1_extended.cl";
+                ext_src = load_cl_source(p);
+                if (!ext_src.empty()) { found_kernel_dir = c; break; }
+            }
+        }
+
+        if (ext_src.empty()) {
+            std::cout << "\n[SKIP] Cannot find secp256k1_extended.cl — signature benchmarks skipped\n";
+        } else {
+            // Compile the extended program
+            cl_device_id sig_dev = nullptr;
+            clGetContextInfo(sig_ctx, CL_CONTEXT_DEVICES, sizeof(cl_device_id), &sig_dev, nullptr);
+
+            const char* src_ptr = ext_src.c_str();
+            size_t src_len = ext_src.size();
+            cl_program ext_prog = clCreateProgramWithSource(sig_ctx, 1, &src_ptr, &src_len, &sig_err);
+            std::string build_opts = "-cl-std=CL1.2 -cl-fast-relaxed-math -cl-mad-enable -I " + found_kernel_dir;
+            sig_err = clBuildProgram(ext_prog, 1, &sig_dev, build_opts.c_str(), nullptr, nullptr);
+            if (sig_err != CL_SUCCESS) {
+                char log[8192] = {};
+                clGetProgramBuildInfo(ext_prog, sig_dev, CL_PROGRAM_BUILD_LOG, sizeof(log), log, nullptr);
+                std::cout << "\n[SKIP] Extended CL build failed:\n" << log << "\n";
+                clReleaseProgram(ext_prog);
+            } else {
+                cl_kernel k_ecdsa_sign   = clCreateKernel(ext_prog, "ecdsa_sign",   &sig_err);
+                cl_kernel k_ecdsa_verify = clCreateKernel(ext_prog, "ecdsa_verify", &sig_err);
+                cl_kernel k_schnorr_sign = clCreateKernel(ext_prog, "schnorr_sign", &sig_err);
+                cl_kernel k_schnorr_verify = clCreateKernel(ext_prog, "schnorr_verify", &sig_err);
+
+                std::size_t sig_batch = std::min(point_batch, static_cast<std::size_t>(65536));
+                cl_uint     sig_cnt   = static_cast<cl_uint>(sig_batch);
+                std::size_t sig_lsz   = 128;
+                std::size_t sig_gsz   = ((sig_batch + sig_lsz - 1) / sig_lsz) * sig_lsz;
+
+                std::cout << "\n" << std::string(60, '=') << "\n";
+                std::cout << "Signature Operations (kernel-only, batch=" << sig_batch << "):\n";
+                std::cout << std::string(60, '-') << "\n";
+
+                // Host struct layouts matching OpenCL kernel struct definitions exactly
+                struct ECDSASigHost   { uint64_t r[4]; uint64_t s[4]; };   // 64 bytes
+                struct SchnorrSigHost { uint8_t  r[32]; uint64_t s[4]; };  // 64 bytes
+
+                // Random private keys, messages, and aux randoms
+                std::vector<Scalar>  sv_priv(sig_batch);
+                std::vector<uint8_t> sv_msg(sig_batch * 32);
+                std::vector<uint8_t> sv_aux(sig_batch * 32);
+
+                for (std::size_t i = 0; i < sig_batch; ++i) {
+                    sv_priv[i] = {{rng(), rng(), rng(), rng()}};
+                    sv_priv[i].limbs[3] &= 0x0FFFFFFFFFFFFFFFULL; // keep < 2^252
+                    if (!sv_priv[i].limbs[0] && !sv_priv[i].limbs[1] &&
+                        !sv_priv[i].limbs[2] && !sv_priv[i].limbs[3])
+                        sv_priv[i].limbs[0] = 1;
+                }
+                for (auto& v : sv_msg) v = static_cast<uint8_t>(rng());
+                for (auto& v : sv_aux) v = static_cast<uint8_t>(rng());
+
+                // Compute pubkeys via batch kG
+                std::vector<JacobianPoint> sv_pub_jac(sig_batch);
+                ctx->batch_scalar_mul_generator(sv_priv.data(), sv_pub_jac.data(), sig_batch);
+                std::vector<AffinePoint> sv_pub_aff(sig_batch);
+                ctx->batch_jacobian_to_affine(sv_pub_jac.data(), sv_pub_aff.data(), sig_batch);
+
+                // x-only pubkeys (big-endian) for Schnorr verify (BIP340)
+                std::vector<uint8_t> sv_pub_x(sig_batch * 32);
+                for (std::size_t i = 0; i < sig_batch; ++i) {
+                    const auto& fe = sv_pub_aff[i].x;
+                    for (int j = 0; j < 4; j++) {
+                        uint64_t limb = fe.limbs[3 - j];
+                        for (int k = 0; k < 8; k++)
+                            sv_pub_x[i*32 + j*8 + k] = static_cast<uint8_t>(limb >> (56 - k*8));
+                    }
+                }
+
+                // Device buffers
+                cl_mem d_priv   = clCreateBuffer(sig_ctx, CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR,
+                                                  sig_batch * sizeof(Scalar), sv_priv.data(), &sig_err);
+                cl_mem d_msg    = clCreateBuffer(sig_ctx, CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR,
+                                                  sig_batch * 32, sv_msg.data(), &sig_err);
+                cl_mem d_aux    = clCreateBuffer(sig_ctx, CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR,
+                                                  sig_batch * 32, sv_aux.data(), &sig_err);
+                cl_mem d_pub_jac = clCreateBuffer(sig_ctx, CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR,
+                                                   sig_batch * sizeof(JacobianPoint), sv_pub_jac.data(), &sig_err);
+                cl_mem d_pub_x   = clCreateBuffer(sig_ctx, CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR,
+                                                   sig_batch * 32, sv_pub_x.data(), &sig_err);
+                cl_mem d_ecdsa_sig   = clCreateBuffer(sig_ctx, CL_MEM_READ_WRITE,
+                                                       sig_batch * sizeof(ECDSASigHost), nullptr, &sig_err);
+                cl_mem d_schnorr_sig = clCreateBuffer(sig_ctx, CL_MEM_READ_WRITE,
+                                                       sig_batch * sizeof(SchnorrSigHost), nullptr, &sig_err);
+                cl_mem d_ok  = clCreateBuffer(sig_ctx, CL_MEM_WRITE_ONLY,
+                                               sig_batch * sizeof(int), nullptr, &sig_err);
+                cl_mem d_res = clCreateBuffer(sig_ctx, CL_MEM_WRITE_ONLY,
+                                               sig_batch * sizeof(int), nullptr, &sig_err);
+                clFinish(sig_q);
+
+                // Pre-sign once so verify kernels have valid signatures
+                clSetKernelArg(k_ecdsa_sign, 0, sizeof(cl_mem), &d_msg);
+                clSetKernelArg(k_ecdsa_sign, 1, sizeof(cl_mem), &d_priv);
+                clSetKernelArg(k_ecdsa_sign, 2, sizeof(cl_mem), &d_ecdsa_sig);
+                clSetKernelArg(k_ecdsa_sign, 3, sizeof(cl_mem), &d_ok);
+                clSetKernelArg(k_ecdsa_sign, 4, sizeof(cl_uint), &sig_cnt);
+                clEnqueueNDRangeKernel(sig_q, k_ecdsa_sign, 1, nullptr, &sig_gsz, &sig_lsz, 0, nullptr, nullptr);
+
+                clSetKernelArg(k_schnorr_sign, 0, sizeof(cl_mem), &d_msg);
+                clSetKernelArg(k_schnorr_sign, 1, sizeof(cl_mem), &d_priv);
+                clSetKernelArg(k_schnorr_sign, 2, sizeof(cl_mem), &d_aux);
+                clSetKernelArg(k_schnorr_sign, 3, sizeof(cl_mem), &d_schnorr_sig);
+                clSetKernelArg(k_schnorr_sign, 4, sizeof(cl_mem), &d_ok);
+                clSetKernelArg(k_schnorr_sign, 5, sizeof(cl_uint), &sig_cnt);
+                clEnqueueNDRangeKernel(sig_q, k_schnorr_sign, 1, nullptr, &sig_gsz, &sig_lsz, 0, nullptr, nullptr);
+                clFinish(sig_q);
+
+                int sw = 3, si = 8;
+
+                // ECDSA Sign
+                {
+                    for (int i = 0; i < sw; ++i)
+                        clEnqueueNDRangeKernel(sig_q, k_ecdsa_sign, 1, nullptr, &sig_gsz, &sig_lsz, 0, nullptr, nullptr);
+                    clFinish(sig_q);
+                    auto t0 = std::chrono::high_resolution_clock::now();
+                    for (int i = 0; i < si; ++i)
+                        clEnqueueNDRangeKernel(sig_q, k_ecdsa_sign, 1, nullptr, &sig_gsz, &sig_lsz, 0, nullptr, nullptr);
+                    clFinish(sig_q);
+                    auto t1 = std::chrono::high_resolution_clock::now();
+                    double ns = std::chrono::duration_cast<std::chrono::nanoseconds>(t1-t0).count();
+                    double ops = static_cast<double>(sig_batch) * si;
+                    BenchResult r = {"ECDSA Sign", ns/ops, ops/(ns*1e-9)};
+                    print_result(r); results.push_back(r);
+                }
+
+                // ECDSA Verify
+                clSetKernelArg(k_ecdsa_verify, 0, sizeof(cl_mem), &d_msg);
+                clSetKernelArg(k_ecdsa_verify, 1, sizeof(cl_mem), &d_pub_jac);
+                clSetKernelArg(k_ecdsa_verify, 2, sizeof(cl_mem), &d_ecdsa_sig);
+                clSetKernelArg(k_ecdsa_verify, 3, sizeof(cl_mem), &d_res);
+                clSetKernelArg(k_ecdsa_verify, 4, sizeof(cl_uint), &sig_cnt);
+                {
+                    for (int i = 0; i < sw; ++i)
+                        clEnqueueNDRangeKernel(sig_q, k_ecdsa_verify, 1, nullptr, &sig_gsz, &sig_lsz, 0, nullptr, nullptr);
+                    clFinish(sig_q);
+                    auto t0 = std::chrono::high_resolution_clock::now();
+                    for (int i = 0; i < si; ++i)
+                        clEnqueueNDRangeKernel(sig_q, k_ecdsa_verify, 1, nullptr, &sig_gsz, &sig_lsz, 0, nullptr, nullptr);
+                    clFinish(sig_q);
+                    auto t1 = std::chrono::high_resolution_clock::now();
+                    double ns = std::chrono::duration_cast<std::chrono::nanoseconds>(t1-t0).count();
+                    double ops = static_cast<double>(sig_batch) * si;
+                    BenchResult r = {"ECDSA Verify", ns/ops, ops/(ns*1e-9)};
+                    print_result(r); results.push_back(r);
+                }
+
+                // Schnorr Sign
+                {
+                    for (int i = 0; i < sw; ++i)
+                        clEnqueueNDRangeKernel(sig_q, k_schnorr_sign, 1, nullptr, &sig_gsz, &sig_lsz, 0, nullptr, nullptr);
+                    clFinish(sig_q);
+                    auto t0 = std::chrono::high_resolution_clock::now();
+                    for (int i = 0; i < si; ++i)
+                        clEnqueueNDRangeKernel(sig_q, k_schnorr_sign, 1, nullptr, &sig_gsz, &sig_lsz, 0, nullptr, nullptr);
+                    clFinish(sig_q);
+                    auto t1 = std::chrono::high_resolution_clock::now();
+                    double ns = std::chrono::duration_cast<std::chrono::nanoseconds>(t1-t0).count();
+                    double ops = static_cast<double>(sig_batch) * si;
+                    BenchResult r = {"Schnorr Sign", ns/ops, ops/(ns*1e-9)};
+                    print_result(r); results.push_back(r);
+                }
+
+                // Schnorr Verify
+                clSetKernelArg(k_schnorr_verify, 0, sizeof(cl_mem), &d_pub_x);
+                clSetKernelArg(k_schnorr_verify, 1, sizeof(cl_mem), &d_msg);
+                clSetKernelArg(k_schnorr_verify, 2, sizeof(cl_mem), &d_schnorr_sig);
+                clSetKernelArg(k_schnorr_verify, 3, sizeof(cl_mem), &d_res);
+                clSetKernelArg(k_schnorr_verify, 4, sizeof(cl_uint), &sig_cnt);
+                {
+                    for (int i = 0; i < sw; ++i)
+                        clEnqueueNDRangeKernel(sig_q, k_schnorr_verify, 1, nullptr, &sig_gsz, &sig_lsz, 0, nullptr, nullptr);
+                    clFinish(sig_q);
+                    auto t0 = std::chrono::high_resolution_clock::now();
+                    for (int i = 0; i < si; ++i)
+                        clEnqueueNDRangeKernel(sig_q, k_schnorr_verify, 1, nullptr, &sig_gsz, &sig_lsz, 0, nullptr, nullptr);
+                    clFinish(sig_q);
+                    auto t1 = std::chrono::high_resolution_clock::now();
+                    double ns = std::chrono::duration_cast<std::chrono::nanoseconds>(t1-t0).count();
+                    double ops = static_cast<double>(sig_batch) * si;
+                    BenchResult r = {"Schnorr Verify", ns/ops, ops/(ns*1e-9)};
+                    print_result(r); results.push_back(r);
+                }
+
+                // Cleanup device buffers
+                clReleaseMemObject(d_priv);
+                clReleaseMemObject(d_msg);
+                clReleaseMemObject(d_aux);
+                clReleaseMemObject(d_pub_jac);
+                clReleaseMemObject(d_pub_x);
+                clReleaseMemObject(d_ecdsa_sig);
+                clReleaseMemObject(d_schnorr_sig);
+                clReleaseMemObject(d_ok);
+                clReleaseMemObject(d_res);
+
+                // Cleanup kernels + program
+                clReleaseKernel(k_ecdsa_sign);
+                clReleaseKernel(k_ecdsa_verify);
+                clReleaseKernel(k_schnorr_sign);
+                clReleaseKernel(k_schnorr_verify);
+                clReleaseProgram(ext_prog);
+            }
+        }
     }
 
     // ==========================================================================
