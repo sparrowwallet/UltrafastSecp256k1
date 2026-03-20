@@ -63,6 +63,9 @@ set(SECP256K1_MARCH "" CACHE STRING "x86-64 -march override (empty = auto-detect
 
 # Warning policy: promote warnings to errors (recommended for CI)
 option(SECP256K1_WERROR "Treat compiler warnings as errors (-Werror / /WX)" OFF)
+option(UFSECP_REFRESH_SOURCE_GRAPH "Refresh the repo source graph during builds" ON)
+
+find_package(Python3 COMPONENTS Interpreter QUIET)
 
 # Global compile definitions
 if(SECP256K1_SPEED_FIRST)
@@ -345,6 +348,21 @@ if(SECP256K1_INSTALL)
 endif()
 
 # -- CPack packaging ---------------------------------------------------------
+set(UFSECP_SOURCE_GRAPH_TOOL "${CMAKE_CURRENT_SOURCE_DIR}/tools/source_graph_kit/source_graph.py")
+if(UFSECP_REFRESH_SOURCE_GRAPH)
+    if(Python3_Interpreter_FOUND AND EXISTS "${UFSECP_SOURCE_GRAPH_TOOL}")
+        add_custom_target(ufsecp_source_graph_refresh ALL
+            COMMAND "${Python3_EXECUTABLE}" "${UFSECP_SOURCE_GRAPH_TOOL}" build -i --best-effort
+            WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
+            COMMENT "Refreshing UltrafastSecp256k1 source graph incrementally"
+            USES_TERMINAL
+            VERBATIM
+        )
+    else()
+        message(STATUS "secp256k1-fast: source graph refresh disabled (missing Python3 interpreter or source_graph.py)")
+    endif()
+endif()
+
 set(CPACK_PACKAGE_NAME "UltrafastSecp256k1")
 set(CPACK_PACKAGE_VERSION "${PROJECT_VERSION}")
 set(CPACK_PACKAGE_VENDOR "shrec")

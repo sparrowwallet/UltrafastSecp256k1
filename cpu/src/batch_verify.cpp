@@ -227,7 +227,7 @@ std::vector<std::size_t> schnorr_batch_identify_invalid_impl(
 
 bool schnorr_batch_verify(const SchnorrBatchEntry* entries, std::size_t n) {
     std::vector<SchnorrXonlyPubkey> pubkey_cache;
-    pubkey_cache.reserve((n < 64) ? n : 64);
+    pubkey_cache.reserve(n);
 
     auto verify_one = [](const SchnorrBatchEntry& entry) {
         return schnorr_verify(entry.pubkey_x, entry.message, entry.signature);

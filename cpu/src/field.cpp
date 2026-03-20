@@ -1016,10 +1016,15 @@ limbs4 mul_impl(const limbs4& a, const limbs4& b) {
     arm64::field_mul_arm64(out.data(), a.data(), b.data());
     return out;
 #elif defined(SECP256K1_HAS_ASM) && (defined(__x86_64__) || defined(_M_X64))
-    // x86-64: Direct assembly call -- zero-copy, no FieldElement wrapper overhead
-    limbs4 out;
-    field_mul_full_asm(a.data(), b.data(), out.data());
-    return out;
+    // x86-64: Runtime dispatch — assembly requires BMI2+ADX (mulx/adcx/adox).
+    // Fall back to portable path on CPUs that lack these extensions (e.g. Jasper Lake).
+    static bool const asm_available = has_bmi2_support() && has_adx_support();
+    if (asm_available) {
+        limbs4 out;
+        field_mul_full_asm(a.data(), b.data(), out.data());
+        return out;
+    }
+    return reduce(mul_wide(a, b));
 #elif defined(SECP256K1_NO_ASM)
     // Generic no-asm fallback
     auto result = reduce(mul_wide(a, b));
@@ -1055,10 +1060,15 @@ limbs4 square_impl(const limbs4& a) {
     arm64::field_sqr_arm64(out.data(), a.data());
     return out;
 #elif defined(SECP256K1_HAS_ASM) && (defined(__x86_64__) || defined(_M_X64))
-    // x86-64: Direct assembly call -- zero-copy, no FieldElement wrapper overhead
-    limbs4 out;
-    field_sqr_full_asm(a.data(), out.data());
-    return out;
+    // x86-64: Runtime dispatch — assembly requires BMI2+ADX (mulx/adcx/adox).
+    // Fall back to portable path on CPUs that lack these extensions (e.g. Jasper Lake).
+    static bool const asm_available = has_bmi2_support() && has_adx_support();
+    if (asm_available) {
+        limbs4 out;
+        field_sqr_full_asm(a.data(), out.data());
+        return out;
+    }
+    return reduce(mul_wide(a, a));
 #elif defined(SECP256K1_NO_ASM)
     // Generic no-asm fallback
     return reduce(mul_wide(a, a));

@@ -417,7 +417,7 @@ inline void scalar_add_u64(Scalar* a, ulong val, Scalar* r) {
 
 // Convert scalar to wNAF representation (window width 5)
 // Returns length of wNAF representation
-inline int scalar_to_wnaf(const Scalar* k, int wnaf[260]) {
+static inline int scalar_to_wnaf(const Scalar* k, int wnaf[260]) {
     Scalar temp = *k;
     int len = 0;
     const int window_size = 32;   // 2^5

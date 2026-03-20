@@ -145,12 +145,20 @@ set(KERNEL_FILE_1 "${CMAKE_CURRENT_SOURCE_DIR}/kernels/secp256k1_field.cl")
 set(KERNEL_FILE_2 "${CMAKE_CURRENT_SOURCE_DIR}/kernels/secp256k1_point.cl")
 set(KERNEL_FILE_3 "${CMAKE_CURRENT_SOURCE_DIR}/kernels/secp256k1_batch.cl")
 set(KERNEL_FILE_4 "${CMAKE_CURRENT_SOURCE_DIR}/kernels/secp256k1_affine.cl")
+set(KERNEL_FILE_5 "${CMAKE_CURRENT_SOURCE_DIR}/kernels/secp256k1_extended.cl")
+set(KERNEL_FILE_6 "${CMAKE_CURRENT_SOURCE_DIR}/kernels/secp256k1_hash160.cl")
+set(KERNEL_FILE_7 "${CMAKE_CURRENT_SOURCE_DIR}/kernels/secp256k1_ecdh.cl")
+set(KERNEL_FILE_8 "${CMAKE_CURRENT_SOURCE_DIR}/kernels/secp256k1_bip352.cl")
 
 set(KERNEL_FILES_LIST
     ${KERNEL_FILE_1}
     ${KERNEL_FILE_2}
     ${KERNEL_FILE_3}
     ${KERNEL_FILE_4}
+    ${KERNEL_FILE_5}
+    ${KERNEL_FILE_6}
+    ${KERNEL_FILE_7}
+    ${KERNEL_FILE_8}
 )
 
 set(KERNEL_HEADER "${CMAKE_CURRENT_BINARY_DIR}/include/secp256k1_kernels_embedded.hpp")
@@ -214,6 +222,20 @@ else()
         secp256k1_opencl
     )
 endif()
+
+add_executable(opencl_bip352_benchmark
+    benchmarks/bench_bip352_opencl.cpp
+)
+
+target_link_libraries(opencl_bip352_benchmark PRIVATE
+    secp256k1_opencl
+    $<TARGET_NAME_IF_EXISTS:fastsecp256k1>
+    ${FASTSECP256K1_LIB}
+)
+
+target_compile_definitions(opencl_bip352_benchmark PRIVATE
+    SECP256K1_OPENCL_KERNEL_DIR="${CMAKE_CURRENT_SOURCE_DIR}/kernels"
+)
 
 # =============================================================================
 # Test Executable
@@ -290,4 +312,3 @@ install(DIRECTORY kernels/
     DESTINATION share/secp256k1/opencl
     FILES_MATCHING PATTERN "*.cl"
 )
-

@@ -1129,6 +1129,133 @@ bool selftest(bool verbose, int platform_id, int device_id) {
     }
 
     // ==========================================================================
+    // Test 41: BIP-352 SCAN_KEY smoke — large 256-bit scalar, must not be infinity
+    // Regression: verifies that scalar_mul_generator handles a real-world key
+    // that stresses the GLV decomposition path (both half-scalars non-trivial).
+    // ==========================================================================
+    {
+        total++;
+        if (verbose) SELFTEST_PRINT("\nBIP-352 SCAN_KEY k*G smoke (not infinity):\n");
+        bool pass = true;
+
+        // SCAN_KEY used in bench_bip352_opencl — 256-bit, both GLV halves non-zero
+        Scalar k_scan = scalar_from_hex(
+            "c4239fd6fc3db6e22b8bed6a49219e4e30d7d6a3b98294b138af4ad300da1a42");
+        JacobianPoint P = ctx->scalar_mul_generator(k_scan);
+        AffinePoint Pa = jacobian_to_affine(P);
+        // Sanity: x-coordinate must be non-zero (point at infinity has x=0)
+        if ((Pa.x.limbs[0] | Pa.x.limbs[1] | Pa.x.limbs[2] | Pa.x.limbs[3]) == 0) {
+            if (verbose) SELFTEST_PRINT("    FAIL: SCAN_KEY * G produced x=0 (infinity)\n");
+            pass = false;
+        }
+
+        if (pass) passed++;
+        if (verbose) SELFTEST_PRINT(pass ? "    PASS\n" : "    FAIL\n");
+    }
+
+    // ==========================================================================
+    // Test 42: GLV large scalar consistency — k*G + G = (k+1)*G for SCAN_KEY
+    // Checks that GLV decomposition is correct for a full 256-bit key by
+    // cross-checking with the additive property: (k+1)*G = k*G + 1*G.
+    // ==========================================================================
+    {
+        total++;
+        if (verbose) SELFTEST_PRINT("\nGLV large scalar consistency: k*G + G = (k+1)*G:\n");
+        bool pass = true;
+
+        Scalar k   = scalar_from_hex(
+            "c4239fd6fc3db6e22b8bed6a49219e4e30d7d6a3b98294b138af4ad300da1a42");
+        Scalar kp1 = scalar_from_hex(
+            "c4239fd6fc3db6e22b8bed6a49219e4e30d7d6a3b98294b138af4ad300da1a43");
+        Scalar one = scalar_from_u64(1);
+
+        JacobianPoint kG     = ctx->scalar_mul_generator(k);
+        JacobianPoint oneG   = ctx->scalar_mul_generator(one);
+        JacobianPoint kp1_a  = ctx->point_add(kG, oneG);    // k*G + G
+        JacobianPoint kp1_b  = ctx->scalar_mul_generator(kp1); // (k+1)*G
+
+        AffinePoint a = jacobian_to_affine(kp1_a);
+        AffinePoint b = jacobian_to_affine(kp1_b);
+        if (field_to_hex(a.x) != field_to_hex(b.x) || field_to_hex(a.y) != field_to_hex(b.y)) {
+            if (verbose) {
+                SELFTEST_PRINT("    FAIL: k*G + G != (k+1)*G\n");
+                SELFTEST_PRINT("    k*G+G  x: %s\n", field_to_hex(a.x).c_str());
+                SELFTEST_PRINT("    (k+1)G x: %s\n", field_to_hex(b.x).c_str());
+            }
+            pass = false;
+        }
+
+        if (pass) passed++;
+        if (verbose) SELFTEST_PRINT(pass ? "    PASS\n" : "    FAIL\n");
+    }
+
+    // ==========================================================================
+    // Test 43: GLV 2^128 boundary — (2^128)*G + G = (2^128+1)*G
+    // The GLV decomposition boundary sits near 2^128; a scalar k = 2^128
+    // forces the high half of the GLV decomposition to be active. Regression
+    // for any off-by-one in the half-scalar split.
+    // ==========================================================================
+    {
+        total++;
+        if (verbose) SELFTEST_PRINT("\nGLV 2^128 boundary: 2^128*G + G = (2^128+1)*G:\n");
+        bool pass = true;
+
+        // k = 2^128: limbs[2]=1 (little-endian), others=0
+        Scalar k_128  = {{0UL, 0UL, 1UL, 0UL}};
+        Scalar k_128p = {{1UL, 0UL, 1UL, 0UL}}; // 2^128 + 1
+        Scalar one    = scalar_from_u64(1);
+
+        JacobianPoint kG    = ctx->scalar_mul_generator(k_128);
+        JacobianPoint oneG  = ctx->scalar_mul_generator(one);
+        JacobianPoint kp1_a = ctx->point_add(kG, oneG);
+        JacobianPoint kp1_b = ctx->scalar_mul_generator(k_128p);
+
+        AffinePoint a = jacobian_to_affine(kp1_a);
+        AffinePoint b = jacobian_to_affine(kp1_b);
+        if (field_to_hex(a.x) != field_to_hex(b.x) || field_to_hex(a.y) != field_to_hex(b.y)) {
+            if (verbose) SELFTEST_PRINT("    FAIL: 2^128*G + G != (2^128+1)*G\n");
+            pass = false;
+        }
+
+        if (pass) passed++;
+        if (verbose) SELFTEST_PRINT(pass ? "    PASS\n" : "    FAIL\n");
+    }
+
+    // ==========================================================================
+    // Test 44: wNAF alternating-bit stress — 0x5555...*G + G = 0x5556...*G
+    // Alternating 0101... bits maximally stress wNAF digit selection:
+    // every bit triggers a non-adjacent form carry/borrow. Catches bugs in
+    // the w=5 wNAF encoder that surface only with specific bit patterns.
+    // ==========================================================================
+    {
+        total++;
+        if (verbose) SELFTEST_PRINT("\nwNAF alternating-bit stress: 0x5555...*G + G:\n");
+        bool pass = true;
+
+        // k = 0x5555555555555555 * 4 limbs = repeating 01 bits in every position
+        Scalar k_alt  = {{0x5555555555555555ULL, 0x5555555555555555ULL,
+                           0x5555555555555555ULL, 0x5555555555555555ULL}};
+        Scalar k_altp = {{0x5555555555555556ULL, 0x5555555555555555ULL,
+                           0x5555555555555555ULL, 0x5555555555555555ULL}};
+        Scalar one = scalar_from_u64(1);
+
+        JacobianPoint kG    = ctx->scalar_mul_generator(k_alt);
+        JacobianPoint oneG  = ctx->scalar_mul_generator(one);
+        JacobianPoint kp1_a = ctx->point_add(kG, oneG);
+        JacobianPoint kp1_b = ctx->scalar_mul_generator(k_altp);
+
+        AffinePoint a = jacobian_to_affine(kp1_a);
+        AffinePoint b = jacobian_to_affine(kp1_b);
+        if (field_to_hex(a.x) != field_to_hex(b.x) || field_to_hex(a.y) != field_to_hex(b.y)) {
+            if (verbose) SELFTEST_PRINT("    FAIL: 0x5555...*G + G != 0x5556...*G\n");
+            pass = false;
+        }
+
+        if (pass) passed++;
+        if (verbose) SELFTEST_PRINT(pass ? "    PASS\n" : "    FAIL\n");
+    }
+
+    // ==========================================================================
     // Test 40: Distributive k*(P+Q) = k*P + k*Q
     // ==========================================================================
     {

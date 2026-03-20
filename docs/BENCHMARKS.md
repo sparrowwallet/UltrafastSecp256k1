@@ -11,13 +11,17 @@ Benchmark results for UltrafastSecp256k1 across all supported platforms.
 | **x86-64 (i5-14400F, Clang 19)** | **12.8 ns** | **6.7 us** | **17.6 us** | **21.3 us** | **24.3 us** | **1.09x** |
 | x86-64 (Clang 21, Win) | 17 ns (5x52) | 5 us | 25 us | -- | -- | -- |
 | RISC-V 64 (SiFive U74, Clang 21) | 176 ns | 40.2 us | 150.5 us | **181.8 us** | -- | **1.13x** |
-| ARM64 (RK3588, A76) | 74 ns | 14 us | 131 us | -- | -- | -- |
+| ARM64 (RK3588, A76, Android NDK r27.2) | 68.3 ns | 15.27 us | 130.33 us | **150.13 us** | -- | -- |
 | ESP32-S3 (LX7, 240 MHz) | 7,458 ns | 2,483 us | -- | -- | -- | -- |
 | ESP32 (LX6, 240 MHz) | 6,993 ns | 6,203 us | -- | -- | -- | -- |
 | STM32F103 (CM3, 72 MHz) | 15,331 ns | 37,982 us | -- | -- | -- | -- |
-| CUDA (RTX 5060 Ti) | 0.2 ns | 217.7 ns | 225.8 ns | -- | **263.7 ns** | -- |
-| OpenCL (RTX 5060 Ti) | 0.2 ns | 295.1 ns | -- | -- | -- | -- |
+| CUDA (RTX 5060 Ti) | 0.2 ns | 129.5 ns | 225.8 ns | -- | **263.7 ns** | -- |
+| OpenCL (RTX 5060 Ti) | 0.2 ns | 115.1 ns | 263.1 ns | -- | -- | -- |
 | Metal (Apple M3 Pro) | 1.9 ns | 3.00 us | 2.94 us | -- | -- | -- |
+
+GPU rows use the latest retained local rerun per backend. For OpenCL, the public
+GPU C ABI still covers 4 of the 6 first-wave operations; the missing two are
+batch ECDSA verify and batch Schnorr verify.
 
 ---
 
@@ -55,6 +59,46 @@ Quick sanity run from `bench_unified --quick` on the local x86-64 validation mac
 These values are mainly intended as workflow reference points. For publishable
 cross-machine comparisons, use the full pinned benchmark methodology and JSON
 artifacts from `bench_unified`.
+
+### x86-64 Batch Verify Rerun (2026-03-17)
+
+A retained low-risk x86 CPU improvement was keeping the Schnorr batch pubkey cache
+capacity aligned with the full batch size in `cpu/src/batch_verify.cpp` instead of
+clamping reserve capacity to 64 entries. This avoids avoidable vector reallocations
+when uncached batches grow beyond 64 signatures.
+
+Quick reruns on the local i5-14400F validation machine showed the improvement on the
+uncached Schnorr path while preserving correctness (`ctest -R 'comprehensive|multiscalar'` PASS):
+
+| Operation | Before | After | Delta |
+|-----------|--------|-------|-------|
+| Schnorr batch verify N=128 | 20.27 us/sig | 19.94-20.06 us/sig | up to 1.6% faster |
+| Schnorr batch verify N=192 | 18.56 us/sig | 18.01-18.45 us/sig | up to 3.0% faster |
+
+This change does not materially affect the cached-path benchmark; the measured win is specifically
+the uncached parse-and-resolve flow for larger Schnorr batches.
+
+### Cross-Platform Refresh Status (2026-03-18)
+
+Recent retained reruns and validation passes across the active optimization campaign:
+
+| Platform | Latest validated result | Status |
+|----------|-------------------------|--------|
+| x86-64 / Linux | Schnorr batch verify `N=128`: 19.94-20.06 us/sig, `N=192`: 18.01-18.45 us/sig | Retained low-risk pubkey-cache reserve improvement |
+| Android ARM64 / RK3588 | ECDSA Sign 22.22 us, Schnorr Sign (precomputed) 16.67 us, CT ECDSA Sign 67.11 us | Retained ARMv8 SHA2 dispatch win |
+| OpenCL / RTX 5060 Ti | `kG (batch=65536)` 115.1 ns, `kP (batch=65536)` 263.1 ns, `kG (kernel)` 98.7 ns | Revalidated retained tuning; `opencl_test` and `opencl_audit_runner` passed |
+| CUDA / RTX 5060 Ti | `k*G` 129.5 ns at TPB 256; TPB 512 reached 128.5 ns but CT rows became invalid in the same harness | No safe global retune retained yet |
+| RISC-V / Milk-V Mars | Latest native rerun remains the 2026-03-07 Mars baseline below | Current local environment has toolchain but no runnable board/emulator path |
+
+This page keeps the last trustworthy result per platform. When a rerun only proves that an
+experiment is unstable or not worth shipping, it is recorded here but not promoted as a retained
+default.
+
+OpenCL's current 4/6 C ABI status refers specifically to the generic GPU host ABI in
+`ufsecp_gpu.h`: `generator_mul_batch`, `ecdh_batch`, `hash160_pubkey_batch`, and
+`msm` are implemented on the OpenCL backend, while `ecdsa_verify_batch` and
+`schnorr_verify_batch` currently return `UFSECP_ERR_GPU_UNSUPPORTED` until the
+extended verify kernels are promoted into the backend bridge.
 
 ---
 
@@ -229,6 +273,20 @@ Summary: `53/54 modules passed -- ALL PASSED (1 advisory warnings)`.
 | Range Prove (64-bit) | 3,711,570 ns | 0.27 k/s | Bulletproof, CT path, batch 256 |
 | Range Verify (64-bit) | 764,649 ns | 1.3 k/s | Full IPA verification, batch 256 |
 
+### CUDA Launch-Width Triage (2026-03-18)
+
+The latest local rerun on the RTX 5060 Ti used `gpu_bench_unified` to check whether a global block-size
+retune should replace the current default. The answer was no: there is not yet a safe retained win.
+
+| TPB | k*G (generator) | CT k*G | CT k*P | Verdict |
+|-----|-----------------|--------|--------|---------|
+| 256 | 129.5 ns | 98.7 ns | 162.8 ns | Stable reference rerun |
+| 512 | 128.5 ns | invalid (`0.0 ns`) | invalid (`0.1 ns`) | Rejected; CT timing became unstable |
+
+The `512`-thread launch showed only a marginal `k*G` gain, while the same harness produced invalid
+constant-time timings. Until the CT timing methodology is tightened, no global CUDA TPB default change
+is retained from this sweep.
+
 **GPU vs CPU ZK Speedup (single-core throughput):**
 
 | Operation | CPU (i5-14400F) | GPU (RTX 5060 Ti) | GPU/CPU Speedup |
@@ -249,6 +307,20 @@ Summary: `53/54 modules passed -- ALL PASSED (1 advisory warnings)`.
 **OpenCL:** 3.0 CUDA, Driver 580.126.09  
 **Build:** Clang 19, Release, -O3, PTX inline assembly  
 
+### OpenCL GPU C ABI Coverage (2026-03-18)
+
+| C ABI operation | OpenCL status | Notes |
+|-----------------|---------------|-------|
+| `ufsecp_gpu_generator_mul_batch` | Implemented | Uses `batch_scalar_mul_generator` + `batch_jacobian_to_affine` |
+| `ufsecp_gpu_ecdsa_verify_batch` | Missing | Returns `UFSECP_ERR_GPU_UNSUPPORTED` |
+| `ufsecp_gpu_schnorr_verify_batch` | Missing | Returns `UFSECP_ERR_GPU_UNSUPPORTED` |
+| `ufsecp_gpu_ecdh_batch` | Implemented | GPU scalar mul, CPU SHA-256 finalization |
+| `ufsecp_gpu_hash160_pubkey_batch` | Implemented | Public-data batch hashing |
+| `ufsecp_gpu_msm` | Implemented | GPU scalar mul + CPU-side affine reduction |
+
+The missing OpenCL pieces are therefore the two batch verify paths. Core ECC,
+ECDH, Hash160, and MSM are already wired through the backend-neutral C ABI.
+
 ### Kernel-Only Timing (no buffer alloc/copy overhead)
 
 | Operation | Time/Op | Throughput | Notes |
@@ -260,7 +332,8 @@ Summary: `53/54 modules passed -- ALL PASSED (1 advisory warnings)`.
 | Field Inv | 14.3 ns | 69.97 M/s | batch 1M |
 | Point Double | 0.9 ns | 1,139 M/s | batch 256K |
 | Point Add | 1.6 ns | 630.6 M/s | batch 256K |
-| kG (kernel) | 295.1 ns | 3.39 M/s | batch 256K |
+| kG (kernel) | 98.7 ns | 10.13 M/s | batch 65K |
+| kP (kernel) | 238.1 ns | 4.20 M/s | batch 65K |
 
 ### End-to-End Timing (including buffer transfers)
 
@@ -271,8 +344,10 @@ Summary: `53/54 modules passed -- ALL PASSED (1 advisory warnings)`.
 | Field Inv | 29.0 ns | 34.43 M/s | batch 1M |
 | Point Double | 58.4 ns | 17.11 M/s | batch 1M |
 | Point Add | 111.9 ns | 8.94 M/s | batch 1M |
-| kG (batch=65K) | 307.7 ns | 3.25 M/s | |
-| kG (batch=16K) | 311.6 ns | 3.21 M/s | |
+| kG (batch=65536) | 115.1 ns | 8.69 M/s | retained 2026-03-17 revalidation |
+| kP (batch=65536) | 263.1 ns | 3.80 M/s | retained 2026-03-17 revalidation |
+| kP upload | 6.7 ns | 149.25 M/s | host-to-device transfer slice |
+| kP readback | 12.4 ns | 80.65 M/s | device-to-host transfer slice |
 
 ### CUDA / OpenCL Configuration
 
@@ -291,7 +366,7 @@ Summary: `53/54 modules passed -- ALL PASSED (1 advisory warnings)`.
 | Field Inv | 10.2 ns | 14.3 ns | **CUDA 1.40x** |
 | Point Double | 0.8 ns | 0.9 ns | CUDA 1.13x |
 | Point Add | 1.6 ns | 1.6 ns | Tie |
-| Scalar Mul (kG) | 217.7 ns | 295.1 ns | **CUDA 1.36x** |
+| Scalar Mul (kG) | 129.5 ns | 98.7 ns | **OpenCL 1.31x** |
 | ECDSA Sign | 204.8 ns | -- | CUDA only |
 | ECDSA Verify | 410.1 ns | -- | CUDA only |
 | Schnorr Sign | 273.4 ns | -- | CUDA only |
@@ -300,6 +375,11 @@ Summary: `53/54 modules passed -- ALL PASSED (1 advisory warnings)`.
 | Knowledge Verify | 744.5 ns | -- | CUDA only |
 | DLEQ Prove | 675.4 ns | -- | CUDA only |
 | DLEQ Verify | 1,912.0 ns | -- | CUDA only |
+
+`kG` above uses the latest retained local reruns on the same RTX 5060 Ti host:
+CUDA `gpu_bench_unified` at TPB 256 (`129.5 ns`) and OpenCL `opencl_benchmark`
+kernel timing (`98.7 ns`). CUDA still leads on verify and ZK because those paths
+are not yet exposed on OpenCL.
 
 ---
 
@@ -353,29 +433,48 @@ Summary: `53/54 modules passed -- ALL PASSED (1 advisory warnings)`.
 
 **Hardware:** RK3588 (Cortex-A76 @ 2.256 GHz, pinned to big cores)  
 **OS:** Android  
-**Compiler:** NDK r26, Clang 17.0.2  
+**Compiler:** NDK r27.2.12479018, Clang 18.0.3  
 **Assembly:** ARM64 inline (MUL/UMULH)  
 **Field:** 10x26 (optimal for ARM64)
 
 | Operation | Time | Notes |
 |-----------|------|-------|
-| Field Mul | 74 ns | ARM64 MUL/UMULH, 10x26 |
+| Field Mul | 68.3 ns | ARM64 MUL/UMULH, 10x26 |
 | Field Square | 50 ns | |
 | Field Add | 8 ns | |
 | Field Negate | 18 ns | |
 | Field Inverse | 2 us | Fermat's theorem |
 | Point Add | 992 ns | Jacobian coordinates |
 | Point Double | 548 ns | |
-| Generator Mul (kxG) | 14 us | Precomputed tables |
-| Scalar Mul (kxP) | 131 us | GLV + wNAF |
-| ECDSA Sign | 30 us | RFC 6979 |
-| ECDSA Verify | 153 us | Shamir + GLV |
-| Schnorr Sign (BIP-340) | 38 us | |
-| Schnorr Verify (BIP-340) | 173 us | |
+| Generator Mul (kxG) | 15.27 us | Precomputed tables |
+| Scalar Mul (kxP) | 130.33 us | GLV + wNAF |
+| ECDSA Sign | 22.22 us | ARMv8 SHA2 dispatch retained |
+| ECDSA Verify | 150.13 us | Shamir + GLV |
+| Schnorr Sign (BIP-340) | 16.67 us | Precomputed keypair path |
+| Schnorr Verify (BIP-340) | 153.63 us | Raw pubkey path is similar |
 | Batch Inverse (n=100) | 265 ns/elem | Montgomery's trick |
 | Batch Inverse (n=1000) | 240 ns/elem | |
 
 ARM64 10x26 representation with MUL/UMULH assembly provides optimal field arithmetic performance.
+
+### Android ARM64 Optimization Rerun (2026-03-17)
+
+This rerun used the connected RK3588 Android device and `android/test/bench_hornet_android.cpp`
+as the benchmark truth source. The retained code change was enabling the existing ARMv8 SHA-256
+instruction path in `hash_accel.cpp` for `sha256_33`, `sha256_32`, `hash160_33`, and
+`sha256_compress_dispatch`.
+
+| Operation | Baseline | Retained result | Delta |
+|-----------|----------|-----------------|-------|
+| ECDSA Sign | 25.89 us | 22.22 us | 14.2% faster |
+| Schnorr Sign (precomputed) | 17.73 us | 16.67 us | 6.0% faster |
+| Schnorr Sign (raw privkey) | 33.01 us | 31.99 us | 3.1% faster |
+| CT ECDSA Sign | 70.50 us | 67.11 us | 4.8% faster |
+| CT Schnorr Sign | 59.87 us | 59.10 us | 1.3% faster |
+
+No meaningful win was found from forcing `SECP256K1_USE_4X64_POINT_OPS`, from changing
+`SECP256K1_GLV_WINDOW_WIDTH` to 4 or 6, or from keeping PGO as the default Android path.
+Those variants were measured and rejected.
 
 ---
 

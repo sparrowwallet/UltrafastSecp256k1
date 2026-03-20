@@ -60,6 +60,306 @@ typedef struct {
 } FieldElement;
 
 // =============================================================================
+// NVIDIA OpenCL PTX Acceleration (Level 1+2+3)
+// =============================================================================
+// On consumer NVIDIA GPUs (Turing/Ampere/Ada/Blackwell), INT32 multiply
+// throughput is 32x higher than INT64. Inline PTX enables:
+//   Level 1+2: mad.lo.cc.u64/madc.hi.cc.u64 carry chains (no comparison-carry)
+//   Level 3:   mad.lo.cc.u32/madc.hi.cc.u32 32-bit Comba (INT32 throughput)
+// Fallback (AMD, Intel, portable): mul_hi + comparison-based carry unchanged.
+// Guard: __NV_CL_C_VERSION is defined only by NVIDIA's OpenCL compiler.
+// =============================================================================
+
+#ifdef __NV_CL_C_VERSION
+
+// 32-bit MAD accumulate: (r0:r1:r2) += a * b  [3-register 96-bit accumulator]
+#define OCL_MAD32(r0, r1, r2, a, b) \
+    __asm volatile( \
+        "mad.lo.cc.u32 %0, %3, %4, %0; \n\t" \
+        "madc.hi.cc.u32 %1, %3, %4, %1; \n\t" \
+        "addc.u32 %2, %2, 0; \n\t" \
+        : "+r"(r0), "+r"(r1), "+r"(r2) \
+        : "r"(a), "r"(b) \
+    )
+
+// 32-bit squaring diagonal: (r0:r1:r2) += a*a
+#define OCL_SQR32_D(r0, r1, r2, a) \
+    __asm volatile( \
+        "mad.lo.cc.u32 %0, %3, %3, %0; \n\t" \
+        "madc.hi.cc.u32 %1, %3, %3, %1; \n\t" \
+        "addc.u32 %2, %2, 0; \n\t" \
+        : "+r"(r0), "+r"(r1), "+r"(r2) \
+        : "r"(a) \
+    )
+
+// 32-bit squaring off-diagonal: (r0:r1:r2) += 2 * a*b
+#define OCL_SQR32_M2(r0, r1, r2, a, b) \
+    do { \
+        uint _lo, _hi; \
+        __asm volatile( \
+            "mul.lo.u32 %0, %2, %3; \n\t" \
+            "mul.hi.u32 %1, %2, %3; \n\t" \
+            : "=r"(_lo), "=r"(_hi) : "r"(a), "r"(b) \
+        ); \
+        __asm volatile( \
+            "add.cc.u32 %0, %0, %3; \n\t" \
+            "addc.cc.u32 %1, %1, %4; \n\t" \
+            "addc.u32 %2, %2, 0; \n\t" \
+            "add.cc.u32 %0, %0, %3; \n\t" \
+            "addc.cc.u32 %1, %1, %4; \n\t" \
+            "addc.u32 %2, %2, 0; \n\t" \
+            : "+r"(r0), "+r"(r1), "+r"(r2) : "r"(_lo), "r"(_hi) \
+        ); \
+    } while(0)
+
+// ----------------------------------------------------------------------------
+// 32-bit Comba multiplication: 4x64 FieldElement reinterpreted as 8x32 limbs.
+// Produces uint[16] raw output (little-endian 32-bit limbs of 512-bit product).
+// Mirrors CUDA's mul_256_comba32 from secp256k1_32_hybrid_final.cuh.
+// ----------------------------------------------------------------------------
+static inline void mul_256_comba32_ocl(
+    const FieldElement* a, const FieldElement* b, uint t32[16]
+) {
+    uint a32[8], b32[8];
+    for (int i = 0; i < 4; i++) {
+        a32[2*i]   = (uint)(a->limbs[i]);
+        a32[2*i+1] = (uint)(a->limbs[i] >> 32);
+        b32[2*i]   = (uint)(b->limbs[i]);
+        b32[2*i+1] = (uint)(b->limbs[i] >> 32);
+    }
+    uint r0 = 0, r1 = 0, r2 = 0;
+
+    OCL_MAD32(r0,r1,r2, a32[0],b32[0]);
+    t32[0]=r0; r0=r1; r1=r2; r2=0;
+
+    OCL_MAD32(r0,r1,r2, a32[0],b32[1]); OCL_MAD32(r0,r1,r2, a32[1],b32[0]);
+    t32[1]=r0; r0=r1; r1=r2; r2=0;
+
+    OCL_MAD32(r0,r1,r2, a32[0],b32[2]); OCL_MAD32(r0,r1,r2, a32[1],b32[1]); OCL_MAD32(r0,r1,r2, a32[2],b32[0]);
+    t32[2]=r0; r0=r1; r1=r2; r2=0;
+
+    OCL_MAD32(r0,r1,r2, a32[0],b32[3]); OCL_MAD32(r0,r1,r2, a32[1],b32[2]); OCL_MAD32(r0,r1,r2, a32[2],b32[1]); OCL_MAD32(r0,r1,r2, a32[3],b32[0]);
+    t32[3]=r0; r0=r1; r1=r2; r2=0;
+
+    OCL_MAD32(r0,r1,r2, a32[0],b32[4]); OCL_MAD32(r0,r1,r2, a32[1],b32[3]); OCL_MAD32(r0,r1,r2, a32[2],b32[2]); OCL_MAD32(r0,r1,r2, a32[3],b32[1]); OCL_MAD32(r0,r1,r2, a32[4],b32[0]);
+    t32[4]=r0; r0=r1; r1=r2; r2=0;
+
+    OCL_MAD32(r0,r1,r2, a32[0],b32[5]); OCL_MAD32(r0,r1,r2, a32[1],b32[4]); OCL_MAD32(r0,r1,r2, a32[2],b32[3]); OCL_MAD32(r0,r1,r2, a32[3],b32[2]); OCL_MAD32(r0,r1,r2, a32[4],b32[1]); OCL_MAD32(r0,r1,r2, a32[5],b32[0]);
+    t32[5]=r0; r0=r1; r1=r2; r2=0;
+
+    OCL_MAD32(r0,r1,r2, a32[0],b32[6]); OCL_MAD32(r0,r1,r2, a32[1],b32[5]); OCL_MAD32(r0,r1,r2, a32[2],b32[4]); OCL_MAD32(r0,r1,r2, a32[3],b32[3]); OCL_MAD32(r0,r1,r2, a32[4],b32[2]); OCL_MAD32(r0,r1,r2, a32[5],b32[1]); OCL_MAD32(r0,r1,r2, a32[6],b32[0]);
+    t32[6]=r0; r0=r1; r1=r2; r2=0;
+
+    OCL_MAD32(r0,r1,r2, a32[0],b32[7]); OCL_MAD32(r0,r1,r2, a32[1],b32[6]); OCL_MAD32(r0,r1,r2, a32[2],b32[5]); OCL_MAD32(r0,r1,r2, a32[3],b32[4]); OCL_MAD32(r0,r1,r2, a32[4],b32[3]); OCL_MAD32(r0,r1,r2, a32[5],b32[2]); OCL_MAD32(r0,r1,r2, a32[6],b32[1]); OCL_MAD32(r0,r1,r2, a32[7],b32[0]);
+    t32[7]=r0; r0=r1; r1=r2; r2=0;
+
+    OCL_MAD32(r0,r1,r2, a32[1],b32[7]); OCL_MAD32(r0,r1,r2, a32[2],b32[6]); OCL_MAD32(r0,r1,r2, a32[3],b32[5]); OCL_MAD32(r0,r1,r2, a32[4],b32[4]); OCL_MAD32(r0,r1,r2, a32[5],b32[3]); OCL_MAD32(r0,r1,r2, a32[6],b32[2]); OCL_MAD32(r0,r1,r2, a32[7],b32[1]);
+    t32[8]=r0; r0=r1; r1=r2; r2=0;
+
+    OCL_MAD32(r0,r1,r2, a32[2],b32[7]); OCL_MAD32(r0,r1,r2, a32[3],b32[6]); OCL_MAD32(r0,r1,r2, a32[4],b32[5]); OCL_MAD32(r0,r1,r2, a32[5],b32[4]); OCL_MAD32(r0,r1,r2, a32[6],b32[3]); OCL_MAD32(r0,r1,r2, a32[7],b32[2]);
+    t32[9]=r0; r0=r1; r1=r2; r2=0;
+
+    OCL_MAD32(r0,r1,r2, a32[3],b32[7]); OCL_MAD32(r0,r1,r2, a32[4],b32[6]); OCL_MAD32(r0,r1,r2, a32[5],b32[5]); OCL_MAD32(r0,r1,r2, a32[6],b32[4]); OCL_MAD32(r0,r1,r2, a32[7],b32[3]);
+    t32[10]=r0; r0=r1; r1=r2; r2=0;
+
+    OCL_MAD32(r0,r1,r2, a32[4],b32[7]); OCL_MAD32(r0,r1,r2, a32[5],b32[6]); OCL_MAD32(r0,r1,r2, a32[6],b32[5]); OCL_MAD32(r0,r1,r2, a32[7],b32[4]);
+    t32[11]=r0; r0=r1; r1=r2; r2=0;
+
+    OCL_MAD32(r0,r1,r2, a32[5],b32[7]); OCL_MAD32(r0,r1,r2, a32[6],b32[6]); OCL_MAD32(r0,r1,r2, a32[7],b32[5]);
+    t32[12]=r0; r0=r1; r1=r2; r2=0;
+
+    OCL_MAD32(r0,r1,r2, a32[6],b32[7]); OCL_MAD32(r0,r1,r2, a32[7],b32[6]);
+    t32[13]=r0; r0=r1; r1=r2; r2=0;
+
+    OCL_MAD32(r0,r1,r2, a32[7],b32[7]);
+    t32[14]=r0; t32[15]=r1;
+}
+
+// 32-bit Comba squaring: ~40% fewer multiplications (symmetry exploitation).
+// Mirrors CUDA's sqr_256_comba32 from secp256k1_32_hybrid_final.cuh.
+static inline void sqr_256_comba32_ocl(const FieldElement* a, uint t32[16]) {
+    uint a32[8];
+    for (int i = 0; i < 4; i++) {
+        a32[2*i]   = (uint)(a->limbs[i]);
+        a32[2*i+1] = (uint)(a->limbs[i] >> 32);
+    }
+    uint r0 = 0, r1 = 0, r2 = 0;
+
+    OCL_SQR32_D(r0,r1,r2, a32[0]);
+    t32[0]=r0; r0=r1; r1=r2; r2=0;
+
+    OCL_SQR32_M2(r0,r1,r2, a32[0],a32[1]);
+    t32[1]=r0; r0=r1; r1=r2; r2=0;
+
+    OCL_SQR32_M2(r0,r1,r2, a32[0],a32[2]); OCL_SQR32_D(r0,r1,r2, a32[1]);
+    t32[2]=r0; r0=r1; r1=r2; r2=0;
+
+    OCL_SQR32_M2(r0,r1,r2, a32[0],a32[3]); OCL_SQR32_M2(r0,r1,r2, a32[1],a32[2]);
+    t32[3]=r0; r0=r1; r1=r2; r2=0;
+
+    OCL_SQR32_M2(r0,r1,r2, a32[0],a32[4]); OCL_SQR32_M2(r0,r1,r2, a32[1],a32[3]); OCL_SQR32_D(r0,r1,r2, a32[2]);
+    t32[4]=r0; r0=r1; r1=r2; r2=0;
+
+    OCL_SQR32_M2(r0,r1,r2, a32[0],a32[5]); OCL_SQR32_M2(r0,r1,r2, a32[1],a32[4]); OCL_SQR32_M2(r0,r1,r2, a32[2],a32[3]);
+    t32[5]=r0; r0=r1; r1=r2; r2=0;
+
+    OCL_SQR32_M2(r0,r1,r2, a32[0],a32[6]); OCL_SQR32_M2(r0,r1,r2, a32[1],a32[5]); OCL_SQR32_M2(r0,r1,r2, a32[2],a32[4]); OCL_SQR32_D(r0,r1,r2, a32[3]);
+    t32[6]=r0; r0=r1; r1=r2; r2=0;
+
+    OCL_SQR32_M2(r0,r1,r2, a32[0],a32[7]); OCL_SQR32_M2(r0,r1,r2, a32[1],a32[6]); OCL_SQR32_M2(r0,r1,r2, a32[2],a32[5]); OCL_SQR32_M2(r0,r1,r2, a32[3],a32[4]);
+    t32[7]=r0; r0=r1; r1=r2; r2=0;
+
+    OCL_SQR32_M2(r0,r1,r2, a32[1],a32[7]); OCL_SQR32_M2(r0,r1,r2, a32[2],a32[6]); OCL_SQR32_M2(r0,r1,r2, a32[3],a32[5]); OCL_SQR32_D(r0,r1,r2, a32[4]);
+    t32[8]=r0; r0=r1; r1=r2; r2=0;
+
+    OCL_SQR32_M2(r0,r1,r2, a32[2],a32[7]); OCL_SQR32_M2(r0,r1,r2, a32[3],a32[6]); OCL_SQR32_M2(r0,r1,r2, a32[4],a32[5]);
+    t32[9]=r0; r0=r1; r1=r2; r2=0;
+
+    OCL_SQR32_M2(r0,r1,r2, a32[3],a32[7]); OCL_SQR32_M2(r0,r1,r2, a32[4],a32[6]); OCL_SQR32_D(r0,r1,r2, a32[5]);
+    t32[10]=r0; r0=r1; r1=r2; r2=0;
+
+    OCL_SQR32_M2(r0,r1,r2, a32[4],a32[7]); OCL_SQR32_M2(r0,r1,r2, a32[5],a32[6]);
+    t32[11]=r0; r0=r1; r1=r2; r2=0;
+
+    OCL_SQR32_M2(r0,r1,r2, a32[5],a32[7]); OCL_SQR32_D(r0,r1,r2, a32[6]);
+    t32[12]=r0; r0=r1; r1=r2; r2=0;
+
+    OCL_SQR32_M2(r0,r1,r2, a32[6],a32[7]);
+    t32[13]=r0; r0=r1; r1=r2; r2=0;
+
+    OCL_SQR32_D(r0,r1,r2, a32[7]);
+    t32[14]=r0; t32[15]=r1;
+}
+
+// 32-bit reduction: T_hi x K_MOD (32-bit MAD chain) + conditional P-subtract.
+// Phase 1: T_hi[8..15] x 977 (scalar, 32-bit MAD chain)
+// Phase 1b: add T_hi << 32  (K_MOD = 2^32 + 977)
+// Phase 2: T_lo[0..7] += result (32-bit carry chain)
+// Phase 3+4: pack to 64-bit, fold overflow, conditional P-subtract (64-bit PTX)
+// Mirrors CUDA's reduce_512_to_256_32 from secp256k1_32_hybrid_final.cuh.
+static inline void reduce_512_to_256_32_ocl(uint t32[16], FieldElement* r) {
+    uint t0=t32[0], t1=t32[1], t2=t32[2], t3=t32[3];
+    uint t4=t32[4], t5=t32[5], t6=t32[6], t7=t32[7];
+    const uint t8 =t32[8],  t9 =t32[9],  t10=t32[10], t11=t32[11];
+    const uint t12=t32[12], t13=t32[13], t14=t32[14], t15=t32[15];
+
+    // Phase 1: A = T_hi[8..15] x 977 (32-bit scalar MAD chain -> 9 limbs)
+    uint a0, a1, a2, a3, a4, a5, a6, a7, a8;
+    __asm volatile(
+        "mul.lo.u32 %0, %9,  977;\n\t"
+        "mul.hi.u32 %1, %9,  977;\n\t"
+        "mad.lo.cc.u32 %1, %10, 977, %1;\n\t"
+        "madc.hi.u32 %2, %10, 977, 0;\n\t"
+        "mad.lo.cc.u32 %2, %11, 977, %2;\n\t"
+        "madc.hi.u32 %3, %11, 977, 0;\n\t"
+        "mad.lo.cc.u32 %3, %12, 977, %3;\n\t"
+        "madc.hi.u32 %4, %12, 977, 0;\n\t"
+        "mad.lo.cc.u32 %4, %13, 977, %4;\n\t"
+        "madc.hi.u32 %5, %13, 977, 0;\n\t"
+        "mad.lo.cc.u32 %5, %14, 977, %5;\n\t"
+        "madc.hi.u32 %6, %14, 977, 0;\n\t"
+        "mad.lo.cc.u32 %6, %15, 977, %6;\n\t"
+        "madc.hi.u32 %7, %15, 977, 0;\n\t"
+        "mad.lo.cc.u32 %7, %16, 977, %7;\n\t"
+        "madc.hi.u32 %8, %16, 977, 0;\n\t"
+        : "=r"(a0),"=r"(a1),"=r"(a2),"=r"(a3),"=r"(a4),
+          "=r"(a5),"=r"(a6),"=r"(a7),"=r"(a8)
+        : "r"(t8),"r"(t9),"r"(t10),"r"(t11),
+          "r"(t12),"r"(t13),"r"(t14),"r"(t15)
+    );
+
+    // Phase 1b: add T_hi << 32 (a[1..8] += T_hi[8..15], yielding a9 overflow)
+    uint a9;
+    __asm volatile(
+        "add.cc.u32  %0, %0, %9;\n\t"
+        "addc.cc.u32 %1, %1, %10;\n\t"
+        "addc.cc.u32 %2, %2, %11;\n\t"
+        "addc.cc.u32 %3, %3, %12;\n\t"
+        "addc.cc.u32 %4, %4, %13;\n\t"
+        "addc.cc.u32 %5, %5, %14;\n\t"
+        "addc.cc.u32 %6, %6, %15;\n\t"
+        "addc.cc.u32 %7, %7, %16;\n\t"
+        "addc.u32    %8, 0, 0;\n\t"
+        : "+r"(a1),"+r"(a2),"+r"(a3),"+r"(a4),
+          "+r"(a5),"+r"(a6),"+r"(a7),"+r"(a8),"=r"(a9)
+        : "r"(t8),"r"(t9),"r"(t10),"r"(t11),
+          "r"(t12),"r"(t13),"r"(t14),"r"(t15)
+    );
+
+    // Phase 2: T_lo[0..7] += A[0..7] (32-bit carry chain)
+    uint carry;
+    __asm volatile(
+        "add.cc.u32  %0, %0, %9;\n\t"
+        "addc.cc.u32 %1, %1, %10;\n\t"
+        "addc.cc.u32 %2, %2, %11;\n\t"
+        "addc.cc.u32 %3, %3, %12;\n\t"
+        "addc.cc.u32 %4, %4, %13;\n\t"
+        "addc.cc.u32 %5, %5, %14;\n\t"
+        "addc.cc.u32 %6, %6, %15;\n\t"
+        "addc.cc.u32 %7, %7, %16;\n\t"
+        "addc.u32    %8, 0, 0;\n\t"
+        : "+r"(t0),"+r"(t1),"+r"(t2),"+r"(t3),
+          "+r"(t4),"+r"(t5),"+r"(t6),"+r"(t7),"=r"(carry)
+        : "r"(a0),"r"(a1),"r"(a2),"r"(a3),
+          "r"(a4),"r"(a5),"r"(a6),"r"(a7)
+    );
+
+    // Phase 3: pack to 64-bit and fold overflow (extra * K)
+    ulong r0 = ((ulong)t1 << 32) | t0;
+    ulong r1 = ((ulong)t3 << 32) | t2;
+    ulong r2 = ((ulong)t5 << 32) | t4;
+    ulong r3 = ((ulong)t7 << 32) | t6;
+    ulong extra = (ulong)a8 + carry + ((ulong)a9 << 32);
+    ulong ek_lo, ek_hi;
+    __asm volatile(
+        "mul.lo.u64 %0, %2, %3;\n\t"
+        "mul.hi.u64 %1, %2, %3;\n\t"
+        : "=l"(ek_lo), "=l"(ek_hi)
+        : "l"(extra), "l"((ulong)SECP256K1_K)
+    );
+    ulong c;
+    __asm volatile(
+        "add.cc.u64  %0, %0, %5;\n\t"
+        "addc.cc.u64 %1, %1, %6;\n\t"
+        "addc.cc.u64 %2, %2, 0;\n\t"
+        "addc.cc.u64 %3, %3, 0;\n\t"
+        "addc.u64    %4, 0, 0;\n\t"
+        : "+l"(r0),"+l"(r1),"+l"(r2),"+l"(r3),"=l"(c)
+        : "l"(ek_lo),"l"(ek_hi)
+    );
+    if (c) {
+        __asm volatile(
+            "add.cc.u64  %0, %0, %4;\n\t"
+            "addc.cc.u64 %1, %1, 0;\n\t"
+            "addc.cc.u64 %2, %2, 0;\n\t"
+            "addc.u64    %3, %3, 0;\n\t"
+            : "+l"(r0),"+l"(r1),"+l"(r2),"+l"(r3)
+            : "l"((ulong)SECP256K1_K)
+        );
+    }
+
+    // Phase 4: conditional subtraction of P (64-bit PTX sub.cc chain)
+    ulong s0, s1, s2, s3, borrow;
+    __asm volatile(
+        "sub.cc.u64  %0, %5, %9;\n\t"
+        "subc.cc.u64 %1, %6, %10;\n\t"
+        "subc.cc.u64 %2, %7, %11;\n\t"
+        "subc.cc.u64 %3, %8, %12;\n\t"
+        "subc.u64    %4, 0, 0;\n\t"
+        : "=l"(s0),"=l"(s1),"=l"(s2),"=l"(s3),"=l"(borrow)
+        : "l"(r0),"l"(r1),"l"(r2),"l"(r3),
+          "l"(SECP256K1_P0),"l"(SECP256K1_P1),"l"(SECP256K1_P2),"l"(SECP256K1_P3)
+    );
+    if (borrow == 0) {
+        r->limbs[0]=s0; r->limbs[1]=s1; r->limbs[2]=s2; r->limbs[3]=s3;
+    } else {
+        r->limbs[0]=r0; r->limbs[1]=r1; r->limbs[2]=r2; r->limbs[3]=r3;
+    }
+}
+
+#endif // __NV_CL_C_VERSION
+
+// =============================================================================
 // Field Reduction: r = a mod p
 // Uses the fact that p = 2^256 - K where K = 0x1000003D1
 // So 2^256 ≡ K (mod p), meaning we can reduce by replacing high bits with K*high
@@ -151,32 +451,56 @@ inline void field_reduce(FieldElement* r, const ulong* a8) {
 // =============================================================================
 
 inline void field_add_impl(FieldElement* r, const FieldElement* a, const FieldElement* b) {
+#ifdef __NV_CL_C_VERSION
+    // Level 2: native add.cc/addc carry chains (no comparison-based carry)
+    ulong s0, s1, s2, s3, carry;
+    __asm volatile(
+        "add.cc.u64  %0, %5, %9;\n\t"
+        "addc.cc.u64 %1, %6, %10;\n\t"
+        "addc.cc.u64 %2, %7, %11;\n\t"
+        "addc.cc.u64 %3, %8, %12;\n\t"
+        "addc.u64    %4, 0, 0;\n\t"
+        : "=l"(s0),"=l"(s1),"=l"(s2),"=l"(s3),"=l"(carry)
+        : "l"(a->limbs[0]),"l"(a->limbs[1]),"l"(a->limbs[2]),"l"(a->limbs[3]),
+          "l"(b->limbs[0]),"l"(b->limbs[1]),"l"(b->limbs[2]),"l"(b->limbs[3])
+    );
+    ulong d0, d1, d2, d3, borrow;
+    __asm volatile(
+        "sub.cc.u64  %0, %5, %9;\n\t"
+        "subc.cc.u64 %1, %6, %10;\n\t"
+        "subc.cc.u64 %2, %7, %11;\n\t"
+        "subc.cc.u64 %3, %8, %12;\n\t"
+        "subc.u64    %4, 0, 0;\n\t"
+        : "=l"(d0),"=l"(d1),"=l"(d2),"=l"(d3),"=l"(borrow)
+        : "l"(s0),"l"(s1),"l"(s2),"l"(s3),
+          "l"(SECP256K1_P0),"l"(SECP256K1_P1),"l"(SECP256K1_P2),"l"(SECP256K1_P3)
+    );
+    // use diff if: no borrow (s >= P) OR carry from add (sum overflowed 2^256)
+    ulong mask = ~borrow | (0UL - carry);
+    r->limbs[0] = (d0 & mask) | (s0 & ~mask);
+    r->limbs[1] = (d1 & mask) | (s1 & ~mask);
+    r->limbs[2] = (d2 & mask) | (s2 & ~mask);
+    r->limbs[3] = (d3 & mask) | (s3 & ~mask);
+#else
     ulong carry = 0;
     ulong sum[4];
-
-    // Add with carry chain
     sum[0] = add_with_carry(a->limbs[0], b->limbs[0], 0, &carry);
     sum[1] = add_with_carry(a->limbs[1], b->limbs[1], carry, &carry);
     sum[2] = add_with_carry(a->limbs[2], b->limbs[2], carry, &carry);
     sum[3] = add_with_carry(a->limbs[3], b->limbs[3], carry, &carry);
-
-    // Reduce: if carry or sum >= p, subtract p
     ulong borrow = 0;
     ulong diff[4];
-
     diff[0] = sub_with_borrow(sum[0], SECP256K1_P0, 0, &borrow);
     diff[1] = sub_with_borrow(sum[1], SECP256K1_P1, borrow, &borrow);
     diff[2] = sub_with_borrow(sum[2], SECP256K1_P2, borrow, &borrow);
     diff[3] = sub_with_borrow(sum[3], SECP256K1_P3, borrow, &borrow);
-
-    // If carry from addition or no borrow from subtraction, use diff
     ulong use_diff = (carry != 0) | (borrow == 0);
     ulong mask = use_diff ? ~0UL : 0UL;
-
     r->limbs[0] = (diff[0] & mask) | (sum[0] & ~mask);
     r->limbs[1] = (diff[1] & mask) | (sum[1] & ~mask);
     r->limbs[2] = (diff[2] & mask) | (sum[2] & ~mask);
     r->limbs[3] = (diff[3] & mask) | (sum[3] & ~mask);
+#endif
 }
 
 // =============================================================================
@@ -184,29 +508,51 @@ inline void field_add_impl(FieldElement* r, const FieldElement* a, const FieldEl
 // =============================================================================
 
 inline void field_sub_impl(FieldElement* r, const FieldElement* a, const FieldElement* b) {
+#ifdef __NV_CL_C_VERSION
+    // Level 2: native sub.cc/subc + add.cc/addc carry chains
+    ulong d0, d1, d2, d3, borrow;
+    __asm volatile(
+        "sub.cc.u64  %0, %5, %9;\n\t"
+        "subc.cc.u64 %1, %6, %10;\n\t"
+        "subc.cc.u64 %2, %7, %11;\n\t"
+        "subc.cc.u64 %3, %8, %12;\n\t"
+        "subc.u64    %4, 0, 0;\n\t"
+        : "=l"(d0),"=l"(d1),"=l"(d2),"=l"(d3),"=l"(borrow)
+        : "l"(a->limbs[0]),"l"(a->limbs[1]),"l"(a->limbs[2]),"l"(a->limbs[3]),
+          "l"(b->limbs[0]),"l"(b->limbs[1]),"l"(b->limbs[2]),"l"(b->limbs[3])
+    );
+    // borrow = 0xFFFF...FFFF if a < b (underflow), 0 otherwise
+    ulong p0 = SECP256K1_P0 & borrow;
+    ulong p1 = SECP256K1_P1 & borrow;
+    ulong p2 = SECP256K1_P2 & borrow;
+    ulong p3 = SECP256K1_P3 & borrow;
+    __asm volatile(
+        "add.cc.u64  %0, %4, %8;\n\t"
+        "addc.cc.u64 %1, %5, %9;\n\t"
+        "addc.cc.u64 %2, %6, %10;\n\t"
+        "addc.u64    %3, %7, %11;\n\t"
+        : "=l"(r->limbs[0]),"=l"(r->limbs[1]),"=l"(r->limbs[2]),"=l"(r->limbs[3])
+        : "l"(d0),"l"(d1),"l"(d2),"l"(d3), "l"(p0),"l"(p1),"l"(p2),"l"(p3)
+    );
+#else
     ulong borrow = 0;
     ulong diff[4];
-
-    // Subtract with borrow chain
     diff[0] = sub_with_borrow(a->limbs[0], b->limbs[0], 0, &borrow);
     diff[1] = sub_with_borrow(a->limbs[1], b->limbs[1], borrow, &borrow);
     diff[2] = sub_with_borrow(a->limbs[2], b->limbs[2], borrow, &borrow);
     diff[3] = sub_with_borrow(a->limbs[3], b->limbs[3], borrow, &borrow);
-
-    // If borrow, add p (result was negative)
     ulong mask = borrow ? ~0UL : 0UL;
-
     ulong carry = 0;
     ulong adj[4];
     adj[0] = add_with_carry(diff[0], SECP256K1_P0 & mask, 0, &carry);
     adj[1] = add_with_carry(diff[1], SECP256K1_P1 & mask, carry, &carry);
     adj[2] = add_with_carry(diff[2], SECP256K1_P2 & mask, carry, &carry);
     adj[3] = add_with_carry(diff[3], SECP256K1_P3 & mask, carry, &carry);
-
     r->limbs[0] = adj[0];
     r->limbs[1] = adj[1];
     r->limbs[2] = adj[2];
     r->limbs[3] = adj[3];
+#endif
 }
 
 // =============================================================================
@@ -228,6 +574,12 @@ inline void muladd2(ulong lo, ulong hi, ulong* c0, ulong* c1, ulong* c2) {
 }
 
 inline void field_mul_impl(FieldElement* r, const FieldElement* a, const FieldElement* b) {
+#ifdef __NV_CL_C_VERSION
+    // Level 3: 32-bit hybrid Comba + 32-bit reduction (INT32 throughput 32x > INT64)
+    uint t32[16];
+    mul_256_comba32_ocl(a, b, t32);
+    reduce_512_to_256_32_ocl(t32, r);
+#else
     ulong a0 = a->limbs[0], a1 = a->limbs[1], a2 = a->limbs[2], a3 = a->limbs[3];
     ulong b0 = b->limbs[0], b1 = b->limbs[1], b2 = b->limbs[2], b3 = b->limbs[3];
     ulong product[8];
@@ -274,11 +626,11 @@ inline void field_mul_impl(FieldElement* r, const FieldElement* a, const FieldEl
     product[7] = c1;
 
     field_reduce(r, product);
+#endif // __NV_CL_C_VERSION
 }
 
 // =============================================================================
 // Field Squaring: r = a² mod p
-// Optimized: only need upper triangle of multiplication
 // =============================================================================
 
 // Forward declaration for field_sqr_n_impl
@@ -293,6 +645,12 @@ inline void field_sqr_n_impl(FieldElement* r, int n) {
 }
 
 inline void field_sqr_impl(FieldElement* r, const FieldElement* a) {
+#ifdef __NV_CL_C_VERSION
+    // Level 3: 32-bit hybrid squaring (40% fewer multiplications + INT32 throughput)
+    uint t32[16];
+    sqr_256_comba32_ocl(a, t32);
+    reduce_512_to_256_32_ocl(t32, r);
+#else
     ulong a0 = a->limbs[0], a1 = a->limbs[1], a2 = a->limbs[2], a3 = a->limbs[3];
     ulong product[8];
     ulong c0, c1, c2;
@@ -332,6 +690,7 @@ inline void field_sqr_impl(FieldElement* r, const FieldElement* a) {
     product[7] = c1;
 
     field_reduce(r, product);
+#endif // __NV_CL_C_VERSION
 }
 
 // =============================================================================

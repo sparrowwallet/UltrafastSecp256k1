@@ -37,7 +37,7 @@ struct DeviceConfig {
     int device_id = 0;              // GPU device index
     int platform_id = 0;            // Platform index (e.g., Intel, AMD)
     std::size_t max_batch_size = 65536;  // Max points per batch
-    std::size_t local_work_size = 256;   // Work group size (auto if 0)
+    std::size_t local_work_size = 0;     // Work group size (auto if 0)
     bool prefer_intel = true;       // Prefer Intel GPU if available
     bool verbose = false;           // Print device info on init
 };

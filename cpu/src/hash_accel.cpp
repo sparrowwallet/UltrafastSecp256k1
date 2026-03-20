@@ -26,6 +26,11 @@
 #include <cstring>
 
 // Architecture detection
+#if defined(__aarch64__) || defined(_M_ARM64)
+    #define SECP256K1_ARM64_TARGET 1
+    #include <arm_neon.h>
+#endif
+
 #if defined(__x86_64__) || defined(_M_X64) || defined(__i386__) || defined(_M_IX86)
     #define SECP256K1_X86_TARGET 1
     #ifdef _MSC_VER
@@ -105,10 +110,19 @@ bool avx512_available() noexcept {
 #endif
 }
 
+bool arm_sha2_available() noexcept {
+#if defined(SECP256K1_ARM64_TARGET) && defined(__ARM_FEATURE_SHA2)
+    return true;
+#else
+    return false;
+#endif
+}
+
 HashTier detect_hash_tier() noexcept {
     // SHA-NI usually coexists with AVX2 on modern CPUs (Zen, Ice Lake+)
     // SHA-NI single-message is often faster than multi-buffer AVX2 for
     // sequential work. For batch, AVX2 multi-buffer wins.
+    if (arm_sha2_available()) return HashTier::ARM_SHA2;
     if (sha_ni_available()) return HashTier::SHA_NI;
     if (avx2_available())   return HashTier::AVX2;
     return HashTier::SCALAR;
@@ -116,6 +130,7 @@ HashTier detect_hash_tier() noexcept {
 
 const char* hash_tier_name(HashTier tier) noexcept {
     switch (tier) {
+        case HashTier::ARM_SHA2: return "ARM SHA2";
         case HashTier::SHA_NI:  return "SHA-NI";
         case HashTier::AVX2:    return "AVX2";
         case HashTier::AVX512:  return "AVX-512";
@@ -393,6 +408,91 @@ void hash160_33(const std::uint8_t* pubkey33, std::uint8_t* out20) noexcept {
 } // namespace scalar
 
 // ============================================================================
+// ARMv8 SHA2 -- Hardware-accelerated SHA-256
+// ============================================================================
+
+#if defined(SECP256K1_ARM64_TARGET) && defined(__ARM_FEATURE_SHA2)
+
+namespace armsha {
+
+void sha256_compress(const std::uint8_t block[64], std::uint32_t state[8]) noexcept {
+    std::uint32_t w[64];
+
+    for (int i = 0; i < 16; ++i) {
+        w[i] = load_be32(block + static_cast<std::size_t>(i) * 4);
+    }
+    for (int i = 16; i < 64; ++i) {
+        std::uint32_t const s0 = rotr32(w[i - 15], 7) ^ rotr32(w[i - 15], 18) ^ (w[i - 15] >> 3);
+        std::uint32_t const s1 = rotr32(w[i - 2], 17) ^ rotr32(w[i - 2], 19) ^ (w[i - 2] >> 10);
+        w[i] = w[i - 16] + s0 + w[i - 7] + s1;
+    }
+
+    uint32x4_t abcd = vld1q_u32(state + 0);
+    uint32x4_t efgh = vld1q_u32(state + 4);
+    uint32x4_t const abcd_save = abcd;
+    uint32x4_t const efgh_save = efgh;
+
+    for (int i = 0; i < 64; i += 4) {
+        uint32x4_t const msg = vld1q_u32(w + i);
+        uint32x4_t const k = vld1q_u32(SHA256_K + i);
+        uint32x4_t const wk = vaddq_u32(msg, k);
+        uint32x4_t const abcd_prev = abcd;
+        abcd = vsha256hq_u32(abcd, efgh, wk);
+        efgh = vsha256h2q_u32(efgh, abcd_prev, wk);
+    }
+
+    abcd = vaddq_u32(abcd, abcd_save);
+    efgh = vaddq_u32(efgh, efgh_save);
+
+    vst1q_u32(state + 0, abcd);
+    vst1q_u32(state + 4, efgh);
+}
+
+void sha256_33(const std::uint8_t* pubkey33, std::uint8_t* out32) noexcept {
+    alignas(16) std::uint8_t block[64];
+    std::memcpy(block, pubkey33, 33);
+    block[33] = 0x80;
+    std::memset(block + 34, 0, 22);
+    block[56] = 0; block[57] = 0; block[58] = 0; block[59] = 0;
+    block[60] = 0; block[61] = 0; block[62] = 0x01; block[63] = 0x08;
+
+    std::uint32_t state[8];
+    std::memcpy(state, SHA256_IV, sizeof(state));
+    sha256_compress(block, state);
+
+    for (int i = 0; i < 8; ++i) {
+        store_be32(out32 + static_cast<std::size_t>(i) * 4, state[i]);
+    }
+}
+
+void sha256_32(const std::uint8_t* in32, std::uint8_t* out32) noexcept {
+    alignas(16) std::uint8_t block[64];
+    std::memcpy(block, in32, 32);
+    block[32] = 0x80;
+    std::memset(block + 33, 0, 23);
+    block[56] = 0; block[57] = 0; block[58] = 0; block[59] = 0;
+    block[60] = 0; block[61] = 0; block[62] = 0x01; block[63] = 0x00;
+
+    std::uint32_t state[8];
+    std::memcpy(state, SHA256_IV, sizeof(state));
+    sha256_compress(block, state);
+
+    for (int i = 0; i < 8; ++i) {
+        store_be32(out32 + static_cast<std::size_t>(i) * 4, state[i]);
+    }
+}
+
+void hash160_33(const std::uint8_t* pubkey33, std::uint8_t* out20) noexcept {
+    std::uint8_t sha_out[32];
+    sha256_33(pubkey33, sha_out);
+    scalar::ripemd160_32(sha_out, out20);
+}
+
+} // namespace armsha
+
+#endif // SECP256K1_ARM64_TARGET && __ARM_FEATURE_SHA2
+
+// ============================================================================
 // SHA-NI (Intel SHA Extensions) -- Hardware-accelerated SHA-256
 // ============================================================================
 
@@ -616,6 +716,12 @@ std::array<std::uint8_t, 32> sha256(const void* data, std::size_t len) noexcept 
 }
 
 void sha256_33(const std::uint8_t* pubkey33, std::uint8_t* out32) noexcept {
+#if defined(SECP256K1_ARM64_TARGET) && defined(__ARM_FEATURE_SHA2)
+    if (arm_sha2_available()) {
+        armsha::sha256_33(pubkey33, out32);
+        return;
+    }
+#endif
 #ifdef SECP256K1_X86_TARGET
     if (sha_ni_available()) {
         shani::sha256_33(pubkey33, out32);
@@ -626,6 +732,12 @@ void sha256_33(const std::uint8_t* pubkey33, std::uint8_t* out32) noexcept {
 }
 
 void sha256_32(const std::uint8_t* in32, std::uint8_t* out32) noexcept {
+#if defined(SECP256K1_ARM64_TARGET) && defined(__ARM_FEATURE_SHA2)
+    if (arm_sha2_available()) {
+        armsha::sha256_32(in32, out32);
+        return;
+    }
+#endif
 #ifdef SECP256K1_X86_TARGET
     if (sha_ni_available()) {
         shani::sha256_32(in32, out32);
@@ -714,6 +826,12 @@ std::array<std::uint8_t, 20> hash160(const void* data, std::size_t len) noexcept
 }
 
 void hash160_33(const std::uint8_t* pubkey33, std::uint8_t* out20) noexcept {
+#if defined(SECP256K1_ARM64_TARGET) && defined(__ARM_FEATURE_SHA2)
+    if (arm_sha2_available()) {
+        armsha::hash160_33(pubkey33, out20);
+        return;
+    }
+#endif
 #ifdef SECP256K1_X86_TARGET
     if (sha_ni_available()) {
         shani::hash160_33(pubkey33, out20);
@@ -775,6 +893,12 @@ namespace secp256k1::detail {
 
 void sha256_compress_dispatch(const std::uint8_t block[64],
                               std::uint32_t state[8]) noexcept {
+#if defined(SECP256K1_ARM64_TARGET) && defined(__ARM_FEATURE_SHA2)
+    if (secp256k1::hash::arm_sha2_available()) {
+        secp256k1::hash::armsha::sha256_compress(block, state);
+        return;
+    }
+#endif
 #ifdef SECP256K1_X86_TARGET
     if (secp256k1::hash::sha_ni_available()) {
         secp256k1::hash::shani::sha256_compress(block, state);

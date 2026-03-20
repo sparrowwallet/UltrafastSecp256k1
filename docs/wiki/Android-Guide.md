@@ -58,16 +58,23 @@ cd libs\UltrafastSecp256k1\android\
 ### Build (Manual CMake)
 
 ```bash
-cmake -S android -B android/build-android-arm64 \
+cmake -S android -B build-android-ndk-arm64 \
     -DCMAKE_TOOLCHAIN_FILE=$ANDROID_NDK_HOME/build/cmake/android.toolchain.cmake \
     -DANDROID_ABI=arm64-v8a \
-    -DANDROID_PLATFORM=android-24 \
+    -DANDROID_PLATFORM=android-28 \
     -DANDROID_STL=c++_static \
     -DCMAKE_BUILD_TYPE=Release \
     -G Ninja
 
-cmake --build android/build-android-arm64 -j
+cmake --build build-android-ndk-arm64 --target bench_hornet -j
+
+adb shell 'mkdir -p /data/local/tmp/ufsecp'
+adb push build-android-ndk-arm64/bench_hornet /data/local/tmp/ufsecp/bench_hornet
+adb shell 'chmod 755 /data/local/tmp/ufsecp/bench_hornet && /data/local/tmp/ufsecp/bench_hornet'
 ```
+
+Use a clean Android-only build directory. Reusing a build directory first configured from the
+repository root can trigger a CMake source/cache mismatch when switching to `android/` as the source tree.
 
 ### Output
 
@@ -216,6 +223,21 @@ NDK Clang additionally uses:
 | ECDH (full CT) | 545 us | -- | -- |
 
 \* CT mode uses generic C++ (for constant-time guarantees)
+
+### Android ARM64 rerun retained on-device SHA2 dispatch
+
+Measured on the connected RK3588 Android device with `bench_hornet` after wiring the ARMv8 SHA2
+path into `hash_accel.cpp` hot wrappers:
+
+| Operation | Baseline | Retained result | Delta |
+|-----------|----------|-----------------|-------|
+| ECDSA sign | 25.89 us | 22.22 us | 14.2% faster |
+| Schnorr sign (precomputed) | 17.73 us | 16.67 us | 6.0% faster |
+| Schnorr sign (raw privkey) | 33.01 us | 31.99 us | 3.1% faster |
+| CT ECDSA sign | 70.50 us | 67.11 us | 4.8% faster |
+
+The same rerun rejected forced 4x64 point ops, GLV window retuning, and keeping Android PGO as the
+default path because they did not outperform the retained SHA2 dispatch result on this device.
 
 ### ARMv7 (32-bit) Limitations
 

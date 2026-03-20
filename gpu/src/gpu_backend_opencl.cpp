@@ -197,13 +197,11 @@ public:
         std::vector<secp256k1::opencl::AffinePoint> h_aff(count);
         ctx_->batch_jacobian_to_affine(h_jac.data(), h_aff.data(), count);
 
-        /* CPU: SHA-256(x_bytes) → 32-byte shared secret */
+        /* CPU: SHA-256(compressed shared point) to match ufsecp_ecdh/CUDA. */
         for (size_t i = 0; i < count; ++i) {
-            std::array<uint64_t, 4> xl;
-            std::memcpy(xl.data(), h_aff[i].x.limbs, 32);
-            auto fe = secp256k1::fast::FieldElement::from_limbs(xl);
-            auto xbytes = fe.to_bytes();
-            auto digest = secp256k1::SHA256::hash(xbytes.data(), 32);
+            uint8_t compressed[33];
+            affine_to_compressed(&h_aff[i], compressed);
+            auto digest = secp256k1::SHA256::hash(compressed, sizeof(compressed));
             std::memcpy(out_secrets32 + i * 32, digest.data(), 32);
         }
 

@@ -1,0 +1,51 @@
+[project]
+name = "UltrafastSecp256k1"
+language = "cpp"
+
+[[source_dirs]]
+label = "cpu"
+path = "../cpu"
+
+[[source_dirs]]
+label = "include"
+path = "../include"
+
+[[source_dirs]]
+label = "audit"
+path = "../audit"
+optional = true
+
+[[source_dirs]]
+label = "benchmarks"
+path = "../benchmarks"
+optional = true
+
+[[source_dirs]]
+label = "cuda"
+path = "../cuda"
+optional = true
+
+[[source_dirs]]
+label = "examples"
+path = "../examples"
+optional = true
+
+[[source_dirs]]
+label = "gpu"
+path = "../gpu"
+optional = true
+
+[[source_dirs]]
+label = "metal"
+path = "../metal"
+optional = true
+
+[[source_dirs]]
+label = "opencl"
+path = "../opencl"
+optional = true
+
+[[source_dirs]]
+label = "tests"
+path = "../tests"
+optional = true

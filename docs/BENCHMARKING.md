@@ -82,26 +82,44 @@ build-bench\cpu\bench_unified.exe
 ### 2. ARM64 Android (Cross-compile via NDK)
 
 Requires:
-- Android NDK (tested with r27, Clang 18.0.1)
+- Android NDK (tested with r27.2.12479018, Clang 18.0.3)
 - Android device/emulator (arm64-v8a)
 - ADB
 
 ```bash
-# Configure with NDK toolchain
-cmake -S . -B build-android -G Ninja \
+# Configure with the Android CMake entrypoint.
+# Use a clean Android-only build dir to avoid root/android cache mismatches.
+cmake -S android -B build-android-ndk-arm64 -G Ninja \
   -DCMAKE_BUILD_TYPE=Release \
   -DCMAKE_TOOLCHAIN_FILE=$ANDROID_NDK_HOME/build/cmake/android.toolchain.cmake \
   -DANDROID_ABI=arm64-v8a \
+  -DANDROID_STL=c++_static \
   -DANDROID_PLATFORM=android-28
   
 # Build
-cmake --build build-android --target bench_hornet -j
+cmake --build build-android-ndk-arm64 --target bench_hornet -j
 
 # Deploy and run
-adb push build-android/android/test/bench_hornet /data/local/tmp/
-adb shell chmod +x /data/local/tmp/bench_hornet
-adb shell /data/local/tmp/bench_hornet
+adb shell 'mkdir -p /data/local/tmp/ufsecp'
+adb push build-android-ndk-arm64/bench_hornet /data/local/tmp/ufsecp/bench_hornet
+adb shell 'chmod 755 /data/local/tmp/ufsecp/bench_hornet && /data/local/tmp/ufsecp/bench_hornet'
 ```
+
+Measured Android rerun retained the ARMv8 SHA2 dispatch path in `cpu/src/hash_accel.cpp`.
+On RK3588 big cores this moved the signing-heavy hot path materially while leaving verify
+and point arithmetic essentially flat:
+
+| Operation | Baseline | With ARM SHA2 dispatch | Delta |
+|-----------|----------|------------------------|-------|
+| ECDSA Sign | 25.89 us | 22.22 us | 1.17x faster |
+| Schnorr Sign (precomputed) | 17.73 us | 16.67 us | 1.06x faster |
+| Schnorr Sign (raw privkey) | 33.01 us | 31.99 us | 1.03x faster |
+| CT ECDSA Sign | 70.50 us | 67.11 us | 1.05x faster |
+| CT Schnorr Sign | 59.87 us | 59.10 us | 1.01x faster |
+
+Rejected Android ARM64 experiments from the same campaign: forcing `SECP256K1_USE_4X64_POINT_OPS`,
+changing `SECP256K1_GLV_WINDOW_WIDTH` to 4 or 6, and using default PGO as the shipped path.
+Those variants did not beat the retained source-level SHA2 dispatch win on the connected RK3588 device.
 
 ### 3. RISC-V 64 (Cross-compile for Milk-V Mars / SiFive U74)
 

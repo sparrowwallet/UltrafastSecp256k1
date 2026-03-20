@@ -10,7 +10,7 @@
 |----------|-------------|
 | [API Reference](API_REFERENCE.md) | Complete CPU + CUDA + WASM function reference |
 | [Building](BUILDING.md) | Build instructions for all 10+ platforms |
-| [Benchmarks](BENCHMARKS.md) | Performance data: CPU, GPU, embedded, mobile |
+| [Benchmarks](BENCHMARKS.md) | Performance data: CPU, GPU, embedded, mobile, including the 2026-03 x86, Android, CUDA, and OpenCL refresh |
 | [ESP32 Setup](ESP32_SETUP.md) | ESP32-S3/PICO-D4 flashing & testing guide |
 | [RISC-V Optimizations](../RISCV_OPTIMIZATIONS.md) | RISC-V assembly & RVV details |
 | [Porting Guide](../PORTING.md) | Add new platforms, architectures, GPU backends |

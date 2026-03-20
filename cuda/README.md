@@ -212,17 +212,25 @@ CPU-computed data transfers directly to GPU via `cudaMemcpy` (little-endian, sam
 
 | Operation | Time |
 |-----------|------|
-| field_mul (a*b mod p) | 85 ns |
-| field_sqr (a^2 mod p) | 66 ns |
-| field_add (a+b mod p) | 18 ns |
-| field_sub (a-b mod p) | 16 ns |
-| field_inverse | 2,621 ns |
-| **fast scalar_mul (k*G)** | **7.6 us** |
-| fast scalar_mul (k*P) | 77.6 us |
-| CT scalar_mul (k*G) | 545 us |
-| ECDH (full CT) | 545 us |
+| field_mul (a*b mod p) | 68.3 ns |
+| field_sqr (a^2 mod p) | 50 ns |
+| field_add (a+b mod p) | 8 ns |
+| field_inverse | 2 us |
+| **fast scalar_mul (k*G)** | **15.27 us** |
+| fast scalar_mul (k*P) | 130.33 us |
+| ECDSA sign | 22.22 us |
+| Schnorr sign (precomputed) | 16.67 us |
+| ECDSA verify | 150.13 us |
 
-> Backend: ARM64 inline assembly (MUL/UMULH). ~5x faster than generic C++.
+> Backend: ARM64 inline assembly (MUL/UMULH). Latest rerun kept the ARMv8 SHA2 dispatch win for signing-heavy paths on RK3588.
+
+### Latest RTX 5060 Ti Refresh
+
+- CUDA local rerun via `gpu_bench_unified`: `k*G = 129.5 ns` at TPB 256 on batch 65536.
+- OpenCL retained revalidation: `kG (batch=65536) = 115.1 ns`, `kP (batch=65536) = 263.1 ns`, `kG (kernel) = 98.7 ns`.
+- CUDA TPB 512 was not retained as a default because the same harness produced invalid CT timings while only marginally improving `k*G`.
+
+See `../docs/BENCHMARKS.md` for the current cross-platform benchmark matrix and retained-vs-rejected rerun notes.
 
 ---
 

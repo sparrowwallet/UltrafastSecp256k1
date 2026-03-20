@@ -78,6 +78,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `coin_address()` CASHADDR dispatch now correctly routes to `coin_address_cashaddr()` --
   Bitcoin Cash addresses generate via CashAddr instead of falling through to Base58Check.
 - All 28 coins now generate addresses correctly (was 27; BCH fixed, Tron added).
+- **ARM64 Android hash dispatch** -- `hash_accel` now routes `sha256_33`, `sha256_32`,
+  `hash160_33`, and `sha256_compress_dispatch` through ARMv8 SHA-256 instructions when
+  building for AArch64 targets with SHA2 support. On RK3588 / Android NDK r27.2 this reduced
+  `ecdsa_sign` from 25.89 us to 22.22 us, `schnorr_sign` (precomputed) from 17.73 us to 16.67 us,
+  and `ct::ecdsa_sign` from 70.50 us to 67.11 us, with verify paths remaining effectively flat.
+- **x86 Schnorr batch verify allocation path** -- `batch_verify.cpp` now reserves the
+  full batch size for the uncached x-only pubkey cache instead of capping capacity at 64.
+  Local i5-14400F reruns reduced uncached `schnorr_batch_verify` from 20.27 us/sig to about
+  19.94-20.06 us/sig at N=128 and from 18.56 us/sig to about 18.01-18.45 us/sig at N=192,
+  with `comprehensive` remaining green.
 
 ---
 

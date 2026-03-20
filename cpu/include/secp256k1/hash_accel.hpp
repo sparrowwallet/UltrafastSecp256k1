@@ -9,10 +9,11 @@
 // ## Three tiers of acceleration (runtime-detected):
 //
 //   Tier 0: SCALAR   -- Portable C++ (baseline, always available)
-//   Tier 1: SHA-NI   -- Intel SHA Extensions (single-message HW accel, ~3-5x)
-//   Tier 2: AVX2     -- 4-way multi-buffer SHA-256 (interleaved, ~8-12x)
+//   Tier 1: ARM SHA2 -- ARMv8 SHA-256 instructions (single-message HW accel)
+//   Tier 2: SHA-NI   -- Intel SHA Extensions (single-message HW accel, ~3-5x)
+//   Tier 3: AVX2     -- 4-way multi-buffer SHA-256 (interleaved, ~8-12x)
 //                       + optimized RIPEMD-160 with BMI/BMI2
-//   Tier 3: AVX-512  -- 8-way multi-buffer SHA-256 (if available, ~16x)
+//   Tier 4: AVX-512  -- 8-way multi-buffer SHA-256 (if available, ~16x)
 //
 // ## Hot-path API for search pipeline:
 //
@@ -48,9 +49,10 @@ namespace secp256k1::hash {
 
 enum class HashTier : int {
     SCALAR  = 0,
-    SHA_NI  = 1,  // Intel SHA Extensions
-    AVX2    = 2,  // 4-way multi-buffer
-    AVX512  = 3,  // 8-way multi-buffer
+    ARM_SHA2 = 1, // ARMv8 SHA-256 instructions
+    SHA_NI  = 2,  // Intel SHA Extensions
+    AVX2    = 3,  // 4-way multi-buffer
+    AVX512  = 4,  // 8-way multi-buffer
 };
 
 /// Detect best available hashing tier at runtime.
