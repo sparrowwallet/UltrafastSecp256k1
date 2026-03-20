@@ -8,13 +8,13 @@
 
 **Zero-dependency, multi-backend secp256k1 cryptography engine** -- built independently from scratch for Bitcoin, Ethereum, Silent Payments, threshold signatures, embedded systems, and GPU-scale workloads. UltrafastSecp256k1 delivers GPU-accelerated ECDSA and Schnorr, constant-time CPU signing paths, and 12+ platform targets including CUDA, Metal, OpenCL, ROCm, WebAssembly, RISC-V, ESP32, and STM32.
 
-> **4.88 M ECDSA signs/s** * **2.44 M ECDSA verifies/s** * **3.66 M Schnorr signs/s** * **2.82 M Schnorr verifies/s** -- single GPU (RTX 5060 Ti, hybrid GPU execution model)
+> **10.74 M BIP352 scans/s** * **4.88 M ECDSA signs/s** * **2.44 M ECDSA verifies/s** * **3.66 M Schnorr signs/s** * **2.82 M Schnorr verifies/s** -- single GPU (RTX 5060 Ti, hybrid GPU execution model)
 
 ### Why UltrafastSecp256k1?
 
-- **Fastest open-source GPU signatures** -- no other library provides secp256k1 ECDSA + Schnorr sign/verify on CUDA; OpenCL covers core ECC ops, Metal provides discovery/lifecycle ([reproducible benchmark suite and raw logs](docs/BENCHMARKS.md))
+- **Fastest open-source GPU signatures** -- no other library provides secp256k1 ECDSA + Schnorr sign/verify on CUDA; OpenCL covers full ECC + ECDSA/Schnorr verify, Metal provides discovery/lifecycle ([reproducible benchmark suite and raw logs](docs/BENCHMARKS.md))
 - **High-performance CPU secp256k1 engine** -- optimized generator multiply, scalar multiply, hashing, and serialization pipelines across x86-64, ARM64, RISC-V, and embedded targets ([see bench_unified ratio table](docs/BENCHMARKS.md))
-- **Independent benchmark wins on real workloads** -- BIP-352 Silent Payments scanning and other end-to-end flows show strong results in standalone external and in-repo benchmarks ([standalone benchmark by @craigraw](https://github.com/craigraw/bench_bip352))
+- **BIP-352 Silent Payments at 10.74 M/s** -- the full 7-stage GPU pipeline (k×P → hash → k×G → add → match) runs at 93.3 ns/op on CUDA, **269× faster** than single-threaded CPU ([GPU bench](docs/BENCHMARKS.md), [standalone CPU benchmark by @craigraw](https://github.com/craigraw/bench_bip352))
 - **Built for modern secp256k1 workloads** -- signing, verification, wallet derivation, threshold protocols, adaptor signatures, ZK primitives, address generation, and large-scale public-key pipelines in one engine
 - **Field-tested GPU pipeline** -- the CUDA engine has been stress-tested in live high-throughput workflows over long-running sessions and very large point volumes, not only in short synthetic benchmarks
 - **Zero dependencies** -- pure C++20, no Boost, no OpenSSL, compiles anywhere with a conforming compiler
@@ -115,8 +115,11 @@ The graph also records build metadata for drift control: schema version, extract
 
 ## Highlights
 
-- **GPU-accelerated secp256k1** -- ECDSA + Schnorr sign/verify on CUDA; core ECC on OpenCL; Metal experimental
-- **Zero-Knowledge cryptographic layer** -- Pedersen commitments, DLEQ proofs, Bulletproof range proofs
+- **BIP-352 GPU pipeline at 10.74 M/s** -- full silent payment scanning pipeline on CUDA (93.3 ns/op), 269× faster than CPU
+- **GPU-accelerated secp256k1** -- ECDSA + Schnorr sign/verify on CUDA; ECDSA + Schnorr verify + core ECC on OpenCL; Metal experimental
+- **GPU C ABI (`ufsecp_gpu`)** -- 16-function stable FFI for GPU batch ops across CUDA, OpenCL, and Metal (6/6 ops on CUDA & OpenCL)
+- **Zero-Knowledge cryptographic layer** -- Pedersen commitments, DLEQ proofs, Bulletproof range proofs, Ethereum-compatible Keccak-256
+- **17–67× faster batch operations** -- all-affine Pippenger with touched-bucket optimization
 - **Multi-language bindings** -- Python, Node.js, Rust, Go, C#, Java, Swift, PHP, Ruby, Dart
 - **Embedded device support** -- ESP32-S3, ESP32-P4, ESP32-C6, STM32 Cortex-M
 - **Zero-dependency C++20 core** -- no Boost, no OpenSSL, compiles anywhere
@@ -285,7 +288,10 @@ Features are organized into **maturity tiers** (see [SUPPORTED_GUARANTEES.md](in
 | **2 -- Protocol** | ZK Proofs | Schnorr sigma, DLEQ, Bulletproof range proofs (64-bit) | [OK] |
 | **3 -- Convenience** | Address | P2PKH, P2WPKH, P2TR, Base58, Bech32/m, EIP-55 | [OK] |
 | **3 -- Convenience** | Coins | 27 blockchains, auto-dispatch | [OK] |
+| **2 -- Protocol** | BIP-352 | Silent Payments scanning pipeline (CPU + GPU) | [OK] |
+| **2 -- Protocol** | ECIES | Elliptic curve integrated encryption | [OK] |
 | -- | GPU | CUDA, Metal, OpenCL, ROCm kernels | [OK] |
+| -- | GPU C ABI | `ufsecp_gpu` -- 6 batch ops across 3 backends (16 FFI functions) | [OK] |
 | -- | Platforms | x64, ARM64, RISC-V, ESP32, STM32, WASM, iOS, Android | [OK] |
 
 > **Tier 1** = battle-tested core crypto with stable API. **Tier 2** = protocol-level features, API may evolve. **Tier 3** = convenience utilities.
@@ -303,7 +309,38 @@ The C ABI (`ufsecp_*`) returns distinct error codes: `UFSECP_ERR_BAD_SIG` (non-c
 
 ## BIP-352 Silent Payments Scanning Benchmark
 
-Standalone single-threaded benchmark on the full BIP-352 scanning pipeline (k\*P, serialize, tagged SHA-256, k\*G, point add, serialize, prefix match). Benchmark by [@craigraw](https://github.com/craigraw) ([bench_bip352](https://github.com/craigraw/bench_bip352)). Thank you for the contribution!
+### GPU Pipeline (CUDA, RTX 5060 Ti)
+
+The full 7-stage BIP-352 scanning pipeline runs entirely on-GPU with zero CPU round-trips:
+
+1. **k×P** -- scalar multiply tweak point by scan private key
+2. **Serialize** -- compress shared secret to 33-byte SEC1
+3. **Tagged SHA-256** -- `BIP0352/SharedSecret` tagged hash
+4. **k×G** -- generator multiply by hash scalar
+5. **Point add** -- `spend_pubkey + output_point`
+6. **Serialize + prefix** -- compress candidate, extract upper 64 bits
+7. **Prefix match** -- compare against output prefix list
+
+| Mode | ns/op | Throughput | Notes |
+|------|-------|------------|-------|
+| GPU pipeline (GLV, w=4) | ~260 ns | ~3.84 M/s | Standard windowed GLV |
+| **GPU pipeline (LUT)** | **93.3 ns** | **10.74 M/s** | 64 MB precomputed 16×64K generator table |
+| GPU pipeline (LUT + pretbl) | 102.1 ns | ~9.79 M/s | Precomputed per-tweak tables |
+
+*500K tweak points per batch, 11 passes, median. Near-optimal occupancy for RTX 5060 Ti (SM 12.0, 36 SMs). ~928 billion candidates/day.*
+
+### GPU vs CPU Comparison
+
+| Platform | Full Pipeline | vs GPU (LUT) |
+|----------|--------------|-------|
+| **CUDA GPU (RTX 5060 Ti)** | **93.3 ns/op** | **baseline** |
+| x86-64 CPU (i5-14400F, GCC 14) | 25,079 ns/op | 269× slower |
+| ARM64 CPU (Cortex-A55, Clang 18) | 153,385 ns/op | 1,644× slower |
+| RISC-V 64 (SiFive U74, GCC 13) | 257,996 ns/op | 2,765× slower |
+
+### CPU vs libsecp256k1 (standalone external benchmark)
+
+Standalone single-threaded benchmark by [@craigraw](https://github.com/craigraw) ([bench_bip352](https://github.com/craigraw/bench_bip352)). Thank you for the contribution!
 
 **Full pipeline** (10K points, 11 passes, median, GCC 12.4, `-O3 -march=native`, `USE_ASM_X86_64=1`):
 
@@ -373,7 +410,7 @@ cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release && cmake --build build -
 | **NVIDIA GPU** | CUDA 12+ | Build with `-DSECP256K1_BUILD_CUDA=ON` | [OK] Stable |
 | **AMD GPU** | ROCm/HIP | Build with `-DSECP256K1_BUILD_ROCM=ON` | [!] Beta |
 | **Apple GPU** | Metal | Build with Metal backend | [..] Experimental (discovery only) |
-| **Any GPU** | OpenCL | Build with `-DSECP256K1_BUILD_OPENCL=ON` | [OK] Partial (4/6 ops) |
+| **Any GPU** | OpenCL | Build with `-DSECP256K1_BUILD_OPENCL=ON` | [OK] Full (6/6 ops) |
 | **RISC-V (RV64GC)** | CPU | Cross-compile | [OK] Tested |
 
 ---
@@ -451,11 +488,11 @@ UltrafastSecp256k1 is the **only open-source library** that provides full secp25
 | Backend | Hardware | kG/s | ECDSA Sign | ECDSA Verify | Schnorr Sign | Schnorr Verify |
 |---------|----------|------|------------|--------------|--------------|----------------|
 | **CUDA** | RTX 5060 Ti | 4.59 M/s | 4.88 M/s | 2.44 M/s | 3.66 M/s | 2.82 M/s |
-| **OpenCL** | RTX 5060 Ti | 3.39 M/s | -- | -- | -- | -- |
+| **OpenCL** | RTX 5060 Ti | 3.86 M/s | -- | 2.44 M/s* | -- | 2.82 M/s* |
 | **Metal** | Apple M3 Pro | 0.33 M/s | -- | -- | -- | -- |
 | **ROCm (HIP)** | AMD GPUs | Portable | -- | -- | -- | -- |
 
-*CUDA 12.0, sm_86;sm_89, batch=16K signatures, measured on RTX 5060 Ti. The CUDA path uses our own hybrid GPU execution model, which improved end-to-end throughput by more than 10% during optimization. Metal 2.4, 8x32-bit Comba limbs, 18 GPU cores.*
+*CUDA 12.0, sm_86;sm_89, batch=16K signatures, measured on RTX 5060 Ti. The CUDA path uses our own hybrid GPU execution model, which improved end-to-end throughput by more than 10% during optimization. Metal 2.4, 8x32-bit Comba limbs, 18 GPU cores. (\*) OpenCL ECDSA/Schnorr verify uses extended kernel with lazy-loaded runtime compilation.*
 
 ### CUDA Core ECC Operations (Kernel-Only Throughput)
 
@@ -489,7 +526,8 @@ UltrafastSecp256k1 is the **only open-source library** that provides full secp25
 | Field Inv | 10.2 ns | 14.3 ns | **CUDA 1.40x** |
 | Point Double | 0.8 ns | 0.9 ns | **CUDA 1.13x** |
 | Point Add | 1.6 ns | 1.6 ns | Tie |
-| kG (Generator Mul) | 217.7 ns | 295.1 ns | **CUDA 1.36x** |
+| kG (Generator Mul) | 217.7 ns | 258.9 ns | **CUDA 1.19x** |
+| BIP352 Pipeline | 93.3 ns | 126.0 ns (LUT) | **CUDA 1.35x** |
 
 *Benchmarks: 2026-02-14, Linux x86_64, NVIDIA Driver 580.126.09. Both kernel-only (no buffer allocation/copy overhead).*
 
@@ -777,7 +815,28 @@ ufsecp_ecdsa_verify(ctx, pubkey, 33, msg, sig, &valid);
 ufsecp_ctx_destroy(ctx);
 ```
 
-### API Coverage
+### GPU C ABI (`ufsecp_gpu`)
+
+Starting with **v3.3.0**, the GPU layer is fully accessible from any FFI language via `ufsecp_gpu.h` (16 functions):
+
+| Category | Functions |
+|----------|-----------|
+| **Discovery** | `gpu_backend_count`, `gpu_backend_name`, `gpu_is_available`, `gpu_device_count`, `gpu_device_info` |
+| **Lifecycle** | `gpu_ctx_create`, `gpu_ctx_destroy`, `gpu_last_error`, `gpu_last_error_msg` |
+| **Batch Ops** | `gpu_generator_mul_batch`, `gpu_ecdsa_verify_batch`, `gpu_schnorr_verify_batch`, `gpu_ecdh_batch`, `gpu_hash160_pubkey_batch`, `gpu_msm` |
+
+| Batch Operation | CUDA | OpenCL | Metal |
+|----------------|------|--------|-------|
+| `generator_mul_batch` | [OK] | [OK] | -- |
+| `ecdsa_verify_batch` | [OK] | [OK] | -- |
+| `schnorr_verify_batch` | [OK] | [OK] | -- |
+| `ecdh_batch` | [OK] | [OK] | -- |
+| `hash160_pubkey_batch` | [OK] | [OK] | -- |
+| `msm` | [OK] | [OK] | -- |
+
+See [ufsecp_gpu.h](include/ufsecp/ufsecp_gpu.h) and [GPU Validation Matrix](docs/GPU_VALIDATION_MATRIX.md) for details.
+
+### CPU C ABI Coverage
 
 | Category | Functions |
 |----------|-----------|
@@ -1030,10 +1089,10 @@ All EVM chains (ETH, BNB, MATIC, AVAX, FTM, ARB, OP) share the same address form
 | **Desktop CPU** | RISC-V RV64GC | CPU | [OK] Stable |
 | **Raspberry Pi** | ARM64 (BCM2710, Zero 2 W) | CPU | [..] Testing |
 | **NVIDIA GPU** | RTX / GTX / Tesla (sm_50+) | CUDA 12+ | [OK] Stable (6/6 C ABI ops) |
-| **AMD GPU** | RDNA / CDNA | OpenCL | [OK] Partial (4/6 C ABI ops) |
+| **AMD GPU** | RDNA / CDNA | OpenCL | [OK] Full (6/6 C ABI ops) |
 | **AMD GPU** | RDNA / CDNA | ROCm/HIP | [!] Beta |
 | **Apple GPU** | Apple Silicon (M1/M2/M3/M4) | Metal | [..] Experimental (discovery/lifecycle only) |
-| **Any GPU** | OpenCL 1.2+ compatible | OpenCL | [OK] Partial (4/6 C ABI ops) |
+| **Any GPU** | OpenCL 1.2+ compatible | OpenCL | [OK] Full (6/6 C ABI ops) |
 | **ESP32-S3** | Xtensa LX7 @ 240 MHz | CPU | [OK] Tested |
 | **ESP32-P4** | RISC-V @ 400 MHz | CPU | [OK] Supported |
 | **ESP32-C6** | RISC-V (single-core) | CPU | [OK] Supported |

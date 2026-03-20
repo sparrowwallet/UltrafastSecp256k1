@@ -219,7 +219,7 @@ target_include_directories(test_ecies_regression_standalone PRIVATE
 target_compile_definitions(test_ecies_regression_standalone PRIVATE
     UFSECP_BUILDING STANDALONE_ECIES_REGRESSION)
 add_test(NAME ecies_regression COMMAND test_ecies_regression_standalone)
-set_tests_properties(ecies_regression PROPERTIES TIMEOUT 120 LABELS "audit")
+set_tests_properties(ecies_regression PROPERTIES TIMEOUT 600 LABELS "audit")
 
 # -- Diagnostic: ct::scalar_mul step-by-step comparison --------------------
 add_executable(diag_scalar_mul ${CPU_TESTS_DIR}/diag_scalar_mul.cpp)

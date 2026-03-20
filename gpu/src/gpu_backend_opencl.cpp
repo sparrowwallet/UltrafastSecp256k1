@@ -4,12 +4,13 @@
  * Implements gpu::GpuBackend for OpenCL.
  * Wraps the existing secp256k1::opencl::Context class.
  *
- * Currently supports:
+ * Supports all 6 GPU C ABI operations:
  *   - generator_mul_batch  (via batch_scalar_mul_generator + batch_jacobian_to_affine)
  *   - hash160_pubkey_batch (CPU-side SIMD hash160 -- GPU hash kernel not yet wired)
  *   - ecdh_batch           (GPU batch_scalar_mul + CPU SHA-256 finalization)
  *   - msm                  (GPU batch_scalar_mul + CPU-side affine summation)
- *   - ECDSA / Schnorr verify → UNSUPPORTED (needs extended kernel compilation)
+ *   - ecdsa_verify_batch   (GPU via secp256k1_extended.cl kernel)
+ *   - schnorr_verify_batch (GPU via secp256k1_extended.cl kernel)
  *
  * Compiled ONLY when SECP256K1_HAVE_OPENCL is set (via CMake).
  * ============================================================================ */
@@ -19,9 +20,19 @@
 #include <cstring>
 #include <cstdio>
 #include <vector>
+#include <string>
+#include <fstream>
+#include <filesystem>
 
 /* -- OpenCL Context (Layer 1) ---------------------------------------------- */
 #include "secp256k1_opencl.hpp"
+
+/* -- Raw OpenCL API for extended kernel loading ----------------------------- */
+#ifdef __APPLE__
+    #include <OpenCL/cl.h>
+#else
+    #include <CL/cl.h>
+#endif
 
 /* -- CPU FieldElement for host-side point compression ---------------------- */
 #include "secp256k1/field.hpp"
@@ -31,6 +42,18 @@
 
 /* -- CPU Hash160 for pubkey hashing ---------------------------------------- */
 #include "secp256k1/hash_accel.hpp"
+
+/* -- Helpers --------------------------------------------------------------- */
+namespace {
+
+/** Load a file to string, or empty on failure. */
+std::string load_file_to_string(const std::string& path) {
+    std::ifstream f(path, std::ios::binary);
+    if (!f) return {};
+    return {std::istreambuf_iterator<char>(f), {}};
+}
+
+} // anonymous namespace
 
 namespace secp256k1 {
 namespace gpu {
@@ -108,6 +131,10 @@ public:
     }
 
     void shutdown() override {
+        if (ext_ecdsa_verify_)   { clReleaseKernel(ext_ecdsa_verify_);   ext_ecdsa_verify_   = nullptr; }
+        if (ext_schnorr_verify_) { clReleaseKernel(ext_schnorr_verify_); ext_schnorr_verify_ = nullptr; }
+        if (ext_program_)        { clReleaseProgram(ext_program_);       ext_program_        = nullptr; }
+        ext_init_attempted_ = false;
         ctx_.reset();
     }
 
@@ -151,21 +178,155 @@ public:
     }
 
     GpuError ecdsa_verify_batch(
-        const uint8_t*, const uint8_t*, const uint8_t*,
-        size_t, uint8_t*) override
+        const uint8_t* msg_hashes32, const uint8_t* pubkeys33,
+        const uint8_t* sigs64, size_t count,
+        uint8_t* out_results) override
     {
         if (!is_ready()) return set_error(GpuError::Device, "context not initialised");
-        return set_error(GpuError::Unsupported,
-                         "ECDSA verify batch not yet available on OpenCL");
+        if (count == 0) { clear_error(); return GpuError::Ok; }
+        if (!msg_hashes32 || !pubkeys33 || !sigs64 || !out_results)
+            return set_error(GpuError::NullArg, "NULL buffer");
+
+        auto err = ensure_extended_kernels();
+        if (err != GpuError::Ok) return err;
+
+        auto* cl_ctx = static_cast<cl_context>(ctx_->native_context());
+        auto* queue   = static_cast<cl_command_queue>(ctx_->native_queue());
+        cl_int clerr;
+
+        /* Prepare GPU-side buffers ----------------------------------------- */
+
+        /* msg_hashes: 32 bytes each, passed flat */
+        cl_mem d_msgs = clCreateBuffer(cl_ctx, CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR,
+                                       32 * count, const_cast<uint8_t*>(msg_hashes32), &clerr);
+        if (clerr != CL_SUCCESS) return set_error(GpuError::Memory, "msg buffer alloc");
+
+        /* pubkeys: decompress 33-byte → JacobianPoint (3×FieldElement = 96 bytes) */
+        struct JacPoint { uint64_t x[4]; uint64_t y[4]; uint64_t z[4]; };
+        std::vector<JacPoint> h_pubs(count);
+        for (size_t i = 0; i < count; ++i) {
+            secp256k1::opencl::AffinePoint aff;
+            if (!pubkey33_to_affine(pubkeys33 + i * 33, &aff)) {
+                clReleaseMemObject(d_msgs);
+                return set_error(GpuError::BadKey, "invalid pubkey");
+            }
+            std::memcpy(h_pubs[i].x, aff.x.limbs, 32);
+            std::memcpy(h_pubs[i].y, aff.y.limbs, 32);
+            std::memset(h_pubs[i].z, 0, 32);
+            h_pubs[i].z[0] = 1; /* Z = 1 (affine → Jacobian) */
+        }
+        cl_mem d_pubs = clCreateBuffer(cl_ctx, CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR,
+                                       sizeof(JacPoint) * count, h_pubs.data(), &clerr);
+
+        /* sigs: 64 bytes (r[32] | s[32]) → ECDSASig (r:Scalar, s:Scalar = 64 bytes LE limbs) */
+        struct ECDSASig { uint64_t r[4]; uint64_t s[4]; };
+        std::vector<ECDSASig> h_sigs(count);
+        for (size_t i = 0; i < count; ++i) {
+            be32_to_le_limbs(sigs64 + i * 64,      h_sigs[i].r);
+            be32_to_le_limbs(sigs64 + i * 64 + 32, h_sigs[i].s);
+        }
+        cl_mem d_sigs = clCreateBuffer(cl_ctx, CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR,
+                                       sizeof(ECDSASig) * count, h_sigs.data(), &clerr);
+
+        /* results: int per item */
+        cl_mem d_res = clCreateBuffer(cl_ctx, CL_MEM_WRITE_ONLY,
+                                      sizeof(int) * count, nullptr, &clerr);
+
+        cl_uint cl_count = static_cast<cl_uint>(count);
+        clSetKernelArg(ext_ecdsa_verify_, 0, sizeof(cl_mem), &d_msgs);
+        clSetKernelArg(ext_ecdsa_verify_, 1, sizeof(cl_mem), &d_pubs);
+        clSetKernelArg(ext_ecdsa_verify_, 2, sizeof(cl_mem), &d_sigs);
+        clSetKernelArg(ext_ecdsa_verify_, 3, sizeof(cl_mem), &d_res);
+        clSetKernelArg(ext_ecdsa_verify_, 4, sizeof(cl_uint), &cl_count);
+
+        size_t global = count;
+        clEnqueueNDRangeKernel(queue, ext_ecdsa_verify_, 1, nullptr,
+                               &global, nullptr, 0, nullptr, nullptr);
+        clFinish(queue);
+
+        /* Read results */
+        std::vector<int> h_res(count);
+        clEnqueueReadBuffer(queue, d_res, CL_TRUE, 0,
+                            sizeof(int) * count, h_res.data(), 0, nullptr, nullptr);
+
+        for (size_t i = 0; i < count; ++i)
+            out_results[i] = h_res[i] ? 1 : 0;
+
+        clReleaseMemObject(d_msgs);
+        clReleaseMemObject(d_pubs);
+        clReleaseMemObject(d_sigs);
+        clReleaseMemObject(d_res);
+
+        clear_error();
+        return GpuError::Ok;
     }
 
     GpuError schnorr_verify_batch(
-        const uint8_t*, const uint8_t*, const uint8_t*,
-        size_t, uint8_t*) override
+        const uint8_t* msg_hashes32, const uint8_t* pubkeys_x32,
+        const uint8_t* sigs64, size_t count,
+        uint8_t* out_results) override
     {
         if (!is_ready()) return set_error(GpuError::Device, "context not initialised");
-        return set_error(GpuError::Unsupported,
-                         "Schnorr verify batch not yet available on OpenCL");
+        if (count == 0) { clear_error(); return GpuError::Ok; }
+        if (!msg_hashes32 || !pubkeys_x32 || !sigs64 || !out_results)
+            return set_error(GpuError::NullArg, "NULL buffer");
+
+        auto err = ensure_extended_kernels();
+        if (err != GpuError::Ok) return err;
+
+        auto* cl_ctx = static_cast<cl_context>(ctx_->native_context());
+        auto* queue   = static_cast<cl_command_queue>(ctx_->native_queue());
+        cl_int clerr;
+
+        /* pubkeys_x: 32 bytes each, passed flat */
+        cl_mem d_pks = clCreateBuffer(cl_ctx, CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR,
+                                      32 * count, const_cast<uint8_t*>(pubkeys_x32), &clerr);
+
+        /* messages: 32 bytes each, passed flat */
+        cl_mem d_msgs = clCreateBuffer(cl_ctx, CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR,
+                                       32 * count, const_cast<uint8_t*>(msg_hashes32), &clerr);
+
+        /* sigs: 64 bytes (r[32] | s[32]) → SchnorrSig (r:uint8_t[32], s:Scalar = 64 bytes) */
+        struct SchnorrSig { uint8_t r[32]; uint64_t s[4]; };
+        std::vector<SchnorrSig> h_sigs(count);
+        for (size_t i = 0; i < count; ++i) {
+            std::memcpy(h_sigs[i].r, sigs64 + i * 64, 32);
+            be32_to_le_limbs(sigs64 + i * 64 + 32, h_sigs[i].s);
+        }
+        cl_mem d_sigs = clCreateBuffer(cl_ctx, CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR,
+                                       sizeof(SchnorrSig) * count, h_sigs.data(), &clerr);
+
+        /* results: int per item */
+        cl_mem d_res = clCreateBuffer(cl_ctx, CL_MEM_WRITE_ONLY,
+                                      sizeof(int) * count, nullptr, &clerr);
+
+        cl_uint cl_count = static_cast<cl_uint>(count);
+        clSetKernelArg(ext_schnorr_verify_, 0, sizeof(cl_mem), &d_pks);
+        clSetKernelArg(ext_schnorr_verify_, 1, sizeof(cl_mem), &d_msgs);
+        clSetKernelArg(ext_schnorr_verify_, 2, sizeof(cl_mem), &d_sigs);
+        clSetKernelArg(ext_schnorr_verify_, 3, sizeof(cl_mem), &d_res);
+        clSetKernelArg(ext_schnorr_verify_, 4, sizeof(cl_uint), &cl_count);
+
+        size_t global = count;
+        clEnqueueNDRangeKernel(queue, ext_schnorr_verify_, 1, nullptr,
+                               &global, nullptr, 0, nullptr, nullptr);
+        clFinish(queue);
+
+        /* Read results */
+        std::vector<int> h_res(count);
+        clEnqueueReadBuffer(queue, d_res, CL_TRUE, 0,
+                            sizeof(int) * count, h_res.data(), 0, nullptr, nullptr);
+
+        for (size_t i = 0; i < count; ++i)
+            out_results[i] = h_res[i] ? 1 : 0;
+
+        clReleaseMemObject(d_pks);
+        clReleaseMemObject(d_msgs);
+        clReleaseMemObject(d_sigs);
+        clReleaseMemObject(d_res);
+
+        clear_error();
+        return GpuError::Ok;
     }
 
     GpuError ecdh_batch(
@@ -332,6 +493,12 @@ private:
     GpuError last_err_ = GpuError::Ok;
     char     last_msg_[256] = {};
 
+    /* Extended kernel handles (lazy-loaded for verify ops) */
+    cl_program ext_program_         = nullptr;
+    cl_kernel  ext_ecdsa_verify_    = nullptr;
+    cl_kernel  ext_schnorr_verify_  = nullptr;
+    bool       ext_init_attempted_  = false;
+
     GpuError set_error(GpuError err, const char* msg) {
         last_err_ = err;
         if (msg) {
@@ -348,6 +515,93 @@ private:
     void clear_error() {
         last_err_ = GpuError::Ok;
         last_msg_[0] = '\0';
+    }
+
+    /* -- Big-endian 32 bytes → 4×uint64 LE limbs -------------------------- */
+    static void be32_to_le_limbs(const uint8_t be[32], uint64_t out[4]) {
+        for (int limb = 0; limb < 4; ++limb) {
+            uint64_t v = 0;
+            int base = (3 - limb) * 8;
+            for (int b = 0; b < 8; ++b)
+                v = (v << 8) | be[base + b];
+            out[limb] = v;
+        }
+    }
+
+    /* -- Lazy-load extended OpenCL program for verify kernels -------------- */
+    GpuError ensure_extended_kernels() {
+        if (ext_ecdsa_verify_ && ext_schnorr_verify_) return GpuError::Ok;
+        if (ext_init_attempted_)
+            return set_error(GpuError::Launch, "extended kernel init previously failed");
+        ext_init_attempted_ = true;
+
+        auto* cl_ctx = static_cast<cl_context>(ctx_->native_context());
+
+        /* Get device from context */
+        cl_device_id device = nullptr;
+        clGetContextInfo(cl_ctx, CL_CONTEXT_DEVICES, sizeof(device), &device, nullptr);
+
+        /* Search for secp256k1_extended.cl */
+        const char* search_paths[] = {
+            "kernels/secp256k1_extended.cl",
+            "../kernels/secp256k1_extended.cl",
+            "../../opencl/kernels/secp256k1_extended.cl",
+            "../../../opencl/kernels/secp256k1_extended.cl",
+            "opencl/kernels/secp256k1_extended.cl",
+        };
+
+        std::string src;
+        std::string kernel_dir;
+        for (auto* p : search_paths) {
+            src = load_file_to_string(p);
+            if (!src.empty()) {
+                std::filesystem::path fp(p);
+                kernel_dir = fp.parent_path().string();
+                break;
+            }
+        }
+        if (src.empty())
+            return set_error(GpuError::Launch, "secp256k1_extended.cl not found");
+
+        /* Compile */
+        const char* src_ptr = src.c_str();
+        size_t src_len = src.size();
+        cl_int err;
+        ext_program_ = clCreateProgramWithSource(cl_ctx, 1, &src_ptr, &src_len, &err);
+        if (err != CL_SUCCESS)
+            return set_error(GpuError::Launch, "clCreateProgramWithSource failed");
+
+        std::string opts = "-cl-std=CL1.2 -cl-fast-relaxed-math -cl-mad-enable";
+        if (!kernel_dir.empty())
+            opts += " -I " + kernel_dir;
+
+        err = clBuildProgram(ext_program_, 1, &device, opts.c_str(), nullptr, nullptr);
+        if (err != CL_SUCCESS) {
+            /* Grab build log for diagnostics */
+            size_t log_len = 0;
+            clGetProgramBuildInfo(ext_program_, device, CL_PROGRAM_BUILD_LOG, 0, nullptr, &log_len);
+            std::string log(log_len, '\0');
+            clGetProgramBuildInfo(ext_program_, device, CL_PROGRAM_BUILD_LOG, log_len, log.data(), nullptr);
+            clReleaseProgram(ext_program_);
+            ext_program_ = nullptr;
+            std::string msg = "extended.cl build failed: " + log.substr(0, 200);
+            return set_error(GpuError::Launch, msg.c_str());
+        }
+
+        ext_ecdsa_verify_  = clCreateKernel(ext_program_, "ecdsa_verify", &err);
+        if (err != CL_SUCCESS) {
+            clReleaseProgram(ext_program_); ext_program_ = nullptr;
+            return set_error(GpuError::Launch, "ecdsa_verify kernel not found");
+        }
+
+        ext_schnorr_verify_ = clCreateKernel(ext_program_, "schnorr_verify", &err);
+        if (err != CL_SUCCESS) {
+            clReleaseKernel(ext_ecdsa_verify_); ext_ecdsa_verify_ = nullptr;
+            clReleaseProgram(ext_program_); ext_program_ = nullptr;
+            return set_error(GpuError::Launch, "schnorr_verify kernel not found");
+        }
+
+        return GpuError::Ok;
     }
 
     /* -- Type conversion helpers ------------------------------------------- */

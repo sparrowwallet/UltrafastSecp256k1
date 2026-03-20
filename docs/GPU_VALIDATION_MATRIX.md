@@ -21,16 +21,15 @@ Operations returning `UFSECP_ERR_GPU_UNSUPPORTED` (104) gracefully decline.
 | Operation | CUDA | OpenCL | Metal | Data Class |
 |-----------|------|--------|-------|------------|
 | `generator_mul_batch` | implemented | implemented | unsupported | PUBLIC |
-| `ecdsa_verify_batch` | implemented | unsupported | unsupported | PUBLIC |
-| `schnorr_verify_batch` | implemented | unsupported | unsupported | PUBLIC |
+| `ecdsa_verify_batch` | implemented | implemented | unsupported | PUBLIC |
+| `schnorr_verify_batch` | implemented | implemented | unsupported | PUBLIC |
 | `ecdh_batch` | implemented | implemented | unsupported | SECRET |
 | `hash160_pubkey_batch` | implemented | implemented | unsupported | PUBLIC |
 | `msm` | implemented | implemented | unsupported | PUBLIC |
-| **Total** | **6/6** | **4/6** | **0/6** | |
+| **Total** | **6/6** | **6/6** | **0/6** | |
 
 ### Expansion Roadmap
 
-- **OpenCL next**: ecdsa_verify_batch, schnorr_verify_batch (needs extended kernel compilation in Context)
 - **Metal**: experimental / discovery-only until MSL kernel pipeline is wired from CMake
 
 ### C ABI Test Coverage
