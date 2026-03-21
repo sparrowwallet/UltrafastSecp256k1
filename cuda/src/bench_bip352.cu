@@ -1010,7 +1010,7 @@ int main() {
 // ============================================================================
 // Named kernel for point decompression (nvcc requires file-scope kernels)
 // ============================================================================
-__device__ inline void scalar_mul_fixed_scan(
+__device__ inline void scalar_mul_fixed_scan(const secp256k1::cuda::JacobianPoint* p, secp256k1::cuda::JacobianPoint* r)
 {
     using namespace secp256k1::cuda;
 

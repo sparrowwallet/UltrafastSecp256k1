@@ -130,6 +130,7 @@ inline int zk_knowledge_prove_impl(
     Scalar k;
     zk_derive_nonce_impl(secret, pubkey, msg, aux, &k);
     if (scalar_is_zero(&k)) return 0;
+    if (point_is_infinity(base)) return 0;
 
     // R = k * base  (convert base to affine for scalar_mul_glv_impl)
     JacobianPoint R;
@@ -203,6 +204,9 @@ inline int zk_knowledge_verify_impl(
     const JacobianPoint* base,
     const uchar msg[32])
 {
+    if (point_is_infinity(base))   return 0;
+    if (point_is_infinity(pubkey)) return 0;
+
     // Convert base and pubkey to affine once (used for hash AND Shamir below)
     AffinePoint B_aff, P_aff;
     if (base->z.limbs[0] == 1 && base->z.limbs[1] == 0 &&

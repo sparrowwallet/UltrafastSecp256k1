@@ -686,7 +686,7 @@ int main(int argc, char* argv[]) {
         } else {
             // Compile the extended program
             cl_device_id sig_dev = nullptr;
-            clGetContextInfo(sig_ctx, CL_CONTEXT_DEVICES, sizeof(cl_device_id), &sig_dev, nullptr);
+            sig_err = clGetCommandQueueInfo(sig_q, CL_QUEUE_DEVICE, sizeof(cl_device_id), &sig_dev, nullptr);
 
             const char* src_ptr = ext_src.c_str();
             size_t src_len = ext_src.size();
@@ -703,6 +703,15 @@ int main(int argc, char* argv[]) {
                 cl_kernel k_ecdsa_verify = clCreateKernel(ext_prog, "ecdsa_verify", &sig_err);
                 cl_kernel k_schnorr_sign = clCreateKernel(ext_prog, "schnorr_sign", &sig_err);
                 cl_kernel k_schnorr_verify = clCreateKernel(ext_prog, "schnorr_verify", &sig_err);
+
+                if (!k_ecdsa_sign || !k_ecdsa_verify || !k_schnorr_sign || !k_schnorr_verify) {
+                    std::cout << "\n[SKIP] Signature kernel creation failed\n";
+                    if (k_ecdsa_sign)     clReleaseKernel(k_ecdsa_sign);
+                    if (k_ecdsa_verify)   clReleaseKernel(k_ecdsa_verify);
+                    if (k_schnorr_sign)   clReleaseKernel(k_schnorr_sign);
+                    if (k_schnorr_verify) clReleaseKernel(k_schnorr_verify);
+                    clReleaseProgram(ext_prog);
+                } else {
 
                 std::size_t sig_batch = std::min(point_batch, static_cast<std::size_t>(65536));
                 cl_uint     sig_cnt   = static_cast<cl_uint>(sig_batch);
@@ -880,6 +889,7 @@ int main(int argc, char* argv[]) {
                 clReleaseKernel(k_schnorr_sign);
                 clReleaseKernel(k_schnorr_verify);
                 clReleaseProgram(ext_prog);
+                } // end kernel-check else
             }
         }
     }
@@ -915,7 +925,7 @@ int main(int argc, char* argv[]) {
             std::cout << "\n[SKIP] Cannot find secp256k1_zk.cl — ZK benchmarks skipped\n";
         } else {
             cl_device_id zk_dev = nullptr;
-            clGetContextInfo(zk_ctx, CL_CONTEXT_DEVICES, sizeof(cl_device_id), &zk_dev, nullptr);
+            zk_err = clGetCommandQueueInfo(zk_q, CL_QUEUE_DEVICE, sizeof(cl_device_id), &zk_dev, nullptr);
 
             const char* zk_ptr = zk_src.c_str();
             size_t zk_len = zk_src.size();
@@ -935,6 +945,10 @@ int main(int argc, char* argv[]) {
 
                 if (!k_kp || !k_kv || !k_dp || !k_dv) {
                     std::cout << "\n[SKIP] ZK kernel creation failed\n";
+                    if (k_kp) clReleaseKernel(k_kp);
+                    if (k_kv) clReleaseKernel(k_kv);
+                    if (k_dp) clReleaseKernel(k_dp);
+                    if (k_dv) clReleaseKernel(k_dv);
                 } else {
                     // Proof struct layouts (must match secp256k1_zk.cl)
                     struct ZKKnProofH  { uint8_t  rx[32]; uint64_t s[4]; };  // 64 bytes

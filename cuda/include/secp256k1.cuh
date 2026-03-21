@@ -1501,6 +1501,7 @@ __device__ inline void jacobian_double_unchecked(const JacobianPoint* p, Jacobia
     r->x = X3;
     r->y = Y3;
     r->z = Z3;
+    r->infinity = false;
 }
 
 // Mixed addition: P (Jacobian) + Q (Affine) -> Result (Jacobian)

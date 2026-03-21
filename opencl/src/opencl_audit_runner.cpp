@@ -102,8 +102,8 @@ struct ExtendedCL {
 
         // Get device from context
         cl_int err;
-        err = clGetContextInfo(context, CL_CONTEXT_DEVICES, sizeof(cl_device_id), &device, nullptr);
-        if (err != CL_SUCCESS) { error = "Cannot get device from context"; return false; }
+        err = clGetCommandQueueInfo(queue, CL_QUEUE_DEVICE, sizeof(cl_device_id), &device, nullptr);
+        if (err != CL_SUCCESS) { error = "Cannot get device from queue"; return false; }
 
         // Load extended.cl
         std::string src;
@@ -195,8 +195,8 @@ struct ZkCL {
         context = (cl_context)ctx.native_context();
         queue   = (cl_command_queue)ctx.native_queue();
         cl_int err;
-        err = clGetContextInfo(context, CL_CONTEXT_DEVICES, sizeof(cl_device_id), &device, nullptr);
-        if (err != CL_SUCCESS) { error = "Cannot get device"; return false; }
+        err = clGetCommandQueueInfo(queue, CL_QUEUE_DEVICE, sizeof(cl_device_id), &device, nullptr);
+        if (err != CL_SUCCESS) { error = "Cannot get device from queue"; return false; }
 
         // Load secp256k1_zk.cl
         std::string src;

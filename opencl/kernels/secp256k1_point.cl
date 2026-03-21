@@ -179,6 +179,7 @@ FORCE_INLINE void point_double_unchecked(JacobianPoint* r, const JacobianPoint* 
     r->x = X3;
     r->y = Y3;
     r->z = Z3;
+    r->infinity = 0;
 }
 
 // Unchecked mixed addition: skips p->infinity check.
