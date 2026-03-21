@@ -42,8 +42,9 @@ Scalar derive_nonce(const Scalar& secret, const Point& point,
     // XOR secret with H(aux) for nonce hedging
     auto aux_hash = SHA256::hash(aux32, 32);
     std::uint8_t masked[32];
-    for (int i = 0; i < 32; ++i)
+    for (int i = 0; i < 32; ++i) {
         masked[i] = sec_bytes[i] ^ aux_hash[i];
+    }
 
     std::uint8_t buf[32 + 33 + 32 + 32]; // masked || pt_comp || msg || aux
     std::memcpy(buf, masked, 32);
@@ -65,8 +66,9 @@ Point lift_x_even(const FieldElement& x_in) {
         FieldElement y = rhs.sqrt();
         if (y.square() == rhs) {
             auto y_bytes = y.to_bytes();
-            if (y_bytes[31] & 1)
+            if (y_bytes[31] & 1) {
                 y = FieldElement::zero() - y;
+            }
             return Point::from_affine(x, y);
         }
         x = x + FieldElement::one();
@@ -356,11 +358,11 @@ RangeProof range_prove(std::uint64_t value,
     }
 
     // Random blinding scalars for vector commitments
-    Scalar alpha = derive_nonce(blinding, commitment.point,
+    const Scalar alpha = derive_nonce(blinding, commitment.point,
                                 aux_rand.data(), aux_rand.data());
     // Derive more randomness
     auto alpha_bytes = alpha.to_bytes();
-    Scalar rho = Scalar::from_bytes(SHA256::hash(alpha_bytes.data(), 32));
+    const Scalar rho = Scalar::from_bytes(SHA256::hash(alpha_bytes.data(), 32));
 
     // Random blinding vectors s_L, s_R
     Scalar s_L[RANGE_PROOF_BITS];
@@ -378,8 +380,9 @@ RangeProof range_prove(std::uint64_t value,
     // A = alpha*G + sum(a_L[i]*G_i + a_R[i]*H_i)
     Point A_pt = ct::generator_mul(alpha);
     for (std::size_t i = 0; i < RANGE_PROOF_BITS; ++i) {
-        if (!a_L[i].is_zero())
+        if (!a_L[i].is_zero()) {
             A_pt = A_pt.add(gens.G[i].scalar_mul(a_L[i]));
+        }
         A_pt = A_pt.add(gens.H[i].scalar_mul(a_R[i]));
     }
     proof.A = A_pt;
@@ -412,16 +415,18 @@ RangeProof range_prove(std::uint64_t value,
     // Compute powers of y and z
     Scalar y_powers[RANGE_PROOF_BITS]; // y^0, y^1, ..., y^{n-1}
     y_powers[0] = Scalar::one();
-    for (std::size_t i = 1; i < RANGE_PROOF_BITS; ++i)
+    for (std::size_t i = 1; i < RANGE_PROOF_BITS; ++i) {
         y_powers[i] = y_powers[i - 1] * y;
+    }
 
     Scalar const z2 = z * z;
 
     // 2^i scalars
     Scalar two_powers[RANGE_PROOF_BITS];
     two_powers[0] = Scalar::one();
-    for (std::size_t i = 1; i < RANGE_PROOF_BITS; ++i)
+    for (std::size_t i = 1; i < RANGE_PROOF_BITS; ++i) {
         two_powers[i] = two_powers[i - 1] + two_powers[i - 1];
+    }
 
     // l(x) = (a_L - z*1) + s_L*x
     // r(x) = y^n * (a_R + z*1 + s_R*x) + z^2 * 2^n
@@ -443,9 +448,9 @@ RangeProof range_prove(std::uint64_t value,
     }
 
     // Commit to t_1, t_2
-    Scalar tau1_bytes_raw = Scalar::from_bytes(
+    const Scalar tau1_bytes_raw = Scalar::from_bytes(
         SHA256::hash(rho.to_bytes().data(), 32));
-    Scalar tau2_bytes_raw = Scalar::from_bytes(
+    const Scalar tau2_bytes_raw = Scalar::from_bytes(
         SHA256::hash(tau1_bytes_raw.to_bytes().data(), 32));
     Scalar const tau1 = tau1_bytes_raw;
     Scalar const tau2 = tau2_bytes_raw;
@@ -478,8 +483,9 @@ RangeProof range_prove(std::uint64_t value,
 
     // t_hat = <l(x), r(x)>
     Scalar t_hat = Scalar::zero();
-    for (std::size_t i = 0; i < RANGE_PROOF_BITS; ++i)
+    for (std::size_t i = 0; i < RANGE_PROOF_BITS; ++i) {
         t_hat = t_hat + l_x[i] * r_x[i];
+    }
     proof.t_hat = t_hat;
 
     // tau_x = tau_2 * x^2 + tau_1 * x + z^2 * blinding
@@ -497,11 +503,12 @@ RangeProof range_prove(std::uint64_t value,
     std::memcpy(b_vec, r_x, sizeof(r_x));
 
     // Compute modified generators: H'_i = H_i * y^{-i}
-    Scalar y_inv = y.inverse();
+    const Scalar y_inv = y.inverse();
     Scalar y_inv_powers[RANGE_PROOF_BITS];
     y_inv_powers[0] = Scalar::one();
-    for (std::size_t i = 1; i < RANGE_PROOF_BITS; ++i)
+    for (std::size_t i = 1; i < RANGE_PROOF_BITS; ++i) {
         y_inv_powers[i] = y_inv_powers[i - 1] * y_inv;
+    }
 
     Point G_vec[RANGE_PROOF_BITS];
     Point H_vec[RANGE_PROOF_BITS];
@@ -607,21 +614,25 @@ bool range_verify(const PedersenCommitment& commitment,
     // where delta(y,z) = (z - z^2) * <1, y^n> - z^3 * <1, 2^n>
     Scalar y_powers[RANGE_PROOF_BITS];
     y_powers[0] = Scalar::one();
-    for (std::size_t i = 1; i < RANGE_PROOF_BITS; ++i)
+    for (std::size_t i = 1; i < RANGE_PROOF_BITS; ++i) {
         y_powers[i] = y_powers[i - 1] * y;
+    }
 
     Scalar two_powers[RANGE_PROOF_BITS];
     two_powers[0] = Scalar::one();
-    for (std::size_t i = 1; i < RANGE_PROOF_BITS; ++i)
+    for (std::size_t i = 1; i < RANGE_PROOF_BITS; ++i) {
         two_powers[i] = two_powers[i - 1] + two_powers[i - 1];
+    }
 
     Scalar sum_y = Scalar::zero();
-    for (std::size_t i = 0; i < RANGE_PROOF_BITS; ++i)
+    for (std::size_t i = 0; i < RANGE_PROOF_BITS; ++i) {
         sum_y = sum_y + y_powers[i];
+    }
 
     Scalar sum_2 = Scalar::zero();
-    for (std::size_t i = 0; i < RANGE_PROOF_BITS; ++i)
+    for (std::size_t i = 0; i < RANGE_PROOF_BITS; ++i) {
         sum_2 = sum_2 + two_powers[i];
+    }
 
     Scalar const z3 = z2 * z;
     Scalar const delta = (z - z2) * sum_y - z3 * sum_2;
@@ -639,7 +650,7 @@ bool range_verify(const PedersenCommitment& commitment,
         Point poly_p[5] = {
             H_ped, Point::generator(), commitment.point, proof.T1, proof.T2
         };
-        Point poly_check = msm(poly_s, poly_p, 5);
+        const Point poly_check = msm(poly_s, poly_p, 5);
         if (!poly_check.is_infinity()) return false;
     }
 
@@ -658,22 +669,25 @@ bool range_verify(const PedersenCommitment& commitment,
 
     // Compute scalar coefficients for each generator
     // s_i = product_{j: bit j of i is 0} x_j^{-1} * product_{j: bit j of i is 1} x_j
-    Scalar y_inv = y.inverse();
+    const Scalar y_inv = y.inverse();
     Scalar y_inv_powers[RANGE_PROOF_BITS];
     y_inv_powers[0] = Scalar::one();
-    for (std::size_t i = 1; i < RANGE_PROOF_BITS; ++i)
+    for (std::size_t i = 1; i < RANGE_PROOF_BITS; ++i) {
         y_inv_powers[i] = y_inv_powers[i - 1] * y_inv;
+    }
 
     Scalar x_inv_rounds[RANGE_PROOF_LOG2];
-    for (std::size_t j = 0; j < RANGE_PROOF_LOG2; ++j)
+    for (std::size_t j = 0; j < RANGE_PROOF_LOG2; ++j) {
         x_inv_rounds[j] = x_rounds[j].inverse();
+    }
 
     // Compute s_i via product tree (much faster than per-index loop)
     // s_0 = prod(x_inv_rounds[j]), then propagate: flip x_inv->x for each set bit
     Scalar s_coeff[RANGE_PROOF_BITS];
     s_coeff[0] = Scalar::one();
-    for (std::size_t j = 0; j < RANGE_PROOF_LOG2; ++j)
+    for (std::size_t j = 0; j < RANGE_PROOF_LOG2; ++j) {
         s_coeff[0] = s_coeff[0] * x_inv_rounds[j];
+    }
 
     for (std::size_t i = 1; i < RANGE_PROOF_BITS; ++i) {
         // s[i] = s[i-1] * x_rounds[j] / x_inv_rounds[j] = s[i-1] * x_rounds[j]^2
@@ -683,10 +697,12 @@ bool range_verify(const PedersenCommitment& commitment,
         // Use standard butterfly construction
         s_coeff[i] = Scalar::one();
         for (std::size_t jj = 0; jj < RANGE_PROOF_LOG2; ++jj) {
-            if ((i >> (RANGE_PROOF_LOG2 - 1 - jj)) & 1)
+            if ((i >> (RANGE_PROOF_LOG2 - 1 - jj)) & 1) {
                 s_coeff[i] = s_coeff[i] * x_rounds[jj];
-            else
+            }
+            else {
                 s_coeff[i] = s_coeff[i] * x_inv_rounds[jj];
+            }
         }
     }
 
@@ -717,8 +733,9 @@ bool range_verify(const PedersenCommitment& commitment,
         // Product tree for batch inversion
         Scalar acc[RANGE_PROOF_BITS];
         acc[0] = s_coeff[0];
-        for (std::size_t i = 1; i < RANGE_PROOF_BITS; ++i)
+        for (std::size_t i = 1; i < RANGE_PROOF_BITS; ++i) {
             acc[i] = acc[i - 1] * s_coeff[i];
+        }
 
         Scalar inv_acc = acc[RANGE_PROOF_BITS - 1].inverse();  // single inversion!
         for (std::size_t i = RANGE_PROOF_BITS; i-- > 1; ) {
@@ -782,8 +799,9 @@ bool batch_range_verify(const PedersenCommitment* commitments,
                         const RangeProof* proofs,
                         std::size_t count) {
     for (std::size_t i = 0; i < count; ++i) {
-        if (!range_verify(commitments[i], proofs[i]))
+        if (!range_verify(commitments[i], proofs[i])) {
             return false;
+        }
     }
     return true;
 }

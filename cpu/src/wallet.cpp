@@ -147,7 +147,7 @@ MessageSignature sign_message(const CoinParams& coin, const WalletKey& key,
 #endif
     // Bitcoin-family: Bitcoin signed message format
     auto rsig = bitcoin_sign_message(msg, msg_len, key.priv);
-    return from_recoverable(rsig, static_cast<std::uint64_t>(27 + rsig.recid));
+    return from_recoverable(rsig, static_cast<std::uint64_t>(27) + static_cast<std::uint64_t>(rsig.recid));
 }
 
 MessageSignature sign_hash(const CoinParams& coin, const WalletKey& key,
@@ -168,7 +168,7 @@ MessageSignature sign_hash(const CoinParams& coin, const WalletKey& key,
     }
 #endif
     auto rsig = ecdsa_sign_recoverable(hash, key.priv);
-    return from_recoverable(rsig, static_cast<std::uint64_t>(27 + rsig.recid));
+    return from_recoverable(rsig, static_cast<std::uint64_t>(27) + static_cast<std::uint64_t>(rsig.recid));
 }
 
 // -- Verification -------------------------------------------------------------

@@ -1263,14 +1263,17 @@ ufsecp_error_t ufsecp_pubkey_add(ufsecp_ctx* ctx,
     if (!ctx || !a33 || !b33 || !out33) return UFSECP_ERR_NULL_ARG;
     ctx_clear_err(ctx);
     auto pa = point_from_compressed(a33);
-    if (pa.is_infinity())
+    if (pa.is_infinity()) {
         return ctx_set_err(ctx, UFSECP_ERR_BAD_PUBKEY, "invalid pubkey a");
+    }
     auto pb = point_from_compressed(b33);
-    if (pb.is_infinity())
+    if (pb.is_infinity()) {
         return ctx_set_err(ctx, UFSECP_ERR_BAD_PUBKEY, "invalid pubkey b");
+    }
     auto sum = pa.add(pb);
-    if (sum.is_infinity())
+    if (sum.is_infinity()) {
         return ctx_set_err(ctx, UFSECP_ERR_ARITH, "sum is point at infinity");
+    }
     point_to_compressed(sum, out33);
     return UFSECP_OK;
 }
@@ -1281,8 +1284,9 @@ ufsecp_error_t ufsecp_pubkey_negate(ufsecp_ctx* ctx,
     if (!ctx || !pubkey33 || !out33) return UFSECP_ERR_NULL_ARG;
     ctx_clear_err(ctx);
     auto p = point_from_compressed(pubkey33);
-    if (p.is_infinity())
+    if (p.is_infinity()) {
         return ctx_set_err(ctx, UFSECP_ERR_BAD_PUBKEY, "invalid pubkey");
+    }
     auto neg = p.negate();
     point_to_compressed(neg, out33);
     return UFSECP_OK;
@@ -1295,15 +1299,18 @@ ufsecp_error_t ufsecp_pubkey_tweak_add(ufsecp_ctx* ctx,
     if (!ctx || !pubkey33 || !tweak || !out33) return UFSECP_ERR_NULL_ARG;
     ctx_clear_err(ctx);
     auto p = point_from_compressed(pubkey33);
-    if (p.is_infinity())
+    if (p.is_infinity()) {
         return ctx_set_err(ctx, UFSECP_ERR_BAD_PUBKEY, "invalid pubkey");
+    }
     Scalar tw;
-    if (!scalar_parse_strict(tweak, tw))
+    if (!scalar_parse_strict(tweak, tw)) {
         return ctx_set_err(ctx, UFSECP_ERR_BAD_INPUT, "tweak >= n");
+    }
     auto tG = Point::generator().scalar_mul(tw);
     auto result = p.add(tG);
-    if (result.is_infinity())
+    if (result.is_infinity()) {
         return ctx_set_err(ctx, UFSECP_ERR_ARITH, "tweak_add resulted in infinity");
+    }
     point_to_compressed(result, out33);
     return UFSECP_OK;
 }
@@ -1315,14 +1322,17 @@ ufsecp_error_t ufsecp_pubkey_tweak_mul(ufsecp_ctx* ctx,
     if (!ctx || !pubkey33 || !tweak || !out33) return UFSECP_ERR_NULL_ARG;
     ctx_clear_err(ctx);
     auto p = point_from_compressed(pubkey33);
-    if (p.is_infinity())
+    if (p.is_infinity()) {
         return ctx_set_err(ctx, UFSECP_ERR_BAD_PUBKEY, "invalid pubkey");
+    }
     Scalar tw;
-    if (!scalar_parse_strict_nonzero(tweak, tw))
+    if (!scalar_parse_strict_nonzero(tweak, tw)) {
         return ctx_set_err(ctx, UFSECP_ERR_BAD_INPUT, "tweak is zero or >= n");
+    }
     auto result = p.scalar_mul(tw);
-    if (result.is_infinity())
+    if (result.is_infinity()) {
         return ctx_set_err(ctx, UFSECP_ERR_ARITH, "tweak_mul resulted in infinity");
+    }
     point_to_compressed(result, out33);
     return UFSECP_OK;
 }
@@ -1335,16 +1345,19 @@ ufsecp_error_t ufsecp_pubkey_combine(ufsecp_ctx* ctx,
     if (n == 0) return ctx_set_err(ctx, UFSECP_ERR_BAD_INPUT, "need >= 1 pubkey");
     ctx_clear_err(ctx);
     auto acc = point_from_compressed(pubkeys);
-    if (acc.is_infinity())
+    if (acc.is_infinity()) {
         return ctx_set_err(ctx, UFSECP_ERR_BAD_PUBKEY, "invalid pubkey[0]");
+    }
     for (size_t i = 1; i < n; ++i) {
         auto pi = point_from_compressed(pubkeys + i * 33);
-        if (pi.is_infinity())
+        if (pi.is_infinity()) {
             return ctx_set_err(ctx, UFSECP_ERR_BAD_PUBKEY, "invalid pubkey in array");
+        }
         acc = acc.add(pi);
     }
-    if (acc.is_infinity())
+    if (acc.is_infinity()) {
         return ctx_set_err(ctx, UFSECP_ERR_ARITH, "combined pubkey is infinity");
+    }
     point_to_compressed(acc, out33);
     return UFSECP_OK;
 }
@@ -1361,13 +1374,16 @@ ufsecp_error_t ufsecp_bip39_generate(ufsecp_ctx* ctx,
     if (!ctx || !mnemonic_out || !mnemonic_len) return UFSECP_ERR_NULL_ARG;
     ctx_clear_err(ctx);
     if (entropy_bytes != 16 && entropy_bytes != 20 && entropy_bytes != 24 &&
-        entropy_bytes != 28 && entropy_bytes != 32)
+        entropy_bytes != 28 && entropy_bytes != 32) {
         return ctx_set_err(ctx, UFSECP_ERR_BAD_INPUT, "entropy must be 16/20/24/28/32");
+    }
     auto [mnemonic, ok] = secp256k1::bip39_generate(entropy_bytes, entropy_in);
-    if (!ok)
+    if (!ok) {
         return ctx_set_err(ctx, UFSECP_ERR_INTERNAL, "BIP-39 generation failed");
-    if (*mnemonic_len < mnemonic.size() + 1)
+    }
+    if (*mnemonic_len < mnemonic.size() + 1) {
         return ctx_set_err(ctx, UFSECP_ERR_BUF_TOO_SMALL, "mnemonic buffer too small");
+    }
     std::memcpy(mnemonic_out, mnemonic.c_str(), mnemonic.size() + 1);
     *mnemonic_len = mnemonic.size();
     return UFSECP_OK;
@@ -1376,8 +1392,9 @@ ufsecp_error_t ufsecp_bip39_generate(ufsecp_ctx* ctx,
 ufsecp_error_t ufsecp_bip39_validate(const ufsecp_ctx* ctx,
                                      const char* mnemonic) {
     if (!ctx || !mnemonic) return UFSECP_ERR_NULL_ARG;
-    if (!secp256k1::bip39_validate(std::string(mnemonic)))
+    if (!secp256k1::bip39_validate(std::string(mnemonic))) {
         return UFSECP_ERR_BAD_INPUT;
+    }
     return UFSECP_OK;
 }
 
@@ -1387,10 +1404,11 @@ ufsecp_error_t ufsecp_bip39_to_seed(ufsecp_ctx* ctx,
                                     uint8_t seed64_out[64]) {
     if (!ctx || !mnemonic || !seed64_out) return UFSECP_ERR_NULL_ARG;
     ctx_clear_err(ctx);
-    std::string pass = passphrase ? passphrase : "";
+    const std::string pass = passphrase ? passphrase : "";
     auto [seed, ok] = secp256k1::bip39_mnemonic_to_seed(std::string(mnemonic), pass);
-    if (!ok)
+    if (!ok) {
         return ctx_set_err(ctx, UFSECP_ERR_BAD_INPUT, "invalid mnemonic");
+    }
     std::memcpy(seed64_out, seed.data(), 64);
     return UFSECP_OK;
 }
@@ -1430,11 +1448,13 @@ ufsecp_error_t ufsecp_schnorr_batch_verify(ufsecp_ctx* ctx,
             return ctx_set_err(ctx, UFSECP_ERR_BAD_PUBKEY, "non-canonical pubkey (x>=p) in batch");
         std::memcpy(batch[i].pubkey_x.data(), e, 32);
         std::memcpy(batch[i].message.data(), e + 32, 32);
-        if (!secp256k1::SchnorrSignature::parse_strict(e + 64, batch[i].signature))
+        if (!secp256k1::SchnorrSignature::parse_strict(e + 64, batch[i].signature)) {
             return ctx_set_err(ctx, UFSECP_ERR_BAD_SIG, "invalid Schnorr sig in batch");
+        }
     }
-    if (!secp256k1::schnorr_batch_verify(batch))
+    if (!secp256k1::schnorr_batch_verify(batch)) {
         return ctx_set_err(ctx, UFSECP_ERR_VERIFY_FAIL, "batch verify failed");
+    }
     return UFSECP_OK;
 }
 
@@ -1449,15 +1469,18 @@ ufsecp_error_t ufsecp_ecdsa_batch_verify(ufsecp_ctx* ctx,
         const uint8_t* e = entries + i * 129;
         std::memcpy(batch[i].msg_hash.data(), e, 32);
         batch[i].public_key = point_from_compressed(e + 32);
-        if (batch[i].public_key.is_infinity())
+        if (batch[i].public_key.is_infinity()) {
             return ctx_set_err(ctx, UFSECP_ERR_BAD_PUBKEY, "invalid pubkey in batch");
+        }
         std::array<uint8_t, 64> compact;
         std::memcpy(compact.data(), e + 65, 64);
-        if (!secp256k1::ECDSASignature::parse_compact_strict(compact, batch[i].signature))
+        if (!secp256k1::ECDSASignature::parse_compact_strict(compact, batch[i].signature)) {
             return ctx_set_err(ctx, UFSECP_ERR_BAD_SIG, "invalid ECDSA sig in batch");
+        }
     }
-    if (!secp256k1::ecdsa_batch_verify(batch))
+    if (!secp256k1::ecdsa_batch_verify(batch)) {
         return ctx_set_err(ctx, UFSECP_ERR_VERIFY_FAIL, "batch verify failed");
+    }
     return UFSECP_OK;
 }
 
@@ -1474,13 +1497,15 @@ ufsecp_error_t ufsecp_schnorr_batch_identify_invalid(
             return ctx_set_err(ctx, UFSECP_ERR_BAD_PUBKEY, "non-canonical pubkey (x>=p) in batch");
         std::memcpy(batch[i].pubkey_x.data(), e, 32);
         std::memcpy(batch[i].message.data(), e + 32, 32);
-        if (!secp256k1::SchnorrSignature::parse_strict(e + 64, batch[i].signature))
+        if (!secp256k1::SchnorrSignature::parse_strict(e + 64, batch[i].signature)) {
             return ctx_set_err(ctx, UFSECP_ERR_BAD_SIG, "invalid Schnorr sig in batch");
+        }
     }
     auto invalids = secp256k1::schnorr_batch_identify_invalid(batch.data(), n);
     *invalid_count = invalids.size();
-    for (size_t i = 0; i < invalids.size(); ++i)
+    for (size_t i = 0; i < invalids.size(); ++i) {
         invalid_out[i] = invalids[i];
+    }
     return UFSECP_OK;
 }
 
@@ -1494,17 +1519,20 @@ ufsecp_error_t ufsecp_ecdsa_batch_identify_invalid(
         const uint8_t* e = entries + i * 129;
         std::memcpy(batch[i].msg_hash.data(), e, 32);
         batch[i].public_key = point_from_compressed(e + 32);
-        if (batch[i].public_key.is_infinity())
+        if (batch[i].public_key.is_infinity()) {
             return ctx_set_err(ctx, UFSECP_ERR_BAD_PUBKEY, "invalid pubkey in batch");
+        }
         std::array<uint8_t, 64> compact;
         std::memcpy(compact.data(), e + 65, 64);
-        if (!secp256k1::ECDSASignature::parse_compact_strict(compact, batch[i].signature))
+        if (!secp256k1::ECDSASignature::parse_compact_strict(compact, batch[i].signature)) {
             return ctx_set_err(ctx, UFSECP_ERR_BAD_SIG, "invalid ECDSA sig in batch");
+        }
     }
     auto invalids = secp256k1::ecdsa_batch_identify_invalid(batch.data(), n);
     *invalid_count = invalids.size();
-    for (size_t i = 0; i < invalids.size(); ++i)
+    for (size_t i = 0; i < invalids.size(); ++i) {
         invalid_out[i] = invalids[i];
+    }
     return UFSECP_OK;
 }
 
@@ -1531,19 +1559,24 @@ ufsecp_error_t ufsecp_shamir_trick(ufsecp_ctx* ctx,
     if (!ctx || !a || !P33 || !b || !Q33 || !out33) return UFSECP_ERR_NULL_ARG;
     ctx_clear_err(ctx);
     Scalar sa, sb;
-    if (!scalar_parse_strict(a, sa))
+    if (!scalar_parse_strict(a, sa)) {
         return ctx_set_err(ctx, UFSECP_ERR_BAD_INPUT, "scalar a >= n");
-    if (!scalar_parse_strict(b, sb))
+    }
+    if (!scalar_parse_strict(b, sb)) {
         return ctx_set_err(ctx, UFSECP_ERR_BAD_INPUT, "scalar b >= n");
+    }
     auto P = point_from_compressed(P33);
-    if (P.is_infinity())
+    if (P.is_infinity()) {
         return ctx_set_err(ctx, UFSECP_ERR_BAD_PUBKEY, "invalid point P");
+    }
     auto Q = point_from_compressed(Q33);
-    if (Q.is_infinity())
+    if (Q.is_infinity()) {
         return ctx_set_err(ctx, UFSECP_ERR_BAD_PUBKEY, "invalid point Q");
+    }
     auto result = secp256k1::shamir_trick(sa, P, sb, Q);
-    if (result.is_infinity())
+    if (result.is_infinity()) {
         return ctx_set_err(ctx, UFSECP_ERR_ARITH, "result is infinity");
+    }
     point_to_compressed(result, out33);
     return UFSECP_OK;
 }
@@ -1559,15 +1592,18 @@ ufsecp_error_t ufsecp_multi_scalar_mul(ufsecp_ctx* ctx,
     std::vector<Scalar> svec(n);
     std::vector<Point> pvec(n);
     for (size_t i = 0; i < n; ++i) {
-        if (!scalar_parse_strict(scalars + i * 32, svec[i]))
+        if (!scalar_parse_strict(scalars + i * 32, svec[i])) {
             return ctx_set_err(ctx, UFSECP_ERR_BAD_INPUT, "scalar >= n");
+        }
         pvec[i] = point_from_compressed(points + i * 33);
-        if (pvec[i].is_infinity())
+        if (pvec[i].is_infinity()) {
             return ctx_set_err(ctx, UFSECP_ERR_BAD_PUBKEY, "invalid point in array");
+        }
     }
     auto result = secp256k1::multi_scalar_mul(svec, pvec);
-    if (result.is_infinity())
+    if (result.is_infinity()) {
         return ctx_set_err(ctx, UFSECP_ERR_ARITH, "MSM result is infinity");
+    }
     point_to_compressed(result, out33);
     return UFSECP_OK;
 }
@@ -1584,18 +1620,20 @@ ufsecp_error_t ufsecp_musig2_key_agg(ufsecp_ctx* ctx,
     if (n < 2) return ctx_set_err(ctx, UFSECP_ERR_BAD_INPUT, "need >= 2 pubkeys");
     ctx_clear_err(ctx);
     std::vector<std::array<uint8_t, 32>> pks(n);
-    for (size_t i = 0; i < n; ++i)
+    for (size_t i = 0; i < n; ++i) {
         std::memcpy(pks[i].data(), pubkeys + i * 32, 32);
+    }
     auto kagg = secp256k1::musig2_key_agg(pks);
     std::memcpy(agg_pubkey32_out, kagg.Q_x.data(), 32);
     /* Serialize key agg ctx: n(4) | Q_negated(1) | Q_compressed(33) | coefficients(n*32) */
     std::memset(keyagg_out, 0, UFSECP_MUSIG2_KEYAGG_LEN);
-    uint32_t nk = static_cast<uint32_t>(kagg.key_coefficients.size());
+    const auto nk = static_cast<uint32_t>(kagg.key_coefficients.size());
     std::memcpy(keyagg_out, &nk, 4);
     keyagg_out[4] = kagg.Q_negated ? 1 : 0;
     point_to_compressed(kagg.Q, keyagg_out + 5);
-    for (uint32_t i = 0; i < nk && (38u + (i+1)*32u <= UFSECP_MUSIG2_KEYAGG_LEN); ++i)
-        scalar_to_bytes(kagg.key_coefficients[i], keyagg_out + 38 + i * 32);
+    for (uint32_t i = 0; i < nk && (38u + (i+1)*32u <= UFSECP_MUSIG2_KEYAGG_LEN); ++i) {
+        scalar_to_bytes(kagg.key_coefficients[i], keyagg_out + 38 + static_cast<size_t>(i) * 32);
+    }
     return UFSECP_OK;
 }
 
@@ -1611,8 +1649,9 @@ ufsecp_error_t ufsecp_musig2_nonce_gen(ufsecp_ctx* ctx,
         !secnonce_out || !pubnonce_out) return UFSECP_ERR_NULL_ARG;
     ctx_clear_err(ctx);
     Scalar sk;
-    if (!scalar_parse_strict_nonzero(privkey, sk))
+    if (!scalar_parse_strict_nonzero(privkey, sk)) {
         return ctx_set_err(ctx, UFSECP_ERR_BAD_KEY, "privkey is zero or >= n");
+    }
     std::array<uint8_t, 32> pk_arr, agg_arr, msg_arr;
     std::memcpy(pk_arr.data(), pubkey32, 32);
     std::memcpy(agg_arr.data(), agg_pubkey32, 32);
@@ -1670,7 +1709,7 @@ ufsecp_error_t ufsecp_musig2_start_sign_session(
         return ctx_set_err(ctx, UFSECP_ERR_BAD_INPUT, "invalid agg nonce R2");
     /* Deserialize key agg context */
     secp256k1::MuSig2KeyAggCtx kagg;
-    uint32_t nk;
+    uint32_t nk = 0;
     std::memcpy(&nk, keyagg, 4);
     kagg.Q_negated = (keyagg[4] != 0);
     kagg.Q = point_from_compressed(keyagg + 5);
@@ -1704,22 +1743,26 @@ ufsecp_error_t ufsecp_musig2_partial_sign(
     const uint8_t session[UFSECP_MUSIG2_SESSION_LEN],
     size_t signer_index,
     uint8_t partial_sig32_out[32]) {
-    if (!ctx || !secnonce || !privkey || !keyagg || !session || !partial_sig32_out)
+    if (!ctx || !secnonce || !privkey || !keyagg || !session || !partial_sig32_out) {
         return UFSECP_ERR_NULL_ARG;
+    }
     ctx_clear_err(ctx);
     Scalar sk;
-    if (!scalar_parse_strict_nonzero(privkey, sk))
+    if (!scalar_parse_strict_nonzero(privkey, sk)) {
         return ctx_set_err(ctx, UFSECP_ERR_BAD_KEY, "privkey is zero or >= n");
+    }
     secp256k1::MuSig2SecNonce sn;
     Scalar k1, k2;
-    if (!scalar_parse_strict_nonzero(secnonce, k1))
+    if (!scalar_parse_strict_nonzero(secnonce, k1)) {
         return ctx_set_err(ctx, UFSECP_ERR_BAD_INPUT, "invalid secnonce k1");
-    if (!scalar_parse_strict_nonzero(secnonce + 32, k2))
+    }
+    if (!scalar_parse_strict_nonzero(secnonce + 32, k2)) {
         return ctx_set_err(ctx, UFSECP_ERR_BAD_INPUT, "invalid secnonce k2");
+    }
     sn.k1 = k1;
     sn.k2 = k2;
     secp256k1::MuSig2KeyAggCtx kagg;
-    { uint32_t nk; std::memcpy(&nk, keyagg, 4); kagg.Q_negated = (keyagg[4] != 0);
+    { uint32_t nk = 0; std::memcpy(&nk, keyagg, 4); kagg.Q_negated = (keyagg[4] != 0);
       kagg.Q = point_from_compressed(keyagg + 5);
       if (kagg.Q.is_infinity())
           return ctx_set_err(ctx, UFSECP_ERR_BAD_KEY, "invalid aggregated key");
@@ -1754,19 +1797,21 @@ ufsecp_error_t ufsecp_musig2_partial_verify(
     const uint8_t keyagg[UFSECP_MUSIG2_KEYAGG_LEN],
     const uint8_t session[UFSECP_MUSIG2_SESSION_LEN],
     size_t signer_index) {
-    if (!ctx || !partial_sig32 || !pubnonce || !pubkey32 || !keyagg || !session)
+    if (!ctx || !partial_sig32 || !pubnonce || !pubkey32 || !keyagg || !session) {
         return UFSECP_ERR_NULL_ARG;
+    }
     ctx_clear_err(ctx);
     Scalar psig;
-    if (!scalar_parse_strict(partial_sig32, psig))
+    if (!scalar_parse_strict(partial_sig32, psig)) {
         return ctx_set_err(ctx, UFSECP_ERR_BAD_SIG, "partial sig >= n");
+    }
     std::array<uint8_t, 66> pn_buf;
     std::memcpy(pn_buf.data(), pubnonce, 66);
     auto pn = secp256k1::MuSig2PubNonce::deserialize(pn_buf);
     std::array<uint8_t, 32> pk_arr;
     std::memcpy(pk_arr.data(), pubkey32, 32);
     secp256k1::MuSig2KeyAggCtx kagg;
-    { uint32_t nk; std::memcpy(&nk, keyagg, 4); kagg.Q_negated = (keyagg[4] != 0);
+    { uint32_t nk = 0; std::memcpy(&nk, keyagg, 4); kagg.Q_negated = (keyagg[4] != 0);
       kagg.Q = point_from_compressed(keyagg + 5);
       if (kagg.Q.is_infinity())
           return ctx_set_err(ctx, UFSECP_ERR_BAD_KEY, "invalid aggregated key");
@@ -1784,8 +1829,9 @@ ufsecp_error_t ufsecp_musig2_partial_verify(
     if (!scalar_parse_strict(session + 65, sess.e))
         return ctx_set_err(ctx, UFSECP_ERR_BAD_INPUT, "invalid session scalar e");
     sess.R_negated = (session[97] != 0);
-    if (!secp256k1::musig2_partial_verify(psig, pn, pk_arr, kagg, sess, signer_index))
+    if (!secp256k1::musig2_partial_verify(psig, pn, pk_arr, kagg, sess, signer_index)) {
         return ctx_set_err(ctx, UFSECP_ERR_VERIFY_FAIL, "partial sig verify failed");
+    }
     return UFSECP_OK;
 }
 
@@ -1798,8 +1844,9 @@ ufsecp_error_t ufsecp_musig2_partial_sig_agg(
     ctx_clear_err(ctx);
     std::vector<Scalar> psigs(n);
     for (size_t i = 0; i < n; ++i) {
-        if (!scalar_parse_strict(partial_sigs + i * 32, psigs[i]))
+        if (!scalar_parse_strict(partial_sigs + i * 32, psigs[i])) {
             return ctx_set_err(ctx, UFSECP_ERR_BAD_SIG, "partial sig >= n");
+        }
     }
     secp256k1::MuSig2Session sess;
     sess.R = point_from_compressed(session);
@@ -1825,11 +1872,13 @@ ufsecp_error_t ufsecp_frost_keygen_begin(
     const uint8_t seed[32],
     uint8_t* commits_out, size_t* commits_len,
     uint8_t* shares_out, size_t* shares_len) {
-    if (!ctx || !seed || !commits_out || !commits_len || !shares_out || !shares_len)
+    if (!ctx || !seed || !commits_out || !commits_len || !shares_out || !shares_len) {
         return UFSECP_ERR_NULL_ARG;
+    }
     ctx_clear_err(ctx);
-    if (threshold < 2 || threshold > num_participants)
+    if (threshold < 2 || threshold > num_participants) {
         return ctx_set_err(ctx, UFSECP_ERR_BAD_INPUT, "invalid threshold");
+    }
     std::array<uint8_t, 32> seed_arr;
     std::memcpy(seed_arr.data(), seed, 32);
     auto [commit, shares] = secp256k1::frost_keygen_begin(
@@ -1840,7 +1889,8 @@ ufsecp_error_t ufsecp_frost_keygen_begin(
     size_t needed_commits = 8 + coeff_count * 33;
     if (*commits_len < needed_commits)
         return ctx_set_err(ctx, UFSECP_ERR_BUF_TOO_SMALL, "commits buffer too small");
-    uint32_t cc32 = static_cast<uint32_t>(coeff_count);
+    }
+    const auto cc32 = static_cast<uint32_t>(coeff_count);
     std::memcpy(commits_out, &cc32, 4);
     std::memcpy(commits_out + 4, &commit.from, 4);
     for (size_t i = 0; i < coeff_count; ++i) {
@@ -1849,9 +1899,10 @@ ufsecp_error_t ufsecp_frost_keygen_begin(
     }
     *commits_len = 8 + coeff_count * 33;
     /* Serialize shares */
-    size_t needed_shares = shares.size() * UFSECP_FROST_SHARE_LEN;
-    if (*shares_len < needed_shares)
+    const size_t needed_shares = shares.size() * UFSECP_FROST_SHARE_LEN;
+    if (*shares_len < needed_shares) {
         return ctx_set_err(ctx, UFSECP_ERR_BUF_TOO_SMALL, "shares buffer too small");
+    }
     for (size_t i = 0; i < shares.size(); ++i) {
         uint8_t* s = shares_out + i * UFSECP_FROST_SHARE_LEN;
         std::memcpy(s, &shares[i].from, 4);
@@ -1895,7 +1946,7 @@ ufsecp_error_t ufsecp_frost_keygen_finalize(
         commits.push_back(std::move(fc));
     }
     /* Deserialize shares */
-    size_t n_shares = shares_len / UFSECP_FROST_SHARE_LEN;
+    const size_t n_shares = shares_len / UFSECP_FROST_SHARE_LEN;
     std::vector<secp256k1::FrostShare> shares(n_shares);
     for (size_t i = 0; i < n_shares; ++i) {
         const uint8_t* s = received_shares + i * UFSECP_FROST_SHARE_LEN;
@@ -1961,8 +2012,9 @@ ufsecp_error_t ufsecp_frost_sign(
     const uint8_t msg32[32],
     const uint8_t* nonce_commits, size_t n_signers,
     uint8_t partial_sig_out[36]) {
-    if (!ctx || !keypkg || !nonce || !msg32 || !nonce_commits || !partial_sig_out)
+    if (!ctx || !keypkg || !nonce || !msg32 || !nonce_commits || !partial_sig_out) {
         return UFSECP_ERR_NULL_ARG;
+    }
     ctx_clear_err(ctx);
     secp256k1::FrostKeyPackage kp;
     std::memcpy(&kp.id, keypkg, 4);
@@ -2025,8 +2077,9 @@ ufsecp_error_t ufsecp_frost_verify_partial(
         return ctx_set_err(ctx, UFSECP_ERR_BAD_SIG, "invalid partial sig scalar");
     psig.z_i = z;
     auto vs = point_from_compressed(verification_share33);
-    if (vs.is_infinity())
+    if (vs.is_infinity()) {
         return ctx_set_err(ctx, UFSECP_ERR_BAD_PUBKEY, "invalid verification share");
+    }
     std::vector<secp256k1::FrostNonceCommitment> ncs(n_signers);
     secp256k1::FrostNonceCommitment signer_commit{};
     bool found_signer = false;
@@ -2044,16 +2097,19 @@ ufsecp_error_t ufsecp_frost_verify_partial(
             found_signer = true;
         }
     }
-    if (!found_signer)
+    if (!found_signer) {
         return ctx_set_err(ctx, UFSECP_ERR_BAD_INPUT, "partial_sig.id not found in nonce_commits");
+    }
     auto gp = point_from_compressed(group_pubkey33);
-    if (gp.is_infinity())
+    if (gp.is_infinity()) {
         return ctx_set_err(ctx, UFSECP_ERR_BAD_PUBKEY, "invalid group public key");
+    }
     std::array<uint8_t, 32> msg_arr;
     std::memcpy(msg_arr.data(), msg32, 32);
-    bool ok = secp256k1::frost_verify_partial(psig, signer_commit, vs, msg_arr, ncs, gp);
-    if (!ok)
+    const bool ok = secp256k1::frost_verify_partial(psig, signer_commit, vs, msg_arr, ncs, gp);
+    if (!ok) {
         return ctx_set_err(ctx, UFSECP_ERR_VERIFY_FAIL, "FROST partial signature verification failed");
+    }
     return UFSECP_OK;
 }
 
@@ -2109,8 +2165,9 @@ ufsecp_error_t ufsecp_schnorr_adaptor_sign(
     const uint8_t adaptor_point33[33],
     const uint8_t aux_rand[32],
     uint8_t pre_sig_out[UFSECP_SCHNORR_ADAPTOR_SIG_LEN]) {
-    if (!ctx || !privkey || !msg32 || !adaptor_point33 || !aux_rand || !pre_sig_out)
+    if (!ctx || !privkey || !msg32 || !adaptor_point33 || !aux_rand || !pre_sig_out) {
         return UFSECP_ERR_NULL_ARG;
+    }
     ctx_clear_err(ctx);
     Scalar sk;
     if (!scalar_parse_strict_nonzero(privkey, sk))
@@ -2719,10 +2776,12 @@ ufsecp_error_t ufsecp_coin_wif_encode(ufsecp_ctx* ctx,
         return ctx_set_err(ctx, UFSECP_ERR_BAD_KEY, "privkey is zero or >= n");
     auto wif = secp256k1::coins::coin_wif_encode(sk, *coin, true, testnet != 0);
     secp256k1::detail::secure_erase(&sk, sizeof(sk));
-    if (wif.empty())
+    if (wif.empty()) {
         return ctx_set_err(ctx, UFSECP_ERR_INTERNAL, "WIF encode failed");
-    if (*wif_len < wif.size() + 1)
+    }
+    if (*wif_len < wif.size() + 1) {
         return ctx_set_err(ctx, UFSECP_ERR_BUF_TOO_SMALL, "WIF buffer too small");
+    }
     std::memcpy(wif_out, wif.c_str(), wif.size() + 1);
     *wif_len = wif.size();
     return UFSECP_OK;
@@ -3004,7 +3063,7 @@ ufsecp_error_t ufsecp_eth_address(ufsecp_ctx* ctx,
     if (!ctx || !pubkey33 || !addr20_out) return UFSECP_ERR_NULL_ARG;
     ctx_clear_err(ctx);
 
-    Point pk = point_from_compressed(pubkey33);
+    const Point pk = point_from_compressed(pubkey33);
     if (pk.is_infinity()) {
         return ctx_set_err(ctx, UFSECP_ERR_BAD_PUBKEY, "invalid compressed pubkey");
     }
@@ -3024,12 +3083,12 @@ ufsecp_error_t ufsecp_eth_address_checksummed(ufsecp_ctx* ctx,
         return ctx_set_err(ctx, UFSECP_ERR_BUF_TOO_SMALL, "need >= 43 bytes for ETH address");
     }
 
-    Point pk = point_from_compressed(pubkey33);
+    const Point pk = point_from_compressed(pubkey33);
     if (pk.is_infinity()) {
         return ctx_set_err(ctx, UFSECP_ERR_BAD_PUBKEY, "invalid compressed pubkey");
     }
 
-    std::string addr_str = secp256k1::coins::ethereum_address(pk);
+    const std::string addr_str = secp256k1::coins::ethereum_address(pk);
     std::memcpy(addr_out, addr_str.c_str(), addr_str.size());
     addr_out[addr_str.size()] = '\0';
     *addr_len = addr_str.size();

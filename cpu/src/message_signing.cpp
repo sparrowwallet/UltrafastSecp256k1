@@ -5,6 +5,7 @@
 #include "secp256k1/coins/message_signing.hpp"
 #include "secp256k1/ecdsa.hpp"
 #include "secp256k1/recovery.hpp"
+#include "secp256k1/ct/sign.hpp"
 #include "secp256k1/hash_accel.hpp"
 #include <cstring>
 
@@ -27,13 +28,15 @@ static std::size_t write_varint(std::uint8_t* out, std::uint64_t val) {
         return 3;
     } else if (val <= 0xFFFFFFFF) {
         out[0] = 0xFE;
-        for (int i = 0; i < 4; ++i)
+        for (int i = 0; i < 4; ++i) {
             out[1 + i] = static_cast<std::uint8_t>((val >> (8 * i)) & 0xFF);
+        }
         return 5;
     } else {
         out[0] = 0xFF;
-        for (int i = 0; i < 8; ++i)
+        for (int i = 0; i < 8; ++i) {
             out[1 + i] = static_cast<std::uint8_t>((val >> (8 * i)) & 0xFF);
+        }
         return 9;
     }
 }
@@ -61,7 +64,7 @@ std::array<std::uint8_t, 32> bitcoin_message_hash(const std::uint8_t* msg,
         return {};
 
     // Total payload size
-    std::size_t total = BITCOIN_MSG_PREFIX_LEN + varint_len + msg_len;
+    const std::size_t total = BITCOIN_MSG_PREFIX_LEN + varint_len + msg_len;
 
     // Stack buffer for small messages, heap for large
     constexpr std::size_t STACK_MAX = 512;
@@ -89,7 +92,9 @@ RecoverableSignature bitcoin_sign_message(const std::uint8_t* msg,
                                           std::size_t msg_len,
                                           const fast::Scalar& private_key) {
     auto hash = bitcoin_message_hash(msg, msg_len);
-    return ecdsa_sign_recoverable(hash, private_key);
+    // Use CT path: private key and RFC-6979 nonce must not leak via timing.
+    // (Q-07: fast::ecdsa_sign_recoverable is variable-time on the nonce.)
+    return ct::ecdsa_sign_recoverable(hash, private_key);
 }
 
 // -- Bitcoin Verify Message ---------------------------------------------------
@@ -148,8 +153,8 @@ static bool base64_decode(const std::string& b64, std::uint8_t* out, std::size_t
 
     std::size_t out_idx = 0;
     for (std::size_t i = 0; i < b64.size(); i += 4) {
-        int a = base64_char_value(b64[i]);
-        int b = base64_char_value(b64[i + 1]);
+        const int a = base64_char_value(b64[i]);
+        const int b = base64_char_value(b64[i + 1]);
         int c = (b64[i + 2] == '=') ? 0 : base64_char_value(b64[i + 2]);
         int d = (b64[i + 3] == '=') ? 0 : base64_char_value(b64[i + 3]);
 

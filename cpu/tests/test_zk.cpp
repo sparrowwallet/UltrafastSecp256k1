@@ -57,7 +57,7 @@ static void test_knowledge_proof_wrong_key() {
     auto pubkey = Point::generator().scalar_mul(secret);
     auto wrong_pubkey = Point::generator().scalar_mul(Scalar::from_uint64(43));
 
-    std::array<std::uint8_t, 32> msg{};
+    const std::array<std::uint8_t, 32> msg{};
     std::array<std::uint8_t, 32> aux{};
     aux[0] = 0x02;
 
@@ -92,7 +92,7 @@ static void test_knowledge_proof_serialization() {
     auto secret = Scalar::from_uint64(999);
     auto pubkey = Point::generator().scalar_mul(secret);
 
-    std::array<std::uint8_t, 32> msg{};
+    const std::array<std::uint8_t, 32> msg{};
     std::array<std::uint8_t, 32> aux{};
     aux[0] = 0x04;
 
@@ -100,7 +100,7 @@ static void test_knowledge_proof_serialization() {
     auto serialized = proof.serialize();
 
     zk::KnowledgeProof deserialized{};
-    bool ok = zk::KnowledgeProof::deserialize(serialized.data(), deserialized);
+    const bool ok = zk::KnowledgeProof::deserialize(serialized.data(), deserialized);
     CHECK(ok, "deserialization_succeeds");
 
     CHECK(zk::knowledge_verify(deserialized, pubkey, msg), "deserialized_proof_verifies");
@@ -114,7 +114,7 @@ static void test_knowledge_proof_custom_base() {
     const auto& H = pedersen_generator_H();
     auto point = H.scalar_mul(secret);
 
-    std::array<std::uint8_t, 32> msg{};
+    const std::array<std::uint8_t, 32> msg{};
     std::array<std::uint8_t, 32> aux{};
     aux[0] = 0x05;
 
@@ -131,7 +131,7 @@ static void test_knowledge_proof_deterministic() {
     auto secret = Scalar::from_uint64(42);
     auto pubkey = Point::generator().scalar_mul(secret);
 
-    std::array<std::uint8_t, 32> msg{};
+    const std::array<std::uint8_t, 32> msg{};
     std::array<std::uint8_t, 32> aux{};
     aux[0] = 0x06;
 
@@ -264,7 +264,7 @@ static void test_range_proof_generators() {
 static void test_range_proof_basic() {
     std::printf("\n=== Range Proof: Basic (value=42) ===\n");
 
-    std::uint64_t value = 42;
+    const std::uint64_t value = 42;
     auto blinding = Scalar::from_uint64(12345);
     auto commitment = pedersen_commit(Scalar::from_uint64(value), blinding);
 
@@ -278,7 +278,7 @@ static void test_range_proof_basic() {
 static void test_range_proof_zero() {
     std::printf("\n=== Range Proof: Edge Case (value=0) ===\n");
 
-    std::uint64_t value = 0;
+    const std::uint64_t value = 0;
     auto blinding = Scalar::from_uint64(99999);
     auto commitment = pedersen_commit(Scalar::from_uint64(value), blinding);
 
@@ -292,7 +292,7 @@ static void test_range_proof_zero() {
 static void test_range_proof_max() {
     std::printf("\n=== Range Proof: Edge Case (value=2^64-1) ===\n");
 
-    std::uint64_t value = UINT64_MAX;
+    const std::uint64_t value = UINT64_MAX;
     auto blinding = Scalar::from_uint64(77777);
     auto commitment = pedersen_commit(Scalar::from_uint64(value), blinding);
 
@@ -306,7 +306,7 @@ static void test_range_proof_max() {
 static void test_range_proof_wrong_commitment() {
     std::printf("\n=== Range Proof: Wrong Commitment ===\n");
 
-    std::uint64_t value = 100;
+    const std::uint64_t value = 100;
     auto blinding = Scalar::from_uint64(11111);
     auto commitment = pedersen_commit(Scalar::from_uint64(value), blinding);
     auto wrong_commitment = pedersen_commit(Scalar::from_uint64(200), blinding);
@@ -322,7 +322,7 @@ static void test_range_proof_wrong_commitment() {
 static void test_range_proof_deterministic() {
     std::printf("\n=== Range Proof: Deterministic ===\n");
 
-    std::uint64_t value = 42;
+    const std::uint64_t value = 42;
     auto blinding = Scalar::from_uint64(12345);
     auto commitment = pedersen_commit(Scalar::from_uint64(value), blinding);
 

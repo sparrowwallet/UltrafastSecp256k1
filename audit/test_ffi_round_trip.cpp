@@ -1051,9 +1051,8 @@ static void test_bip39_round_trip() {
     CHECK_OK(ufsecp_bip39_validate(ctx, mnemonic), "bip39_validate");
 
     // Invalid mnemonic
-    CHECK(ufsecp_bip39_validate(ctx, "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon") != UFSECP_OK
-          || ufsecp_bip39_validate(ctx, "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon") == UFSECP_OK,
-          "bip39_validate accepts or rejects known mnemonic");
+    CHECK(ufsecp_bip39_validate(ctx, "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon") == UFSECP_OK,
+          "bip39_validate accepts valid 12-word mnemonic");
 
     // To seed
     uint8_t seed[64];
@@ -1314,7 +1313,7 @@ static void test_btc_message_sign() {
     CHECK_OK(ufsecp_pubkey_create(ctx, priv, pub33), "btc_msg: pubkey");
 
     const uint8_t msg[] = "Hello, Bitcoin!";
-    size_t msg_len = 15;
+    const size_t msg_len = 15;
 
     // Message hash
     uint8_t hash[32];
@@ -1535,7 +1534,7 @@ static void test_adaptor_signatures() {
     uint8_t neg_point[33];
     CHECK_OK(ufsecp_pubkey_negate(ctx, extracted_point, neg_point),
              "negate extracted point");
-    bool match = (std::memcmp(extracted_point, adaptor_point, 33) == 0) ||
+    const bool match = (std::memcmp(extracted_point, adaptor_point, 33) == 0) ||
                  (std::memcmp(neg_point, adaptor_point, 33) == 0);
     CHECK(match, "extracted secret matches adaptor (direct or negated)");
 

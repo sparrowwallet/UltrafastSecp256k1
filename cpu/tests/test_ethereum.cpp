@@ -50,9 +50,10 @@ static int tests_failed = 0;
 
 static void hex_to_bytes(const char* hex, uint8_t* out, size_t len) {
     for (size_t i = 0; i < len; ++i) {
-        unsigned int byte = 0;
-        if (std::sscanf(hex + i * 2, "%02x", &byte) != 1) byte = 0;
-        out[i] = static_cast<uint8_t>(byte);
+        char pair[3] = { hex[i * 2], hex[i * 2 + 1], '\0' };
+        char* endptr = nullptr;
+        const unsigned long val = std::strtoul(pair, &endptr, 16);
+        out[i] = (endptr == pair + 2) ? static_cast<uint8_t>(val) : 0;
     }
 }
 
@@ -186,13 +187,19 @@ static void test_eth_sign_hash() {
     ASSERT_TRUE(!r_zero, "r should be non-zero");
     ASSERT_TRUE(!s_zero, "s should be non-zero");
     // v should be 27 or 28 for legacy
-    ASSERT_TRUE(sig.v == 27 || sig.v == 28, "legacy v should be 27 or 28");
+    {
+        const bool v_ok = (sig.v == 27 || sig.v == 28);
+        ASSERT_TRUE(v_ok, "legacy v should be 27 or 28");
+    }
     PASS();
 
     // Sign with Ethereum mainnet chain ID
     TEST("eth_sign_hash with chain_id=1 (Ethereum)");
     auto sig2 = eth_sign_hash(hash, sk, 1);
-    ASSERT_TRUE(sig2.v == 37 || sig2.v == 38, "EIP-155 v should be 37 or 38");
+    {
+        const bool v2_ok = (sig2.v == 37 || sig2.v == 38);
+        ASSERT_TRUE(v2_ok, "EIP-155 v should be 37 or 38");
+    }
     PASS();
 
     // Same hash + key should give same r,s
@@ -223,8 +230,8 @@ static void test_ecrecover() {
     hex_to_bytes("c6b506e21f3c26dfe9b3a15a40d2dde0ab9ee4bb9e6f7e6e49f7ef9fd9b3a3d5",
                  sk_bytes.data(), 32);
     Scalar const sk = Scalar::from_bytes(sk_bytes);
-    Point pk = Point::generator().scalar_mul(sk);
-    auto expected_addr = ethereum_address_bytes(pk);
+    const Point pk = Point::generator().scalar_mul(sk);
+    const auto expected_addr = ethereum_address_bytes(pk);
 
     // Hash a message
     std::array<uint8_t, 32> hash{};
@@ -261,7 +268,7 @@ static void test_ecrecover() {
 
     // ecrecover with invalid r=0 should fail
     TEST("ecrecover invalid r=0");
-    std::array<uint8_t, 32> zero{};
+    const std::array<uint8_t, 32> zero{};
     auto [_, ok4] = ecrecover(hash, zero, sig.s, sig.v);
     ASSERT_TRUE(!ok4, "ecrecover with r=0 should fail");
     PASS();
@@ -284,7 +291,7 @@ static void test_personal_sign() {
     hex_to_bytes("4c0883a69102937d6231471b5dbb6204fe512961708279f8f30ab5c5dbe3a2b7",
                  sk_bytes.data(), 32);
     Scalar const sk = Scalar::from_bytes(sk_bytes);
-    Point pk = Point::generator().scalar_mul(sk);
+    const Point pk = Point::generator().scalar_mul(sk);
     auto addr = ethereum_address_bytes(pk);
 
     const char* msg = "I agree to the terms of service";
@@ -295,18 +302,21 @@ static void test_personal_sign() {
     bool r_zero = true;
     for (auto b : sig.r) { if (b != 0) r_zero = false; }
     ASSERT_TRUE(!r_zero, "r should be non-zero");
-    ASSERT_TRUE(sig.v == 27 || sig.v == 28, "v should be 27 or 28");
+    {
+        const bool v_ok2 = (sig.v == 27 || sig.v == 28);
+        ASSERT_TRUE(v_ok2, "v should be 27 or 28");
+    }
     PASS();
 
     TEST("personal_verify valid");
-    bool valid = eth_personal_verify(
+    const bool valid = eth_personal_verify(
         reinterpret_cast<const uint8_t*>(msg), msg_len, sig, addr);
     ASSERT_TRUE(valid, "signature should verify");
     PASS();
 
     TEST("personal_verify wrong message");
     const char* wrong_msg = "I disagree to the terms of service";
-    bool wrong = eth_personal_verify(
+    const bool wrong = eth_personal_verify(
         reinterpret_cast<const uint8_t*>(wrong_msg), std::strlen(wrong_msg), sig, addr);
     ASSERT_TRUE(!wrong, "wrong message should not verify");
     PASS();
@@ -314,7 +324,7 @@ static void test_personal_sign() {
     TEST("personal_verify wrong address");
     std::array<uint8_t, 20> wrong_addr{};
     wrong_addr[0] = 0xFF;
-    bool wrong2 = eth_personal_verify(
+    const bool wrong2 = eth_personal_verify(
         reinterpret_cast<const uint8_t*>(msg), msg_len, sig, wrong_addr);
     ASSERT_TRUE(!wrong2, "wrong address should not verify");
     PASS();
@@ -330,8 +340,8 @@ static void test_multi_chain() {
     std::array<uint8_t, 32> sk_bytes{};
     sk_bytes[31] = 7;
     Scalar const sk = Scalar::from_bytes(sk_bytes);
-    Point pk = Point::generator().scalar_mul(sk);
-    auto expected_addr = ethereum_address_bytes(pk);
+    const Point pk = Point::generator().scalar_mul(sk);
+    const auto expected_addr = ethereum_address_bytes(pk);
 
     std::array<uint8_t, 32> hash{};
     hash[0] = 0xAB; hash[1] = 0xCD;
@@ -349,7 +359,7 @@ static void test_multi_chain() {
 
     for (auto& chain : chains) {
         char buf[64];
-        std::snprintf(buf, sizeof(buf), "Round-trip chain_id=%lu (%s)",
+        (void)std::snprintf(buf, sizeof(buf), "Round-trip chain_id=%lu (%s)",
                      static_cast<unsigned long>(chain.id), chain.name);
         TEST(buf);
 

@@ -513,8 +513,7 @@ static std::uint64_t cashaddr_polymod(const std::vector<std::uint8_t>& v) {
 static std::vector<std::uint8_t> cashaddr_prefix_expand(const std::string& prefix) {
     std::vector<std::uint8_t> ret;
     ret.reserve(prefix.size() + 1);
-    for (char c : prefix) ret.push_back(static_cast<std::uint8_t>(c & 0x1f));
-    ret.push_back(0);
+    for (const char c : prefix) ret.push_back(static_cast<std::uint8_t>(c & 0x1f));    ret.push_back(0);
     return ret;
 }
 
@@ -524,7 +523,7 @@ std::string cashaddr_encode(const std::array<std::uint8_t, 20>& hash,
                             const std::string& prefix,
                             std::uint8_t type) {
     // Version byte: type (0=P2PKH, 1=P2SH) in upper 4 bits, size=0 (=20 bytes) in lower 4
-    std::uint8_t version_byte = static_cast<std::uint8_t>(type << 3);
+    const auto version_byte = static_cast<std::uint8_t>(type << 3);
 
     // Payload: version_byte + 20-byte hash = 21 bytes
     std::uint8_t payload[21];

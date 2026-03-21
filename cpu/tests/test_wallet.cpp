@@ -42,7 +42,6 @@ using namespace secp256k1;
 using namespace secp256k1::coins;
 using namespace secp256k1::coins::wallet;
 using fast::Scalar;
-using fast::Point;
 
 static int tests_passed = 0;
 static int tests_failed = 0;
@@ -64,9 +63,10 @@ static int tests_failed = 0;
 
 static void hex_to_bytes(const char* hex, uint8_t* out, size_t len) {
     for (size_t i = 0; i < len; ++i) {
-        unsigned int byte = 0;
-        if (std::sscanf(hex + i * 2, "%02x", &byte) != 1) byte = 0;
-        out[i] = static_cast<uint8_t>(byte);
+        char pair[3] = { hex[i * 2], hex[i * 2 + 1], '\0' };
+        char* endptr = nullptr;
+        const unsigned long val = std::strtoul(pair, &endptr, 16);
+        out[i] = (endptr == pair + 2) ? static_cast<uint8_t>(val) : 0;
     }
 }
 
@@ -194,7 +194,10 @@ static void test_export_privkey_bitcoin_wif() {
     auto wif = export_private_key(Bitcoin, key);
     ASSERT_TRUE(!wif.empty(), "non-empty WIF");
     // Compressed mainnet WIF starts with 'K' or 'L'
-    ASSERT_TRUE(wif[0] == 'K' || wif[0] == 'L', "WIF starts with K or L");
+    {
+        const bool wif_prefix_ok = (wif[0] == 'K' || wif[0] == 'L');
+        ASSERT_TRUE(wif_prefix_ok, "WIF starts with K or L");
+    }
     PASS();
 }
 
@@ -287,15 +290,15 @@ static void test_bitcoin_sign_verify() {
     auto scalar = Scalar::from_bytes(priv);
     auto pubkey = derive_public_key(scalar);
     const uint8_t msg[] = "Test message for signing";
-    size_t msg_len = sizeof(msg) - 1; // no null terminator
+    const size_t msg_len = sizeof(msg) - 1; // no null terminator
 
     auto rsig = bitcoin_sign_message(msg, msg_len, scalar);
-    bool ok = bitcoin_verify_message(msg, msg_len, pubkey, rsig.sig);
+    const bool ok = bitcoin_verify_message(msg, msg_len, pubkey, rsig.sig);
     ASSERT_TRUE(ok, "verify should pass");
 
     // Tamper: different message should fail
     const uint8_t bad_msg[] = "Wrong message";
-    bool bad = bitcoin_verify_message(bad_msg, sizeof(bad_msg) - 1, pubkey, rsig.sig);
+    const bool bad = bitcoin_verify_message(bad_msg, sizeof(bad_msg) - 1, pubkey, rsig.sig);
     ASSERT_TRUE(!bad, "tampered msg should fail");
     PASS();
 }
@@ -311,7 +314,7 @@ static void test_bitcoin_sign_recover() {
     auto scalar = Scalar::from_bytes(priv);
     auto pubkey = derive_public_key(scalar);
     const uint8_t msg[] = "Recovery test message";
-    size_t msg_len = sizeof(msg) - 1;
+    const size_t msg_len = sizeof(msg) - 1;
 
     auto rsig = bitcoin_sign_message(msg, msg_len, scalar);
     auto [recovered, ok] = bitcoin_recover_message(msg, msg_len, rsig.sig, rsig.recid);
@@ -333,7 +336,7 @@ static void test_base64_round_trip() {
     hex_to_bytes(TEST_PRIVKEY_HEX, priv, 32);
     auto scalar = Scalar::from_bytes(priv);
     const uint8_t msg[] = "Base64 test";
-    size_t msg_len = sizeof(msg) - 1;
+    const size_t msg_len = sizeof(msg) - 1;
 
     auto rsig = bitcoin_sign_message(msg, msg_len, scalar);
     auto b64 = bitcoin_sig_to_base64(rsig, true);
@@ -363,10 +366,10 @@ static void test_wallet_sign_verify_bitcoin() {
     ASSERT_TRUE(ok, "key creation");
 
     const uint8_t msg[] = "Wallet API test message";
-    size_t msg_len = sizeof(msg) - 1;
+    const size_t msg_len = sizeof(msg) - 1;
 
     auto sig = sign_message(Bitcoin, key, msg, msg_len);
-    bool verified = verify_message(Bitcoin, key.pub, msg, msg_len, sig);
+    const bool verified = verify_message(Bitcoin, key.pub, msg, msg_len, sig);
     ASSERT_TRUE(verified, "verify should pass");
 
     // Wrong message should fail
@@ -394,7 +397,10 @@ static void test_wallet_sign_hash_recover() {
 
     // Reconstruct: for raw hash verification, manually hash + verify
     // sign_hash with Bitcoin coin uses ecdsa_sign_recoverable directly
-    ASSERT_TRUE(sig.recid >= 0 && sig.recid <= 3, "valid recid");
+    {
+        const bool recid_ok = (sig.recid >= 0 && sig.recid <= 3);
+        ASSERT_TRUE(recid_ok, "valid recid");
+    }
     bool r_nonzero = false, s_nonzero = false;
     for (auto b : sig.r) if (b) { r_nonzero = true; break; }
     for (auto b : sig.s) if (b) { s_nonzero = true; break; }
@@ -415,7 +421,7 @@ static void test_wallet_sign_recover_ethereum() {
     ASSERT_TRUE(ok, "key creation");
 
     const uint8_t msg[] = "Ethereum wallet test";
-    size_t msg_len = sizeof(msg) - 1;
+    const size_t msg_len = sizeof(msg) - 1;
 
     auto sig = sign_message(Ethereum, key, msg, msg_len);
     auto [addr, recovered] = recover_address(Ethereum, msg, msg_len, sig);
@@ -434,7 +440,7 @@ static void test_wallet_sign_recover_tron() {
     ASSERT_TRUE(ok, "key creation");
 
     const uint8_t msg[] = "Tron wallet test";
-    size_t msg_len = sizeof(msg) - 1;
+    const size_t msg_len = sizeof(msg) - 1;
 
     auto sig = sign_message(Tron, key, msg, msg_len);
     auto [addr, recovered] = recover_address(Tron, msg, msg_len, sig);
@@ -502,7 +508,10 @@ static void test_multi_coin_addresses() {
     auto ltc = get_address(Litecoin, key);
     auto doge = get_address(Dogecoin, key);
 
-    ASSERT_TRUE(!btc.empty() && !ltc.empty() && !doge.empty(), "all non-empty");
+    {
+        const bool coins_non_empty = !btc.empty() && !ltc.empty() && !doge.empty();
+        ASSERT_TRUE(coins_non_empty, "all non-empty");
+    }
     // All addresses should be different (different prefixes/encoding)
     ASSERT_TRUE(btc != ltc, "BTC != LTC");
     ASSERT_TRUE(btc != doge, "BTC != DOGE");
@@ -599,8 +608,10 @@ static void test_wallet_all_btc_formats() {
     auto p2tr = get_address_p2tr(Bitcoin, key);
 
     // All four formats should be non-empty and different
-    ASSERT_TRUE(!p2pkh.empty() && !p2wpkh.empty() && !p2sh.empty() && !p2tr.empty(),
-                "all non-empty");
+    {
+        const bool addrs_non_empty = !p2pkh.empty() && !p2wpkh.empty() && !p2sh.empty() && !p2tr.empty();
+        ASSERT_TRUE(addrs_non_empty, "all non-empty");
+    }
     ASSERT_TRUE(p2pkh != p2wpkh, "P2PKH != P2WPKH");
     ASSERT_TRUE(p2pkh != p2sh, "P2PKH != P2SH-P2WPKH");
     ASSERT_TRUE(p2pkh != p2tr, "P2PKH != P2TR");

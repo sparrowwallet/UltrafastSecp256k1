@@ -30,8 +30,8 @@ static bool csprng_fill(uint8_t* buf, size_t len) {
 #else
     FILE* f = std::fopen("/dev/urandom", "rb");
     if (!f) return false;
-    bool ok = (std::fread(buf, 1, len, f) == len);
-    std::fclose(f);
+    const bool ok = (std::fread(buf, 1, len, f) == len);
+    (void)std::fclose(f);
     return ok;
 #endif
 }
@@ -43,11 +43,14 @@ static int word_index(const char* word) {
     // Binary search in the sorted BIP-39 english wordlist
     int lo = 0, hi = 2047;
     while (lo <= hi) {
-        int mid = lo + (hi - lo) / 2;
-        int cmp = std::strcmp(word, detail::bip39_english[mid]);
+        const int mid = lo + (hi - lo) / 2;
+        const int cmp = std::strcmp(word, detail::bip39_english[mid]);
         if (cmp == 0) return mid;
-        if (cmp < 0) hi = mid - 1;
-        else lo = mid + 1;
+        if (cmp < 0) {
+            hi = mid - 1;
+        } else {
+            lo = mid + 1;
+        }
     }
     return -1;
 }
@@ -90,11 +93,12 @@ void pbkdf2_hmac_sha512(const uint8_t* password, size_t password_len,
 
         for (uint32_t i = 1; i < iterations; ++i) {
             u = hmac_sha512(password, password_len, u.data(), u.size());
-            for (size_t j = 0; j < 64; ++j)
+            for (size_t j = 0; j < 64; ++j) {
                 result[j] ^= u[j];
+            }
         }
 
-        size_t to_copy = std::min<size_t>(64, output_len - offset);
+        const size_t to_copy = std::min<size_t>(64, output_len - offset);
         std::memcpy(output + offset, result.data(), to_copy);
         offset += to_copy;
         ++block_num;
@@ -107,15 +111,17 @@ void pbkdf2_hmac_sha512(const uint8_t* password, size_t password_len,
 std::pair<std::string, bool>
 bip39_generate(size_t entropy_bytes, const uint8_t* entropy_in) {
     // Valid entropy sizes: 16, 20, 24, 28, 32 bytes
-    if (entropy_bytes < 16 || entropy_bytes > 32 || (entropy_bytes % 4) != 0)
+    if (entropy_bytes < 16 || entropy_bytes > 32 || (entropy_bytes % 4) != 0) {
         return {"", false};
+    }
 
     uint8_t entropy[32];
     if (entropy_in) {
         std::memcpy(entropy, entropy_in, entropy_bytes);
     } else {
-        if (!csprng_fill(entropy, entropy_bytes))
+        if (!csprng_fill(entropy, entropy_bytes)) {
             return {"", false};
+        }
     }
 
     // Compute SHA-256 checksum of entropy
@@ -123,32 +129,35 @@ bip39_generate(size_t entropy_bytes, const uint8_t* entropy_in) {
 
     // Build the bit stream: entropy bits + checksum bits
     // checksum_bits = entropy_bytes * 8 / 32 = entropy_bytes / 4
-    size_t entropy_bits = entropy_bytes * 8;
-    size_t checksum_bits = entropy_bytes / 4;
-    size_t total_bits = entropy_bits + checksum_bits;
-    size_t word_count = total_bits / 11;
+    const size_t entropy_bits = entropy_bytes * 8;
+    const size_t checksum_bits = entropy_bytes / 4;
+    const size_t total_bits = entropy_bits + checksum_bits;
+    const size_t word_count = total_bits / 11;
 
     // Extract 11-bit indices from the combined entropy+checksum bit stream
     std::string mnemonic;
     for (size_t i = 0; i < word_count; ++i) {
         uint32_t index = 0;
         for (size_t b = 0; b < 11; ++b) {
-            size_t bit_pos = i * 11 + b;
-            uint8_t byte_val;
-            if (bit_pos < entropy_bits)
+            const size_t bit_pos = i * 11 + b;
+            uint8_t byte_val = 0;
+            if (bit_pos < entropy_bits) {
                 byte_val = entropy[bit_pos / 8];
-            else
+            }
+            else {
                 byte_val = hash[(bit_pos - entropy_bits) / 8];
+            }
 
             size_t bit_in_byte = 7 - (bit_pos % 8);
             if (bit_pos >= entropy_bits) {
-                size_t cs_bit = bit_pos - entropy_bits;
+                const size_t cs_bit = bit_pos - entropy_bits;
                 byte_val = hash[cs_bit / 8];
                 bit_in_byte = 7 - (cs_bit % 8);
             }
 
-            if (byte_val & (1u << bit_in_byte))
+            if (byte_val & (1u << bit_in_byte)) {
                 index |= (1u << (10 - b));
+            }
         }
 
         if (i > 0) mnemonic += ' ';
@@ -168,8 +177,9 @@ bool bip39_validate(const std::string& mnemonic) {
     auto words = split_words(mnemonic);
 
     // Valid word counts: 12, 15, 18, 21, 24
-    if (words.size() < 12 || words.size() > 24 || (words.size() % 3) != 0)
+    if (words.size() < 12 || words.size() > 24 || (words.size() % 3) != 0) {
         return false;
+    }
 
     // Look up each word index
     std::vector<int> indices(words.size());
@@ -179,26 +189,28 @@ bool bip39_validate(const std::string& mnemonic) {
     }
 
     // Reconstruct entropy + checksum bits
-    size_t total_bits = words.size() * 11;
-    size_t checksum_bits = words.size() / 3;
-    size_t entropy_bits = total_bits - checksum_bits;
-    size_t entropy_bytes = entropy_bits / 8;
+    const size_t total_bits = words.size() * 11;
+    const size_t checksum_bits = words.size() / 3;
+    const size_t entropy_bits = total_bits - checksum_bits;
+    const size_t entropy_bytes = entropy_bits / 8;
 
     uint8_t entropy[32] = {};
     uint8_t checksum_byte = 0;
 
     for (size_t i = 0; i < words.size(); ++i) {
-        uint32_t idx = static_cast<uint32_t>(indices[i]);
+        const auto idx = static_cast<uint32_t>(indices[i]);
         for (size_t b = 0; b < 11; ++b) {
-            size_t bit_pos = i * 11 + b;
-            bool bit_set = (idx >> (10 - b)) & 1;
+            const size_t bit_pos = i * 11 + b;
+            const bool bit_set = (idx >> (10 - b)) & 1;
             if (bit_pos < entropy_bits) {
-                if (bit_set)
+                if (bit_set) {
                     entropy[bit_pos / 8] |= (1u << (7 - (bit_pos % 8)));
+                }
             } else {
-                size_t cs_bit = bit_pos - entropy_bits;
-                if (bit_set)
+                const size_t cs_bit = bit_pos - entropy_bits;
+                if (bit_set) {
                     checksum_byte |= (1u << (7 - cs_bit));
+                }
             }
         }
     }
@@ -220,8 +232,9 @@ bip39_mnemonic_to_seed(const std::string& mnemonic,
                        const std::string& passphrase) {
     std::array<uint8_t, 64> seed{};
 
-    if (mnemonic.empty())
+    if (mnemonic.empty()) {
         return {seed, false};
+    }
 
     // salt = "mnemonic" + passphrase
     std::string salt_str = "mnemonic" + passphrase;
@@ -243,8 +256,9 @@ bip39_mnemonic_to_entropy(const std::string& mnemonic) {
     Bip39Entropy ent{};
 
     auto words = split_words(mnemonic);
-    if (words.size() < 12 || words.size() > 24 || (words.size() % 3) != 0)
+    if (words.size() < 12 || words.size() > 24 || (words.size() % 3) != 0) {
         return {ent, false};
+    }
 
     std::vector<int> indices(words.size());
     for (size_t i = 0; i < words.size(); ++i) {
@@ -252,26 +266,28 @@ bip39_mnemonic_to_entropy(const std::string& mnemonic) {
         if (indices[i] < 0) return {ent, false};
     }
 
-    size_t total_bits = words.size() * 11;
-    size_t checksum_bits = words.size() / 3;
-    size_t entropy_bits = total_bits - checksum_bits;
-    size_t entropy_bytes = entropy_bits / 8;
+    const size_t total_bits = words.size() * 11;
+    const size_t checksum_bits = words.size() / 3;
+    const size_t entropy_bits = total_bits - checksum_bits;
+    const size_t entropy_bytes = entropy_bits / 8;
 
     uint8_t entropy[32] = {};
     uint8_t checksum_byte = 0;
 
     for (size_t i = 0; i < words.size(); ++i) {
-        uint32_t idx = static_cast<uint32_t>(indices[i]);
+        const auto idx = static_cast<uint32_t>(indices[i]);
         for (size_t b = 0; b < 11; ++b) {
-            size_t bit_pos = i * 11 + b;
-            bool bit_set = (idx >> (10 - b)) & 1;
+            const size_t bit_pos = i * 11 + b;
+            const bool bit_set = (idx >> (10 - b)) & 1;
             if (bit_pos < entropy_bits) {
-                if (bit_set)
+                if (bit_set) {
                     entropy[bit_pos / 8] |= (1u << (7 - (bit_pos % 8)));
+                }
             } else {
-                size_t cs_bit = bit_pos - entropy_bits;
-                if (bit_set)
+                const size_t cs_bit = bit_pos - entropy_bits;
+                if (bit_set) {
                     checksum_byte |= (1u << (7 - cs_bit));
+                }
             }
         }
     }

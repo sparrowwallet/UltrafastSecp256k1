@@ -24,16 +24,10 @@ static int tests_passed = 0;
 
 static void hex_to_bytes(const char* hex, uint8_t* out, size_t len) {
     for (size_t i = 0; i < len; ++i) {
-        unsigned int byte = 0;
-#ifdef __clang__
-#pragma clang diagnostic push
-#pragma clang diagnostic ignored "-Wdeprecated-declarations"
-#endif
-        std::sscanf(hex + 2 * i, "%02x", &byte);
-#ifdef __clang__
-#pragma clang diagnostic pop
-#endif
-        out[i] = static_cast<uint8_t>(byte);
+        char pair[3] = { hex[2 * i], hex[2 * i + 1], '\0' };
+        char* endptr = nullptr;
+        const unsigned long val = std::strtoul(pair, &endptr, 16);
+        out[i] = (endptr == pair + 2) ? static_cast<uint8_t>(val) : 0;
     }
 }
 
@@ -42,7 +36,7 @@ static std::string bytes_to_hex(const uint8_t* data, size_t len) {
     result.reserve(len * 2);
     for (size_t i = 0; i < len; ++i) {
         char buf[3];
-        std::snprintf(buf, sizeof(buf), "%02x", data[i]);
+        (void)std::snprintf(buf, sizeof(buf), "%02x", data[i]);
         result += buf;
     }
     return result;
@@ -96,6 +90,7 @@ static void test_wordlist() {
 
     const char* const* wl = bip39_wordlist_english();
     CHECK(wl != nullptr, "wordlist not null");
+    if (!wl) { return; }
     CHECK(std::strcmp(wl[0], "abandon") == 0, "first word = abandon");
     CHECK(std::strcmp(wl[2047], "zoo") == 0, "last word = zoo");
     CHECK(std::strcmp(wl[1], "ability") == 0, "word[1] = ability");
@@ -235,7 +230,7 @@ static void test_mnemonic_to_seed() {
                                "abandon abandon abandon abandon abandon about";
         auto [seed, ok] = bip39_mnemonic_to_seed(mnemonic, "TREZOR");
         CHECK(ok, "TV1 seed: derivation ok");
-        std::string hex = bytes_to_hex(seed.data(), 64);
+        const std::string hex = bytes_to_hex(seed.data(), 64);
         CHECK(hex == "c55257c360c07c72029aebc1b53c05ed0362ada38ead3e3e9efa3708e5349553"
                      "1f09a6987599d18264c1e1c92f2cf141630c7a3c4ab7c81b2f001698e7463b04",
               "TV1 seed: matches Trezor vector");
@@ -249,7 +244,7 @@ static void test_mnemonic_to_seed() {
                                "abandon abandon abandon abandon abandon art";
         auto [seed, ok] = bip39_mnemonic_to_seed(mnemonic, "TREZOR");
         CHECK(ok, "TV5 seed: derivation ok");
-        std::string hex = bytes_to_hex(seed.data(), 64);
+        const std::string hex = bytes_to_hex(seed.data(), 64);
         CHECK(hex == "bda85446c68413707090a52022edd26a1c9462295029f2e60cd7c4f2bbd30971"
                      "70af7a4d73245cafa9c3cca8d561a7c3de6f5d4a10be8ed2a5e608d68f92fcc8",
               "TV5 seed: matches Trezor vector");
@@ -261,7 +256,7 @@ static void test_mnemonic_to_seed() {
                                "abandon abandon abandon abandon abandon about";
         auto [seed, ok] = bip39_mnemonic_to_seed(mnemonic, "");
         CHECK(ok, "no-passphrase seed: derivation ok");
-        std::string hex = bytes_to_hex(seed.data(), 64);
+        const std::string hex = bytes_to_hex(seed.data(), 64);
         // Known result with empty passphrase (salt = "mnemonic"):
         CHECK(hex == "5eb00bbddcf069084889a8ab9155568165f5c453ccb85e70811aaed6f6da5fc1"
                      "9a5ac40b389cd370d086206dec8aa6c43daea6690f20ad3d8d48b2d2ce9e38e4",
@@ -337,7 +332,7 @@ static void test_edge_cases() {
         CHECK(ok, "160-bit entropy generates ok");
         // Count words
         int wc = 1;
-        for (char c : mnemonic) if (c == ' ') ++wc;
+        for (const char c : mnemonic) if (c == ' ') ++wc;
         CHECK(wc == 15, "160-bit entropy -> 15 words");
         CHECK(bip39_validate(mnemonic), "160-bit mnemonic validates");
     }
@@ -349,7 +344,7 @@ static void test_edge_cases() {
         auto [mnemonic, ok] = bip39_generate(24, entropy);
         CHECK(ok, "192-bit entropy generates ok");
         int wc = 1;
-        for (char c : mnemonic) if (c == ' ') ++wc;
+        for (const char c : mnemonic) if (c == ' ') ++wc;
         CHECK(wc == 18, "192-bit entropy -> 18 words");
         CHECK(bip39_validate(mnemonic), "192-bit mnemonic validates");
     }
@@ -362,7 +357,7 @@ static void test_edge_cases() {
         auto [mnemonic, ok] = bip39_generate(28, entropy);
         CHECK(ok, "224-bit entropy generates ok");
         int wc = 1;
-        for (char c : mnemonic) if (c == ' ') ++wc;
+        for (const char c : mnemonic) if (c == ' ') ++wc;
         CHECK(wc == 21, "224-bit entropy -> 21 words");
         CHECK(bip39_validate(mnemonic), "224-bit mnemonic validates");
     }

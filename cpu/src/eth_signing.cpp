@@ -13,7 +13,6 @@
 namespace secp256k1::coins {
 
 using fast::Scalar;
-using fast::Point;
 
 // -- Decimal length encoding (no heap) ----------------------------------------
 
@@ -93,8 +92,8 @@ ecrecover(const std::array<std::uint8_t, 32>& msg_hash,
           const std::array<std::uint8_t, 32>& s,
           std::uint64_t v) {
     // Parse r, s
-    Scalar r_scalar = Scalar::from_bytes(r);
-    Scalar s_scalar = Scalar::from_bytes(s);
+    const Scalar r_scalar = Scalar::from_bytes(r);
+    const Scalar s_scalar = Scalar::from_bytes(s);
 
     if (r_scalar.is_zero() || s_scalar.is_zero()) {
         return {{}, false};

@@ -167,7 +167,7 @@ std::string coin_address_cashaddr(const fast::Point& pubkey,
     auto compressed = pubkey.to_compressed();
     auto h160 = hash160(compressed.data(), compressed.size());
 
-    std::string prefix = testnet ? "bchtest" : "bitcoincash";
+    const std::string prefix = testnet ? "bchtest" : "bitcoincash";
     return cashaddr_encode(h160, prefix, 0);
 }
 
