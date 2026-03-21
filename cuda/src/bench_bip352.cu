@@ -766,39 +766,75 @@ int main() {
     // Phase 3.5: Build Generator LUT (16 x 65536 = 64 MB)
     // ================================================================
     printf("Building generator LUT (16 windows x 65536 entries = 64 MB)...\n");
-    CudaTimer lut_build_timer;
 
     secp256k1::cuda::AffinePoint* d_gen_lut = nullptr;
     {
-        // Step 1: Compute 16 base points on GPU
-        secp256k1::cuda::AffinePoint* d_bases;
-        CUDA_CHECK(cudaMalloc(&d_bases, 16 * sizeof(secp256k1::cuda::AffinePoint)));
-        compute_lut_base_points<<<1, 1>>>(d_bases);
-        CUDA_CHECK(cudaDeviceSynchronize());
+        const int    LUT_ENTRIES = 65536;
+        const int    LUT_TOTAL   = 16 * LUT_ENTRIES;
+        const size_t LUT_BYTES   = (size_t)LUT_TOTAL * sizeof(secp256k1::cuda::AffinePoint);
+        CUDA_CHECK(cudaMalloc(&d_gen_lut, LUT_BYTES));
 
-        const int LUT_ENTRIES = 65536;
-        const int LUT_TOTAL = 16 * LUT_ENTRIES;
+        // Try loading from cache — the LUT is deterministic (depends only on G)
+        // so it never changes between runs.
+        bool loaded = false;
+        const char* cache_path = "secp256k1_gen_lut_v1.bin";
+        FILE* cf = fopen(cache_path, "rb");
+        if (cf) {
+            fseek(cf, 0, SEEK_END);
+            long fsz = ftell(cf);
+            rewind(cf);
+            if ((size_t)fsz == LUT_BYTES) {
+                auto* h_lut = static_cast<secp256k1::cuda::AffinePoint*>(malloc(LUT_BYTES));
+                if (h_lut && fread(h_lut, 1, LUT_BYTES, cf) == LUT_BYTES) {
+                    CUDA_CHECK(cudaMemcpy(d_gen_lut, h_lut, LUT_BYTES, cudaMemcpyHostToDevice));
+                    loaded = true;
+                    printf("  LUT loaded from cache (%s, %.1f MB)\n", cache_path, LUT_BYTES / 1e6);
+                }
+                free(h_lut);
+            }
+            fclose(cf);
+        }
 
-        // Step 2+3 fused: H-based serial build + batch-inv affine conversion
-        // H buffer: 16 * 65536 * sizeof(FieldElement) = 32 MB (vs 132 MB for old Jacobian buffer)
-        CUDA_CHECK(cudaMalloc(&d_gen_lut, (size_t)LUT_TOTAL * sizeof(secp256k1::cuda::AffinePoint)));
-        secp256k1::cuda::FieldElement* d_h_buf;
-        CUDA_CHECK(cudaMalloc(&d_h_buf, (size_t)LUT_TOTAL * sizeof(secp256k1::cuda::FieldElement)));
+        if (!loaded) {
+            // Build: compute 16 base points then fill and convert to affine
+            secp256k1::cuda::AffinePoint* d_bases;
+            CUDA_CHECK(cudaMalloc(&d_bases, 16 * sizeof(secp256k1::cuda::AffinePoint)));
+            compute_lut_base_points<<<1, 1>>>(d_bases);
+            CUDA_CHECK(cudaDeviceSynchronize());
 
-        lut_build_timer.start();
-        gen_lut_build_affine_kernel<<<16, 1>>>(d_bases, d_gen_lut, d_h_buf, LUT_ENTRIES);
-        CUDA_CHECK(cudaDeviceSynchronize());
-        // Parallel affine conversion using z_inv values stored in h_buf
-        int total_conv = 16 * (LUT_ENTRIES - 2);
-        int conv_blk = (total_conv + 255) / 256;
-        gen_lut_convert_zinv_kernel<<<conv_blk, 256>>>(d_gen_lut, d_h_buf, LUT_ENTRIES);
-        float lut_ms = lut_build_timer.stop();
+            // H buffer: 16 * 65536 * sizeof(FieldElement) = 32 MB
+            secp256k1::cuda::FieldElement* d_h_buf;
+            CUDA_CHECK(cudaMalloc(&d_h_buf, (size_t)LUT_TOTAL * sizeof(secp256k1::cuda::FieldElement)));
 
-        printf("  LUT built in %.1f ms (%.1f MB, %d points, H-based split)\n",
-               lut_ms, LUT_TOTAL * sizeof(secp256k1::cuda::AffinePoint) / 1e6, LUT_TOTAL);
+            CudaTimer lut_build_timer;
+            lut_build_timer.start();
+            gen_lut_build_affine_kernel<<<16, 1>>>(d_bases, d_gen_lut, d_h_buf, LUT_ENTRIES);
+            CUDA_CHECK(cudaDeviceSynchronize());
+            int total_conv = 16 * (LUT_ENTRIES - 2);
+            int conv_blk   = (total_conv + 255) / 256;
+            gen_lut_convert_zinv_kernel<<<conv_blk, 256>>>(d_gen_lut, d_h_buf, LUT_ENTRIES);
+            float lut_ms = lut_build_timer.stop();
 
-        CUDA_CHECK(cudaFree(d_h_buf));
-        CUDA_CHECK(cudaFree(d_bases));
+            printf("  LUT built in %.1f ms (%.1f MB, %d points, H-based split)\n",
+                   lut_ms, LUT_BYTES / 1e6, LUT_TOTAL);
+
+            CUDA_CHECK(cudaFree(d_h_buf));
+            CUDA_CHECK(cudaFree(d_bases));
+
+            // Persist to disk — future runs will skip the build entirely
+            auto* h_lut = static_cast<secp256k1::cuda::AffinePoint*>(malloc(LUT_BYTES));
+            if (h_lut) {
+                if (cudaMemcpy(h_lut, d_gen_lut, LUT_BYTES, cudaMemcpyDeviceToHost) == cudaSuccess) {
+                    FILE* wf = fopen(cache_path, "wb");
+                    if (wf) {
+                        fwrite(h_lut, 1, LUT_BYTES, wf);
+                        fclose(wf);
+                        printf("  LUT cached to disk (%s)\n", cache_path);
+                    }
+                }
+                free(h_lut);
+            }
+        }
     }
     printf("Done.\n");
 

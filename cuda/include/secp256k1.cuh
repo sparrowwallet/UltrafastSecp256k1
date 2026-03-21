@@ -3567,7 +3567,8 @@ __device__ inline void scalar_mul_generator_const(const Scalar* k, JacobianPoint
                     r->infinity = false;
                     started = true;
                 } else {
-                    jacobian_add_mixed(r, &GENERATOR_TABLE_AFFINE[idx], r);
+                    // Unchecked: started=true guarantees r->infinity=false.
+                    jacobian_add_mixed_unchecked(r, &GENERATOR_TABLE_AFFINE[idx], r);
                 }
             }
         }
@@ -3613,7 +3614,8 @@ __device__ inline void scalar_mul_generator_w8(const Scalar* k, JacobianPoint* r
                     r->infinity = false;
                     started = true;
                 } else {
-                    jacobian_add_mixed(r, &GENERATOR_TABLE_W8[idx], r);
+                    // Unchecked: started=true guarantees r->infinity=false.
+                    jacobian_add_mixed_unchecked(r, &GENERATOR_TABLE_W8[idx], r);
                 }
             }
         }
@@ -3649,7 +3651,9 @@ __device__ inline void scalar_mul_generator_lut(
                 field_set_one(&r->z);
                 r->infinity = false;
             } else {
-                jacobian_add_mixed(r, pt, r);
+                // Unchecked: r->infinity is guaranteed false after the first window.
+                // Mirrors the same optimization applied to OpenCL in fc378bdc.
+                jacobian_add_mixed_unchecked(r, pt, r);
             }
         }
     }
