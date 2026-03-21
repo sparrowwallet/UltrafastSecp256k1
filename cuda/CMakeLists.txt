@@ -211,7 +211,16 @@ target_include_directories(bench_bip352 PRIVATE
 target_link_libraries(bench_bip352 PRIVATE
     fastsecp256k1
 )
-set_target_properties(bench_bip352 PROPERTIES INTERPROCEDURAL_OPTIMIZATION FALSE)
+set_target_properties(bench_bip352 PROPERTIES
+    INTERPROCEDURAL_OPTIMIZATION FALSE
+    # bench_bip352 is self-contained: all device code is defined inline in
+    # bench_bip352.cu + secp256k1.cuh headers; it does not call __device__
+    # functions from secp256k1_cuda_lib's .cu TU.  Disabling separable
+    # compilation for this target only restores whole-program nvcc register
+    # allocation, allowing tpb >= 256 and recovering ~15% throughput vs the
+    # global CMAKE_CUDA_SEPARABLE_COMPILATION=ON default.
+    CUDA_SEPARABLE_COMPILATION OFF
+)
 target_link_options(bench_bip352 PRIVATE -fno-lto)
 
 # ===== GPU CT Layer Smoke Test =====
