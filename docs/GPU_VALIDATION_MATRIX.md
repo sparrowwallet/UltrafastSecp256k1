@@ -21,16 +21,16 @@ Operations returning `UFSECP_ERR_GPU_UNSUPPORTED` (104) gracefully decline.
 | Operation | CUDA | OpenCL | Metal | Data Class |
 |-----------|------|--------|-------|------------|
 | `generator_mul_batch` | implemented | implemented | unsupported | PUBLIC |
-| `ecdsa_verify_batch` | implemented | unsupported | unsupported | PUBLIC |
-| `schnorr_verify_batch` | implemented | unsupported | unsupported | PUBLIC |
+| `ecdsa_verify_batch` | implemented | unsupported in unified C ABI | unsupported | PUBLIC |
+| `schnorr_verify_batch` | implemented | unsupported in unified C ABI | unsupported | PUBLIC |
 | `ecdh_batch` | implemented | implemented | unsupported | SECRET |
 | `hash160_pubkey_batch` | implemented | implemented | unsupported | PUBLIC |
 | `msm` | implemented | implemented | unsupported | PUBLIC |
-| **Total** | **6/6** | **4/6** | **0/6** | |
+| **Total (unified GPU C ABI)** | **6/6** | **4/6** | **0/6** | |
 
 ### Expansion Roadmap
 
-- **OpenCL next**: ecdsa_verify_batch, schnorr_verify_batch (needs extended kernel compilation in Context)
+- **OpenCL next in the unified GPU C ABI**: ecdsa_verify_batch, schnorr_verify_batch (the native OpenCL backend already has broader coverage; the remaining work is wiring those verify paths cleanly through the shared host ABI layer)
 - **Metal**: experimental / discovery-only until MSL kernel pipeline is wired from CMake
 
 ### C ABI Test Coverage
@@ -130,7 +130,7 @@ CUDA is the most unified backend today. If someone asks, "Which GPU backend has 
 
 ### Current Strength
 
-OpenCL has broad validation coverage already and is stronger than it may first appear from the README alone.
+OpenCL has broad native validation coverage already and is stronger than it may first appear from the unified GPU C ABI table alone.
 
 ### Remaining Engineering Gaps
 
