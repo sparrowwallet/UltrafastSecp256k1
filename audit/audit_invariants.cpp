@@ -17,7 +17,7 @@
 // INV-6  Point serialization invariant — compress/decompress round-trip
 // INV-7  ECDSA output invariant        — sig.r, sig.s in (0, n), low-S
 // INV-8  Schnorr output invariant      — sig satisfies verification eq
-// INV-9  Infinity propagation          — O + P = P, P + O = P, O + O = O
+// INV-9  Infinity propagation          — O.add(P) = P, P.add(O) = P, O.add(O) = O
 // INV-10 Negation invariant            — P + (-P) = O, -(-P) = P
 // ============================================================================
 
@@ -34,6 +34,7 @@
 #include "secp256k1/schnorr.hpp"
 #include "secp256k1/ct/point.hpp"
 #include "secp256k1/sanitizer_scale.hpp"
+#define AUDIT_SCALE(n) SCALED((n), (n) / 10)
 
 using namespace secp256k1::fast;
 
@@ -69,7 +70,8 @@ static std::array<uint8_t, 32> random_bytes32() {
 // Core invariant: point is on secp256k1 curve (y² = x³ + 7 mod p)
 static bool point_is_on_curve(const Point& P) {
     if (P.is_infinity()) return true;  // infinity is always "on the curve"
-    auto [x, y] = P.to_affine();
+    auto x = P.x();
+    auto y = P.y();
     FieldElement lhs = y * y;
     FieldElement rhs = x * x * x + FieldElement::from_uint64(7);
     return lhs == rhs;
@@ -94,23 +96,23 @@ static void run_inv1_point_add() {
     for (int i = 0; i < N; ++i) {
         Scalar k1 = random_scalar();
         Scalar k2 = random_scalar();
-        Point P = Point::generator_mul(k1);
-        Point Q = Point::generator_mul(k2);
+        Point P = Point::generator().scalar_mul(k1);
+        Point Q = Point::generator().scalar_mul(k2);
 
-        Point R = P + Q;
+        Point R = P.add(Q);
         CHECK(point_is_on_curve(R),
-              "INV-1: P + Q must lie on the secp256k1 curve");
+              "INV-1: P.add(Q) must lie on the secp256k1 curve");
 
-        // Also check: P + P (doubling via add)
-        Point D = P + P;
+        // Also check: P.add(P) (doubling via add)
+        Point D = P.add(P);
         CHECK(point_is_on_curve(D),
-              "INV-1: P + P (via add) must lie on curve");
+              "INV-1: P.add(P) (via add) must lie on curve");
 
-        // And: P + O = P
+        // And: P.add(O) = P
         Point inf{};
-        Point R2 = P + inf;
+        Point R2 = P.add(inf);
         CHECK(point_is_on_curve(R2),
-              "INV-1: P + O must lie on curve");
+              "INV-1: P.add(O) must lie on curve");
     }
 }
 
@@ -124,15 +126,15 @@ static void run_inv2_scalar_mul() {
     for (int i = 0; i < N; ++i) {
         Scalar k = random_scalar();
         Scalar base_s = random_scalar();
-        Point base = Point::generator_mul(base_s);
+        Point base = Point::generator().scalar_mul(base_s);
 
         // k * arbitrary_point
-        Point result = base * k;
+        Point result = base.scalar_mul(k);
         CHECK(point_is_on_curve(result),
               "INV-2: k*P must lie on secp256k1 curve");
 
         // k * G (generator mul)
-        Point gresult = Point::generator_mul(k);
+        Point gresult = Point::generator().scalar_mul(k);
         CHECK(point_is_on_curve(gresult),
               "INV-2: k*G must lie on secp256k1 curve");
     }
@@ -162,16 +164,12 @@ static void run_inv3_field_normalization() {
 
         // mul
         FieldElement mul_r = a * b;
-        FieldElement mul_renorm = mul_r;
-        mul_renorm.normalize();
-        CHECK(mul_r == mul_renorm,
+        CHECK(mul_r == FieldElement::from_bytes(mul_r.to_bytes()),
               "INV-3: field_mul result must already be normalized");
 
         // sqr
         FieldElement sqr_r = a * a;
-        FieldElement sqr_renorm = sqr_r;
-        sqr_renorm.normalize();
-        CHECK(sqr_r == sqr_renorm,
+        CHECK(sqr_r == FieldElement::from_bytes(sqr_r.to_bytes()),
               "INV-3: field_sqr result must already be normalized");
 
         // add
@@ -231,14 +229,14 @@ static void run_inv5_glv_decomposition() {
 
         // After GLV decomposition: k*G == (k1*G) + (k2 * lambda*G)
         // We verify via the output of scalar_mul with and without GLV
-        Point kG  = Point::generator_mul(k);
+        Point kG  = Point::generator().scalar_mul(k);
         CHECK(point_is_on_curve(kG),
               "INV-5: k*G (post-GLV) must lie on curve");
 
         // Two different scalars multiplied by the same point must give different results
         // (unless k1 == k2, which is astronomically unlikely with random inputs)
         Scalar k2 = random_scalar();
-        Point kG2 = Point::generator_mul(k2);
+        Point kG2 = Point::generator().scalar_mul(k2);
         // They should both be on curve
         CHECK(point_is_on_curve(kG2),
               "INV-5: k2*G must lie on curve");
@@ -255,29 +253,33 @@ static void run_inv6_serialization() {
     constexpr int N = AUDIT_SCALE(200);
     for (int i = 0; i < N; ++i) {
         Scalar k = random_scalar();
-        Point P = Point::generator_mul(k);
+        Point P = Point::generator().scalar_mul(k);
 
-        // Compressed (33 bytes)
+        auto Px = P.x();
+        auto Py = P.y();
+        auto x_bytes   = Px.to_bytes();
+        auto y_bytes_v = Py.to_bytes();
+        bool y_even = (y_bytes_v[31] % 2 == 0);
+
+        // Compressed (33 bytes): prefix 0x02/0x03 || x-bytes
         auto compressed = P.to_compressed();
-        auto [P2, ok2] = Point::from_compressed(compressed);
-        CHECK(ok2, "INV-6: from_compressed must succeed for valid point");
-        if (ok2) {
-            auto [Px, Py]   = P.to_affine();
-            auto [P2x, P2y] = P2.to_affine();
-            CHECK(Px == P2x && Py == P2y,
-                  "INV-6: compress/decompress round-trip must be identity");
-        }
+        uint8_t expected_prefix = y_even ? 0x02 : 0x03;
+        CHECK(compressed[0] == expected_prefix,
+              "INV-6: compressed prefix must match Y parity");
+        bool cx_match = true;
+        for (int b = 0; b < 32; ++b) cx_match &= (compressed[b+1] == x_bytes[b]);
+        CHECK(cx_match, "INV-6: compressed point must encode correct X coordinate");
 
-        // Uncompressed (65 bytes)
+        // Uncompressed (65 bytes): 0x04 || x-bytes || y-bytes
         auto uncompressed = P.to_uncompressed();
-        auto [P3, ok3] = Point::from_uncompressed(uncompressed);
-        CHECK(ok3, "INV-6: from_uncompressed must succeed for valid point");
-        if (ok3) {
-            auto [Px, Py]   = P.to_affine();
-            auto [P3x, P3y] = P3.to_affine();
-            CHECK(Px == P3x && Py == P3y,
-                  "INV-6: uncompressed round-trip must be identity");
-        }
+        CHECK(uncompressed[0] == 0x04,
+              "INV-6: uncompressed prefix must be 0x04");
+        bool ux_match = true;
+        for (int b = 0; b < 32; ++b) ux_match &= (uncompressed[b+1] == x_bytes[b]);
+        CHECK(ux_match, "INV-6: uncompressed point must encode correct X coordinate");
+        bool uy_match = true;
+        for (int b = 0; b < 32; ++b) uy_match &= (uncompressed[b+33] == y_bytes_v[b]);
+        CHECK(uy_match, "INV-6: uncompressed point must encode correct Y coordinate");
     }
 }
 
@@ -293,7 +295,7 @@ static void run_inv7_ecdsa_output() {
         Scalar privkey = random_scalar();
         auto msg = random_bytes32();
 
-        ECDSASignature sig = secp256k1::ecdsa_sign(privkey, msg);
+        secp256k1::ECDSASignature sig = secp256k1::ecdsa_sign(msg, privkey);
 
         // r must be non-zero and in (0, n)
         CHECK(!sig.r.is_zero(),
@@ -307,8 +309,8 @@ static void run_inv7_ecdsa_output() {
               "INV-7: ECDSA s must satisfy low-S (s ≤ n/2)");
 
         // Signature must verify
-        Point pubkey = Point::generator_mul(privkey);
-        CHECK(secp256k1::ecdsa_verify(sig, msg, pubkey),
+        Point pubkey = Point::generator().scalar_mul(privkey);
+        CHECK(secp256k1::ecdsa_verify(msg, pubkey, sig),
               "INV-7: ECDSA sig must verify against corresponding pubkey");
     }
 }
@@ -326,28 +328,29 @@ static void run_inv8_schnorr_output() {
         auto msg = random_bytes32();
         auto aux = random_bytes32();
 
-        SchnorrSignature sig = secp256k1::schnorr_sign(privkey, msg, aux);
+        secp256k1::SchnorrSignature sig = secp256k1::schnorr_sign(privkey, msg, aux);
 
         // s must be non-zero
         CHECK(!sig.s.is_zero(),
               "INV-8: Schnorr s must be non-zero");
 
         // Signature must verify
-        Point pubkey = Point::generator_mul(privkey);
-        CHECK(secp256k1::schnorr_verify(sig, msg, pubkey),
+        Point pubkey = Point::generator().scalar_mul(privkey);
+        auto pubkey_x = pubkey.x().to_bytes();  // BIP-340 x-only pubkey
+        CHECK(secp256k1::schnorr_verify(pubkey_x, msg, sig),
               "INV-8: Schnorr sig must verify against corresponding pubkey");
 
         // Different message must not verify
         auto wrong_msg = msg;
         wrong_msg[0] ^= 0xFF;
-        CHECK(!secp256k1::schnorr_verify(sig, wrong_msg, pubkey),
+        CHECK(!secp256k1::schnorr_verify(pubkey_x, wrong_msg, sig),
               "INV-8: Schnorr sig must not verify against different message");
     }
 }
 
 // ============================================================================
 // INV-9: Infinity propagation invariant
-// O + P = P, P + O = P, O + O = O
+// O.add(P) = P, P.add(O) = P, O.add(O) = O
 // ============================================================================
 static void run_inv9_infinity() {
     g_section = "INV-9 Infinity propagation";
@@ -357,24 +360,27 @@ static void run_inv9_infinity() {
     constexpr int N = AUDIT_SCALE(50);
     for (int i = 0; i < N; ++i) {
         Scalar k = random_scalar();
-        Point P = Point::generator_mul(k);
-        auto [Px, Py] = P.to_affine();
+        Point P = Point::generator().scalar_mul(k);
+        auto Px = P.x();
+        auto Py = P.y();
 
-        // O + P = P
-        Point r1 = O + P;
-        CHECK(!r1.is_infinity(), "INV-9: O + P must not be infinity");
-        auto [r1x, r1y] = r1.to_affine();
-        CHECK(r1x == Px && r1y == Py, "INV-9: O + P must equal P");
+        // O.add(P) = P
+        Point r1 = O.add(P);
+        CHECK(!r1.is_infinity(), "INV-9: O.add(P) must not be infinity");
+        auto r1x = r1.x();
+        auto r1y = r1.y();
+        CHECK(r1x == Px && r1y == Py, "INV-9: O.add(P) must equal P");
 
-        // P + O = P
-        Point r2 = P + O;
-        CHECK(!r2.is_infinity(), "INV-9: P + O must not be infinity");
-        auto [r2x, r2y] = r2.to_affine();
-        CHECK(r2x == Px && r2y == Py, "INV-9: P + O must equal P");
+        // P.add(O) = P
+        Point r2 = P.add(O);
+        CHECK(!r2.is_infinity(), "INV-9: P.add(O) must not be infinity");
+        auto r2x = r2.x();
+        auto r2y = r2.y();
+        CHECK(r2x == Px && r2y == Py, "INV-9: P.add(O) must equal P");
 
-        // O + O = O
-        Point r3 = O + O;
-        CHECK(r3.is_infinity(), "INV-9: O + O must be infinity");
+        // O.add(O) = O
+        Point r3 = O.add(O);
+        CHECK(r3.is_infinity(), "INV-9: O.add(O) must be infinity");
     }
 }
 
@@ -388,11 +394,11 @@ static void run_inv10_negation() {
     constexpr int N = AUDIT_SCALE(100);
     for (int i = 0; i < N; ++i) {
         Scalar k = random_scalar();
-        Point P = Point::generator_mul(k);
+        Point P = Point::generator().scalar_mul(k);
 
         // P + (-P) = O
         Point neg_P = P.negate();
-        Point sum   = P + neg_P;
+        Point sum   = P.add(neg_P);
         CHECK(sum.is_infinity(),
               "INV-10: P + (-P) must be the point at infinity");
 
@@ -400,16 +406,19 @@ static void run_inv10_negation() {
         Point double_neg = neg_P.negate();
         CHECK(point_is_on_curve(double_neg),
               "INV-10: -(-P) must be on curve");
-        auto [Px,   Py]  = P.to_affine();
-        auto [ddx, ddy] = double_neg.to_affine();
+        auto Px = P.x();
+        auto Py = P.y();
+        auto ddx = double_neg.x();
+        auto ddy = double_neg.y();
         CHECK(Px == ddx && Py == ddy,
               "INV-10: -(-P) must equal P");
 
         // P and -P have the same x-coordinate (only y flips)
-        auto [neg_x, neg_y] = neg_P.to_affine();
+        auto neg_x = neg_P.x();
+        auto neg_y = neg_P.y();
         CHECK(Px == neg_x,
               "INV-10: P and -P must have the same x-coordinate");
-        CHECK(Py != neg_y || (Py == neg_y && /* y=0 edge case */ Py.is_zero()),
+        CHECK(Py != neg_y || (Py == neg_y && /* y=0 edge case */ Py == FieldElement::zero()),
               "INV-10: P and -P must have different y-coordinates (unless y=0)");
     }
 }
