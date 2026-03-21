@@ -286,8 +286,9 @@ ecies_encrypt(const Point& recipient_pubkey,
               const std::uint8_t* plaintext, std::size_t plaintext_len) {
     // 33 (pubkey) + 16 (IV) + plaintext_len + 32 (HMAC) = 81 + plaintext_len
     if (recipient_pubkey.is_infinity() || !plaintext || plaintext_len == 0
-        || plaintext_len > SIZE_MAX - 81)
+        || plaintext_len > SIZE_MAX - 81) {
         return {};
+    }
 
     // 1. Generate ephemeral keypair
     std::uint8_t eph_bytes[32];

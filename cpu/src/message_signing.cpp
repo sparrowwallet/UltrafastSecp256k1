@@ -57,11 +57,12 @@ std::array<std::uint8_t, 32> bitcoin_message_hash(const std::uint8_t* msg,
     // Construct: prefix + varint(msg_len) + msg
     // Then double-SHA256 the result
     std::uint8_t varint_buf[9];
-    std::size_t varint_len = write_varint(varint_buf, msg_len);
+    const std::size_t varint_len = write_varint(varint_buf, msg_len);
 
     // Overflow guard: prefix(25) + varint(<=9) + msg_len
-    if (msg_len > SIZE_MAX - BITCOIN_MSG_PREFIX_LEN - 9)
+    if (msg_len > SIZE_MAX - BITCOIN_MSG_PREFIX_LEN - 9) {
         return {};
+    }
 
     // Total payload size
     const std::size_t total = BITCOIN_MSG_PREFIX_LEN + varint_len + msg_len;

@@ -278,7 +278,7 @@ Sponsorship helps sustain development of:
 | **Bitcoin Lightning** | `shrec@stacker.news` (any Lightning wallet) |
 | **PayPal** | [paypal.me/IChkheidze](https://paypal.me/IChkheidze) |
 | **Corporate / Foundation** | [payysoon@gmail.com](mailto:payysoon@gmail.com) |
-| **Discord** | [Join our server](https://discord.gg/sUmW7cc5) |
+| **Discord** | [Join our server](https://discord.gg/E4BK8SeMYU) |
 
 All sponsors will be acknowledged in the README, release notes, and project documentation.
 For corporate partnerships, audit co-funding, or grant applications -- please reach out via email.
