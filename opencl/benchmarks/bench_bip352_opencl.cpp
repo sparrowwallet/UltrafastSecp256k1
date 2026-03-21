@@ -37,7 +37,7 @@ using OclScalar = secp256k1::opencl::Scalar;
 
 namespace {
 
-constexpr int BENCH_N = 10000;
+constexpr int BENCH_N = 500000;
 constexpr int BENCH_WARMUP = 3;
 constexpr int BENCH_PASSES = 11;
 // Extra passes before autotuning to bring GPU from idle P-state to boost clock.
@@ -643,10 +643,11 @@ int main(int argc, char** argv) {
     std::printf("\n  OpenCL%s: %.1f ns/op (%.2f M/s)\n", use_lut ? " LUT" : "", ns_per_op, ops_per_sec / 1e6);
     std::printf("  validation prefix: 0x%016llx\n", static_cast<unsigned long long>(ocl_validation));
     // CUDA reference: bench_bip352 on RTX 5060 Ti (SM 12.0, 36 SMs).
-    // Measured with BENCH_CLOCK_WARMUP=15 pre-warmup fix, batch=500K.
-    // GLV tpb=256: 204.3 ns/op (4.89 M/s).  LUT tpb=128: 108.8 ns/op (9.19 M/s).
-    constexpr double CUDA_GLV_NS = 204.3;
-    constexpr double CUDA_LUT_NS = 108.8;
+    // Measured with BENCH_CLOCK_WARMUP=15, batch=500K, CUDA_SEPARABLE_COMPILATION=OFF,
+    // unchecked ops in all scalar mul inner loops (commits 9bfe1b21, 806b1602).
+    // GLV tpb=384: 179.1 ns/op (5.58 M/s).  LUT tpb=384: 95.2 ns/op (10.50 M/s).
+    constexpr double CUDA_GLV_NS = 179.1;
+    constexpr double CUDA_LUT_NS = 95.2;
     double cuda_ref = use_lut ? CUDA_LUT_NS : CUDA_GLV_NS;
     std::printf("  CUDA reference:    %.1f ns/op (%.2f M/s) [%s]\n",
                 cuda_ref, 1e9 / cuda_ref / 1e6, use_lut ? "LUT" : "GLV");

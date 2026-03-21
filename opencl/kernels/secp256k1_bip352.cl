@@ -94,9 +94,11 @@ inline void scalar_mul_glv_predecomp_impl(
     // Shamir interleaved double-and-add with mixed (J+A) additions.
     // wNAF digits are read directly from __constant memory (precomputed on CPU host),
     // eliminating the GPU scalar_to_wnaf call and 1040 bytes of private stack.
+    // Unchecked variants: r->infinity is guarded by the if(!point_is_infinity)
+    // check above each call, mirroring the OpenCL fc378bdc optimization.
     point_set_infinity(r);
     for (int i = 129; i >= 0; --i) {
-        if (!point_is_infinity(r)) point_double_impl(r, r);
+        if (!point_is_infinity(r)) point_double_unchecked(r, r);
 
         int d1 = (int)scan->wnaf1[i];
         if (d1 != 0) {
@@ -104,7 +106,7 @@ inline void scalar_mul_glv_predecomp_impl(
             AffinePoint pt = table[idx];
             if (d1 < 0) field_negate_impl(&pt.y, &pt.y);
             if (point_is_infinity(r)) { point_from_affine(r, &pt); }
-            else { point_add_mixed_impl(r, r, &pt); }
+            else { point_add_mixed_unchecked(r, r, &pt); }
         }
 
         int d2 = (int)scan->wnaf2[i];
@@ -113,7 +115,7 @@ inline void scalar_mul_glv_predecomp_impl(
             AffinePoint pt = endo_table[idx];
             if (d2 < 0) field_negate_impl(&pt.y, &pt.y);
             if (point_is_infinity(r)) { point_from_affine(r, &pt); }
-            else { point_add_mixed_impl(r, r, &pt); }
+            else { point_add_mixed_unchecked(r, r, &pt); }
         }
     }
 
