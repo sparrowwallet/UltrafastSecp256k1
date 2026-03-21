@@ -12,7 +12,9 @@ Benchmark results for UltrafastSecp256k1 across all supported platforms.
 | x86-64 (Clang 21, Win) | 17 ns (5x52) | 5 us | 25 us | -- | -- | -- |
 | RISC-V 64 (SiFive U74, Clang 21) | 176 ns | 40.2 us | 150.5 us | **181.8 us** | -- | **1.13x** |
 | ARM64 (RK3588, A76) | 74 ns | 14 us | 131 us | -- | -- | -- |
-| ESP32-S3 (LX7, 240 MHz) | 7,458 ns | 2,483 us | -- | -- | -- | -- |
+| ESP32-S3 (LX7, 240 MHz) | 5,910 ns | 6,134 us | 12,752 us | 18,670 us | -- | **1.70×** verify |
+| ESP32-P4 (RV32, 360 MHz) | 2,424 ns | 2,253 us | 5,256 us | 7,528 us | -- | **1.01×** verify |
+| ESP32-C6 (RV32, 160 MHz) | 5,974 ns | 5,483 us | 12,682 us | 18,957 us | -- | 1.67× sign |
 | ESP32 (LX6, 240 MHz) | 6,993 ns | 6,203 us | -- | -- | -- | -- |
 | STM32F103 (CM3, 72 MHz) | 15,331 ns | 37,982 us | -- | -- | -- | -- |
 | CUDA (RTX 5060 Ti) | 0.2 ns | 217.7 ns | 225.8 ns | -- | **263.7 ns** | -- |
@@ -381,19 +383,88 @@ ARM64 10x26 representation with MUL/UMULH assembly provides optimal field arithm
 
 ## ESP32-S3 Benchmarks (Embedded)
 
-**Hardware:** ESP32-S3 (Xtensa LX7 Dual Core @ 240 MHz)  
-**OS:** ESP-IDF v5.5.1  
-**Assembly:** None (portable C++, no `__int128`)
+**Hardware:** ESP32-S3 (Xtensa LX7 Dual Core @ 240 MHz), rev 0.1  
+**OS:** ESP-IDF v5.4, GCC 14.2.0  
+**Field:** 4×64 (native 64-bit mul wins on LX7)  
+**Measured:** 2026-03-21, median of 3 runs
 
-| Operation | Time | Notes |
-|-----------|------|-------|
-| Field Mul | 7,458 ns | |
-| Field Square | 7,592 ns | |
-| Field Add | 636 ns | |
-| Field Inv | 844 us | |
-| Scalar x G | 2,483 us | Generator mul |
+| Operation | Time | ops/sec | vs libsecp |
+|-----------|-----:|--------:|-----------:|
+| field_mul | 5,910 ns | 169 k/s | — |
+| field_sqr | 4,848 ns | 206 k/s | — |
+| field_add | 572 ns | 1.75 M/s | — |
+| field_inv | 130.2 µs | 7.7 k/s | — |
+| pubkey_create (k×G) | 6,134 µs | 163/s | **1.18×** |
+| k×P (arbitrary) | 12,752 µs | 78/s | — |
+| a×G + b×P (Shamir) | 18,296 µs | 55/s | — |
+| point_add | 479 µs | 2.1 k/s | — |
+| point_dbl | 330 µs | 3.0 k/s | — |
+| ecdsa_sign | 7,443 µs | 134/s | **1.27×** |
+| ecdsa_verify | 18,670 µs | 54/s | **1.70×** |
+| schnorr_sign (keypair) | 6,467 µs | 155/s | **1.45×** |
+| schnorr_verify | 19,947 µs | 50/s | **1.62×** |
+| ct::ecdsa_sign | 13,742 µs | 73/s | 0.69× |
+| ct::schnorr_sign | 7,574 µs | 132/s | **1.23×** |
 
-All 35 library self-tests pass.
+All integrity checks pass. libsecp256k1 v0.7.2 compared on same hardware.
+
+---
+
+## ESP32-P4 Benchmarks (Embedded)
+
+**Hardware:** ESP32-P4 (RISC-V RV32IMAC Dual HP Core @ 360 MHz), rev 1.3  
+**OS:** ESP-IDF v5.4, GCC 14.2.0  
+**Field:** 10×26 (32-bit native)  
+**Measured:** 2026-03-21, median of 3 runs
+
+| Operation | Time | ops/sec | vs libsecp |
+|-----------|-----:|--------:|-----------:|
+| field_mul | 2,424 ns | 413 k/s | — |
+| field_sqr | 2,218 ns | 451 k/s | — |
+| field_add | 318 ns | 3.14 M/s | — |
+| field_inv | 73.1 µs | 13.7 k/s | — |
+| pubkey_create (k×G) | 2,253 µs | 444/s | 0.94× |
+| k×P (arbitrary) | 5,256 µs | 190/s | — |
+| a×G + b×P (Shamir) | 7,550 µs | 132/s | — |
+| point_add | 128.8 µs | 7.8 k/s | — |
+| point_dbl | 103.6 µs | 9.7 k/s | — |
+| ecdsa_sign | 2,588 µs | 386/s | 0.97× |
+| ecdsa_verify | 7,528 µs | 133/s | 0.99× |
+| schnorr_sign (keypair) | 2,293 µs | 436/s | 0.96× |
+| schnorr_verify | 8,052 µs | 124/s | 0.93× |
+| ct::ecdsa_sign | 5,680 µs | 176/s | 0.44× |
+| ct::schnorr_sign | 2,528 µs | 396/s | **1.10×** |
+
+All integrity checks pass. Note: FAST path is at near-parity with libsecp on P4  
+(P4 RISC-V microarch lacks the wide multiply throughput of Xtensa LX7).
+
+---
+
+## ESP32-C6 Benchmarks (Embedded)
+
+**Hardware:** ESP32-C6 (RISC-V RV32IMAC Single Core @ 160 MHz), rev 0.2  
+**OS:** ESP-IDF v5.4, GCC 14.2.0  
+**Field:** 10×26 (32-bit native)  
+**Measured:** 2026-03-21, median of 3 runs
+
+| Operation | Time | ops/sec | vs libsecp |
+|-----------|-----:|--------:|-----------:|
+| field_mul | 5,974 ns | 167 k/s | — |
+| field_sqr | 5,328 ns | 188 k/s | — |
+| field_add | 784 ns | 1.28 M/s | — |
+| field_inv | 171.1 µs | 5.8 k/s | — |
+| pubkey_create (k×G) | 5,483 µs | 182/s | **1.70×** |
+| k×P (arbitrary) | 12,682 µs | 79/s | — |
+| point_add | 296.5 µs | 3.4 k/s | — |
+| point_dbl | 238.1 µs | 4.2 k/s | — |
+| ecdsa_sign | 7,464 µs | 134/s | **1.67×** |
+| ecdsa_verify | 18,957 µs | 53/s | 0.98× |
+| schnorr_sign (keypair) | 5,855 µs | 171/s | **2.01×** |
+| schnorr_verify | 20,278 µs | 49/s | 1.03× |
+| ct::ecdsa_sign | 15,522 µs | 64/s | 0.80× |
+| ct::schnorr_sign | 6,782 µs | 147/s | **1.73×** |
+
+All integrity checks pass.
 
 ---
 
@@ -439,14 +510,18 @@ All 35 library self-tests pass.
 
 ## Embedded Cross-Platform Comparison
 
-| Operation | ESP32-S3 (LX7) | ESP32 (LX6) | STM32F103 (M3) |
-|-----------|:--------------:|:-----------:|:-------------:|
-| | 240 MHz | 240 MHz | 72 MHz |
-| Field Mul | 7,458 ns | 6,993 ns | 15,331 ns |
-| Field Square | 7,592 ns | 6,247 ns | 12,083 ns |
-| Field Add | 636 ns | 985 ns | 4,139 ns |
-| Field Inv | 844 us | 609 us | 1,645 us |
-| Scalar x G | 2,483 us | 6,203 us | 37,982 us |
+| Operation | ESP32-S3 (LX7) | ESP32-P4 (RV32) | ESP32-C6 (RV32) | ESP32 (LX6) | STM32F103 (M3) |
+|-----------|:--------------:|:---------------:|:---------------:|:-----------:|:-------------:|
+| | 240 MHz | 360 MHz | 160 MHz | 240 MHz | 72 MHz |
+| Field Mul | 5,910 ns | 2,424 ns | 5,974 ns | 6,993 ns | 15,331 ns |
+| Field Square | 4,848 ns | 2,218 ns | 5,328 ns | 6,247 ns | 12,083 ns |
+| Field Add | 572 ns | 318 ns | 784 ns | 985 ns | 4,139 ns |
+| Field Inv | 130 µs | 73 µs | 171 µs | 609 µs | 1,645 µs |
+| k×G (pubkey) | 6,134 µs | 2,253 µs | 5,483 µs | 6,203 µs | 37,982 µs |
+| ECDSA sign | 7,443 µs | 2,588 µs | 7,464 µs | — | — |
+| ECDSA verify | 18,670 µs | 7,528 µs | 18,957 µs | — | — |
+| Schnorr verify | 19,947 µs | 8,052 µs | 20,278 µs | — | — |
+| vs libsecp (verify) | **1.70×** | 0.99× | 0.98× | — | — |
 
 ---
 
