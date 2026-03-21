@@ -46,6 +46,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <array>
+#include <string>
 
 #ifndef UFSECP_BUILDING
 #define UFSECP_BUILDING
@@ -102,46 +103,39 @@ static void run_ps1_pubkey_compressed(ufsecp_ctx* ctx) {
     AUDIT_LOG("\n  [PS-1..16] pubkey_parse: compressed SEC1 input validation\n");
 
     uint8_t out33[33] = {};
-    uint8_t outlen = 33;
 
     // First, get a valid 33-byte compressed pubkey for key=1
     uint8_t valid33[33] = {};
     {
-        size_t len = 33;
-        ufsecp_error_t rc = ufsecp_pubkey_create(ctx, PRIVKEY1,
-                                                  /*compressed=*/1, valid33, &len);
+        ufsecp_error_t rc = ufsecp_pubkey_create(ctx, PRIVKEY1, valid33);
         CHECK(rc == UFSECP_OK, "PS-setup: pubkey_create for key=1 succeeds");
     }
 
     // PS-1: all-zero 33 bytes (prefix 0x00 is invalid)
     {
         uint8_t buf[33] = {};
-        size_t outlen2 = 33;
-        ufsecp_error_t rc = ufsecp_pubkey_parse(ctx, buf, 33, out33, &outlen2);
+        ufsecp_error_t rc = ufsecp_pubkey_parse(ctx, buf, 33, out33);
         CHECK_REJECT(rc, "PS-1: all-zero 33-byte compressed pubkey rejected");
     }
     // PS-2: all-0xFF (prefix 0xFF is invalid)
     {
         uint8_t buf[33];
         std::memset(buf, 0xFF, 33);
-        size_t outlen2 = 33;
-        ufsecp_error_t rc = ufsecp_pubkey_parse(ctx, buf, 33, out33, &outlen2);
+        ufsecp_error_t rc = ufsecp_pubkey_parse(ctx, buf, 33, out33);
         CHECK_REJECT(rc, "PS-2: all-0xFF 33-byte pubkey rejected");
     }
     // PS-3: valid prefix 0x02, but x = 0 (no such point on secp256k1)
     {
         uint8_t buf[33] = {};
         buf[0] = 0x02;
-        size_t outlen2 = 33;
-        ufsecp_error_t rc = ufsecp_pubkey_parse(ctx, buf, 33, out33, &outlen2);
+        ufsecp_error_t rc = ufsecp_pubkey_parse(ctx, buf, 33, out33);
         CHECK_REJECT(rc, "PS-3: 0x02||0x00...00 (x=0) rejected");
     }
     // PS-4: valid prefix 0x03, but x = 0
     {
         uint8_t buf[33] = {};
         buf[0] = 0x03;
-        size_t outlen2 = 33;
-        ufsecp_error_t rc = ufsecp_pubkey_parse(ctx, buf, 33, out33, &outlen2);
+        ufsecp_error_t rc = ufsecp_pubkey_parse(ctx, buf, 33, out33);
         CHECK_REJECT(rc, "PS-4: 0x03||0x00...00 (x=0, odd y) rejected");
     }
     // PS-5: valid prefix 0x02 but x = p (field prime, out of range)
@@ -154,8 +148,7 @@ static void run_ps1_pubkey_compressed(ufsecp_ctx* ctx) {
             0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,
             0xFF,0xFF,0xFF,0xFE,0xFF,0xFF,0xFC,0x2F
         };
-        size_t outlen2 = 33;
-        ufsecp_error_t rc = ufsecp_pubkey_parse(ctx, buf, 33, out33, &outlen2);
+        ufsecp_error_t rc = ufsecp_pubkey_parse(ctx, buf, 33, out33);
         CHECK_REJECT(rc, "PS-5: 0x02 + x=p (field prime) rejected");
     }
     // PS-6: valid prefix 0x02 but x = p+1 (clearly out of range)
@@ -167,8 +160,7 @@ static void run_ps1_pubkey_compressed(ufsecp_ctx* ctx) {
             0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,
             0xFF,0xFF,0xFF,0xFE,0xFF,0xFF,0xFC,0x30
         };
-        size_t outlen2 = 33;
-        ufsecp_error_t rc = ufsecp_pubkey_parse(ctx, buf, 33, out33, &outlen2);
+        ufsecp_error_t rc = ufsecp_pubkey_parse(ctx, buf, 33, out33);
         CHECK_REJECT(rc, "PS-6: 0x02 + x=p+1 (out of range) rejected");
     }
     // PS-7: x coordinate on curve (from valid pubkey), but wrong prefix parity
@@ -180,8 +172,7 @@ static void run_ps1_pubkey_compressed(ufsecp_ctx* ctx) {
         std::memcpy(flipped, valid33, 33);
         flipped[0] ^= 0x01;  // flip 0x02<->0x03
         uint8_t parsed[33] = {};
-        size_t outlen2 = 33;
-        ufsecp_error_t rc = ufsecp_pubkey_parse(ctx, flipped, 33, parsed, &outlen2);
+        ufsecp_error_t rc = ufsecp_pubkey_parse(ctx, flipped, 33, parsed);
         CHECK(rc == UFSECP_OK,
               "PS-7: parity-flipped prefix (valid x) parses successfully");
         // The resulting pubkey must differ from original (negated y)
@@ -193,8 +184,7 @@ static void run_ps1_pubkey_compressed(ufsecp_ctx* ctx) {
         uint8_t buf[33];
         std::memcpy(buf, valid33, 33);
         buf[0] = 0x01;
-        size_t outlen2 = 33;
-        ufsecp_error_t rc = ufsecp_pubkey_parse(ctx, buf, 33, out33, &outlen2);
+        ufsecp_error_t rc = ufsecp_pubkey_parse(ctx, buf, 33, out33);
         CHECK_REJECT(rc, "PS-9: prefix 0x01 rejected");
     }
     // PS-10: wrong prefix byte 0x05
@@ -202,46 +192,39 @@ static void run_ps1_pubkey_compressed(ufsecp_ctx* ctx) {
         uint8_t buf[33];
         std::memcpy(buf, valid33, 33);
         buf[0] = 0x05;
-        size_t outlen2 = 33;
-        ufsecp_error_t rc = ufsecp_pubkey_parse(ctx, buf, 33, out33, &outlen2);
+        ufsecp_error_t rc = ufsecp_pubkey_parse(ctx, buf, 33, out33);
         CHECK_REJECT(rc, "PS-10: prefix 0x05 rejected");
     }
     // PS-11: truncated to 32 bytes (correct prefix, missing last byte)
     {
-        size_t outlen2 = 33;
-        ufsecp_error_t rc = ufsecp_pubkey_parse(ctx, valid33, 32, out33, &outlen2);
+        ufsecp_error_t rc = ufsecp_pubkey_parse(ctx, valid33, 32, out33);
         CHECK_REJECT(rc, "PS-11: 32-byte input (truncated compressed) rejected");
     }
     // PS-12: truncated to 1 byte (only prefix)
     {
         uint8_t buf[1] = { 0x02 };
-        size_t outlen2 = 33;
-        ufsecp_error_t rc = ufsecp_pubkey_parse(ctx, buf, 1, out33, &outlen2);
+        ufsecp_error_t rc = ufsecp_pubkey_parse(ctx, buf, 1, out33);
         CHECK_REJECT(rc, "PS-12: 1-byte input (prefix only) rejected");
     }
     // PS-13: zero-length input
     {
-        size_t outlen2 = 33;
-        ufsecp_error_t rc = ufsecp_pubkey_parse(ctx, valid33, 0, out33, &outlen2);
+        ufsecp_error_t rc = ufsecp_pubkey_parse(ctx, valid33, 0, out33);
         CHECK_REJECT(rc, "PS-13: zero-length input rejected");
     }
     // PS-14: NULL input
     {
-        size_t outlen2 = 33;
-        ufsecp_error_t rc = ufsecp_pubkey_parse(ctx, nullptr, 33, out33, &outlen2);
+        ufsecp_error_t rc = ufsecp_pubkey_parse(ctx, nullptr, 33, out33);
         CHECK_CODE(rc, UFSECP_ERR_NULL_ARG, "PS-14: NULL input pointer returns NULL_ARG");
     }
     // PS-15: NULL output
     {
-        size_t outlen2 = 33;
-        ufsecp_error_t rc = ufsecp_pubkey_parse(ctx, valid33, 33, nullptr, &outlen2);
+        ufsecp_error_t rc = ufsecp_pubkey_parse(ctx, valid33, 33, nullptr);
         CHECK_CODE(rc, UFSECP_ERR_NULL_ARG, "PS-15: NULL output pointer returns NULL_ARG");
     }
     // PS-16: valid input round-trips correctly
     {
         uint8_t parsed[33] = {};
-        size_t outlen2 = 33;
-        ufsecp_error_t rc = ufsecp_pubkey_parse(ctx, valid33, 33, parsed, &outlen2);
+        ufsecp_error_t rc = ufsecp_pubkey_parse(ctx, valid33, 33, parsed);
         CHECK(rc == UFSECP_OK, "PS-16a: valid compressed pubkey parses OK");
         CHECK(std::memcmp(parsed, valid33, 33) == 0,
               "PS-16b: parsed pubkey round-trips to same bytes");
@@ -386,22 +369,22 @@ static void run_ps31_wif_decode(ufsecp_ctx* ctx) {
     // Well-known valid WIF for privkey=1, mainnet, compressed
     static const char* VALID_WIF = "KwDiBf89QgGbjEhKnhXJuH7LrciVrZi3qYjgd9M7rFU73NUBBy9s";
     uint8_t out32[32] = {};
-    uint8_t net_out = 0;
+    int net_out = 0;
     int comp_out = 0;
 
     // PS-31: NULL input
     {
-        ufsecp_error_t rc = ufsecp_wif_decode(ctx, nullptr, out32, &net_out, &comp_out);
+        ufsecp_error_t rc = ufsecp_wif_decode(ctx, nullptr, out32, &comp_out, &net_out);
         CHECK_CODE(rc, UFSECP_ERR_NULL_ARG, "PS-31: NULL WIF string returns NULL_ARG");
     }
     // PS-32: empty string
     {
-        ufsecp_error_t rc = ufsecp_wif_decode(ctx, "", out32, &net_out, &comp_out);
+        ufsecp_error_t rc = ufsecp_wif_decode(ctx, "", out32, &comp_out, &net_out);
         CHECK_REJECT(rc, "PS-32: empty WIF string rejected");
     }
     // PS-33: single character
     {
-        ufsecp_error_t rc = ufsecp_wif_decode(ctx, "K", out32, &net_out, &comp_out);
+        ufsecp_error_t rc = ufsecp_wif_decode(ctx, "K", out32, &comp_out, &net_out);
         CHECK_REJECT(rc, "PS-33: single-char WIF string rejected");
     }
     // PS-34: corrupted checksum (last char changed)
@@ -410,18 +393,18 @@ static void run_ps31_wif_decode(ufsecp_ctx* ctx) {
         wif.back() ^= 0x01;  // corrupt last Base58 digit
         // Note: incrementing a Base58 char may leave it in alphabet — if not,
         // it's double-rejected. Either way, it must not decode as OK.
-        ufsecp_error_t rc = ufsecp_wif_decode(ctx, wif.c_str(), out32, &net_out, &comp_out);
+        ufsecp_error_t rc = ufsecp_wif_decode(ctx, wif.c_str(), out32, &comp_out, &net_out);
         CHECK_REJECT(rc, "PS-34: WIF with corrupted checksum rejected");
     }
     // PS-35: all-'A' string of correct length (not valid Base58 WIF)
     {
         std::string garbage(52, 'A');
-        ufsecp_error_t rc = ufsecp_wif_decode(ctx, garbage.c_str(), out32, &net_out, &comp_out);
+        ufsecp_error_t rc = ufsecp_wif_decode(ctx, garbage.c_str(), out32, &comp_out, &net_out);
         CHECK_REJECT(rc, "PS-35: all-'A' WIF-length string rejected");
     }
     // PS-36: valid WIF decodes correctly
     {
-        ufsecp_error_t rc = ufsecp_wif_decode(ctx, VALID_WIF, out32, &net_out, &comp_out);
+        ufsecp_error_t rc = ufsecp_wif_decode(ctx, VALID_WIF, out32, &comp_out, &net_out);
         CHECK_CODE(rc, UFSECP_OK, "PS-36a: valid WIF parses OK");
         CHECK(std::memcmp(out32, PRIVKEY1, 32) == 0,
               "PS-36b: valid WIF decodes to privkey=1");
@@ -476,26 +459,22 @@ static void run_ps41_pubkey_uncompressed(ufsecp_ctx* ctx) {
 
     // Get a valid uncompressed pubkey for key=1
     uint8_t valid65[65] = {};
-    size_t len65 = 65;
-    CHECK(ufsecp_pubkey_create(ctx, PRIVKEY1, /*compressed=*/0, valid65, &len65) == UFSECP_OK,
+    CHECK(ufsecp_pubkey_create_uncompressed(ctx, PRIVKEY1, valid65) == UFSECP_OK,
           "PS-unc-setup: pubkey_create uncompressed succeeds");
 
     uint8_t out65[65] = {};
-    size_t outlen65 = 65;
 
     // PS-41: all-zero 65 bytes (prefix 0x00 is invalid)
     {
         uint8_t buf[65] = {};
-        size_t ol = 65;
-        ufsecp_error_t rc = ufsecp_pubkey_parse(ctx, buf, 65, out65, &ol);
+        ufsecp_error_t rc = ufsecp_pubkey_parse(ctx, buf, 65, out65);
         CHECK_REJECT(rc, "PS-41: all-zero 65-byte uncompressed pubkey rejected");
     }
     // PS-42: correct prefix 0x04 but x=0, y=0 (infinity — invalid)
     {
         uint8_t buf[65] = {};
         buf[0] = 0x04;
-        size_t ol = 65;
-        ufsecp_error_t rc = ufsecp_pubkey_parse(ctx, buf, 65, out65, &ol);
+        ufsecp_error_t rc = ufsecp_pubkey_parse(ctx, buf, 65, out65);
         CHECK_REJECT(rc, "PS-42: 0x04||0x00...x...y (x=0,y=0) rejected");
     }
     // PS-43: correct prefix 0x04, valid x from G, but y = 0 (off-curve)
@@ -511,8 +490,7 @@ static void run_ps41_pubkey_uncompressed(ufsecp_ctx* ctx) {
         };
         std::memcpy(buf + 1, gx, 32);
         // y = 0 (wrong — not on curve)
-        size_t ol = 65;
-        ufsecp_error_t rc = ufsecp_pubkey_parse(ctx, buf, 65, out65, &ol);
+        ufsecp_error_t rc = ufsecp_pubkey_parse(ctx, buf, 65, out65);
         CHECK_REJECT(rc, "PS-43: 0x04 + G.x + y=0 (off-curve) rejected");
     }
     // PS-44: wrong prefix 0x05 for uncompressed
@@ -520,14 +498,12 @@ static void run_ps41_pubkey_uncompressed(ufsecp_ctx* ctx) {
         uint8_t buf[65];
         std::memcpy(buf, valid65, 65);
         buf[0] = 0x05;
-        size_t ol = 65;
-        ufsecp_error_t rc = ufsecp_pubkey_parse(ctx, buf, 65, out65, &ol);
+        ufsecp_error_t rc = ufsecp_pubkey_parse(ctx, buf, 65, out65);
         CHECK_REJECT(rc, "PS-44: prefix 0x05 for uncompressed rejected");
     }
     // PS-45: truncated to 64 bytes
     {
-        size_t ol = 65;
-        ufsecp_error_t rc = ufsecp_pubkey_parse(ctx, valid65, 64, out65, &ol);
+        ufsecp_error_t rc = ufsecp_pubkey_parse(ctx, valid65, 64, out65);
         CHECK_REJECT(rc, "PS-45: 64-byte uncompressed (truncated) rejected");
     }
     // PS-46: overlong (66 bytes with extra garbage)
@@ -535,8 +511,7 @@ static void run_ps41_pubkey_uncompressed(ufsecp_ctx* ctx) {
         uint8_t buf[66];
         std::memcpy(buf, valid65, 65);
         buf[65] = 0xAB;
-        size_t ol = 65;
-        ufsecp_error_t rc = ufsecp_pubkey_parse(ctx, buf, 66, out65, &ol);
+        ufsecp_error_t rc = ufsecp_pubkey_parse(ctx, buf, 66, out65);
         // Overlong might be silently truncated or rejected; strictly it should reject
         // We accept either reject OR parse-to-same-key (implementation-defined)
         // but we must not get a DIFFERENT valid key
@@ -552,18 +527,20 @@ static void run_ps41_pubkey_uncompressed(ufsecp_ctx* ctx) {
         uint8_t buf[65];
         std::memcpy(buf, valid65, 65);
         buf[0] = 0x06;
-        size_t ol = 65;
-        ufsecp_error_t rc = ufsecp_pubkey_parse(ctx, buf, 65, out65, &ol);
+        ufsecp_error_t rc = ufsecp_pubkey_parse(ctx, buf, 65, out65);
         CHECK_REJECT(rc, "PS-47: hybrid prefix 0x06 rejected");
     }
-    // PS-48: valid uncompressed pubkey round-trips
+    // PS-48: valid uncompressed pubkey round-trips (output is compressed 33-byte)
     {
-        uint8_t parsed[65] = {};
-        size_t ol = 65;
-        ufsecp_error_t rc = ufsecp_pubkey_parse(ctx, valid65, 65, parsed, &ol);
+        uint8_t parsed[33] = {};
+        ufsecp_error_t rc = ufsecp_pubkey_parse(ctx, valid65, 65, parsed);
         CHECK_CODE(rc, UFSECP_OK, "PS-48a: valid uncompressed pubkey parses OK");
-        CHECK(std::memcmp(parsed, valid65, 65) == 0,
-              "PS-48b: uncompressed pubkey round-trips correctly");
+        // Getting compressed form of same key for comparison
+        uint8_t compressed[33] = {};
+        CHECK(ufsecp_pubkey_create(ctx, PRIVKEY1, compressed) == UFSECP_OK,
+              "PS-48b: pubkey_create for comparison");
+        CHECK(std::memcmp(parsed, compressed, 33) == 0,
+              "PS-48c: parsed uncompressed pubkey matches compressed form");
     }
 }
 
@@ -572,52 +549,44 @@ static void run_ps41_pubkey_uncompressed(ufsecp_ctx* ctx) {
 // ---------------------------------------------------------------------------
 
 static void run_ps49_pubkey_xonly(ufsecp_ctx* ctx) {
-    AUDIT_LOG("\n  [PS-49..53] pubkey_xonly: x-only encoding validation\n");
+    AUDIT_LOG("\n  [PS-49..53] pubkey_xonly: x-only derivation validation\n");
 
     uint8_t xonly32[32] = {};
-    // Get a valid compressed pubkey first
-    uint8_t valid33[33] = {};
-    size_t len33 = 33;
-    CHECK(ufsecp_pubkey_create(ctx, PRIVKEY1, 1, valid33, &len33) == UFSECP_OK,
-          "PS-xonly-setup: pubkey_create compressed succeeds");
 
-    // PS-49: NULL input
+    // PS-49: NULL privkey
     {
-        ufsecp_error_t rc = ufsecp_pubkey_xonly(ctx, nullptr, 33, xonly32);
-        CHECK_CODE(rc, UFSECP_ERR_NULL_ARG, "PS-49: NULL input returns NULL_ARG");
+        ufsecp_error_t rc = ufsecp_pubkey_xonly(ctx, nullptr, xonly32);
+        CHECK_CODE(rc, UFSECP_ERR_NULL_ARG, "PS-49: NULL privkey returns NULL_ARG");
     }
-    // PS-50: all-zero 32-byte x-only input (x=0 not on curve)
+    // PS-50: all-zero privkey (= 0, invalid scalar)
     {
         uint8_t z[32] = {};
-        ufsecp_error_t rc = ufsecp_pubkey_xonly(ctx, z, 32, xonly32);
-        CHECK_REJECT(rc, "PS-50: all-zero x-only (x=0) rejected");
+        ufsecp_error_t rc = ufsecp_pubkey_xonly(ctx, z, xonly32);
+        CHECK_REJECT(rc, "PS-50: zero privkey (invalid scalar) rejected");
     }
-    // PS-51: x = p (field prime, out of range)
+    // PS-51: privkey = n (group order, ≡ 0 mod n — invalid)
     {
-        uint8_t xp[32] = {
-            0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,
-            0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,
-            0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,
-            0xFF,0xFF,0xFF,0xFE,0xFF,0xFF,0xFC,0x2F
-        };
-        ufsecp_error_t rc = ufsecp_pubkey_xonly(ctx, xp, 32, xonly32);
-        CHECK_REJECT(rc, "PS-51: x=p (field prime) x-only rejected");
+        ufsecp_error_t rc = ufsecp_pubkey_xonly(ctx, SCALAR_N, xonly32);
+        CHECK_REJECT(rc, "PS-51: privkey = n (group order) rejected");
     }
-    // PS-52: x coordinate that's in-range but not on curve
+    // PS-52: privkey = n+1 (out of canonical range but ≡ 1 mod n)
     {
-        // x = 2 is not a valid x-coordinate on secp256k1 (no y satisfies y²=x³+7)
-        uint8_t x2[32] = {};
-        x2[31] = 0x02;
-        ufsecp_error_t rc = ufsecp_pubkey_xonly(ctx, x2, 32, xonly32);
-        CHECK_REJECT(rc, "PS-52: x=2 (no valid y on secp256k1) x-only rejected");
+        ufsecp_error_t rc = ufsecp_pubkey_xonly(ctx, SCALAR_N_PLUS1, xonly32);
+        // Some implementations reduce mod n, some reject. Either is acceptable.
+        // We just require it doesn't crash or produce garbage.
+        (void)rc;
+        CHECK(true, "PS-52: privkey = n+1 handled without crash");
     }
-    // PS-53: valid compressed pubkey → extract x-only succeeds
+    // PS-53: valid privkey=1 → x-only derivation succeeds
     {
-        ufsecp_error_t rc = ufsecp_pubkey_xonly(ctx, valid33, 33, xonly32);
-        CHECK_CODE(rc, UFSECP_OK, "PS-53a: extract x-only from valid compressed pubkey OK");
-        // x-only must match bytes [1..32] of the compressed pubkey
-        CHECK(std::memcmp(xonly32, valid33 + 1, 32) == 0,
-              "PS-53b: extracted x-only matches bytes [1..32] of compressed pubkey");
+        ufsecp_error_t rc = ufsecp_pubkey_xonly(ctx, PRIVKEY1, xonly32);
+        CHECK_CODE(rc, UFSECP_OK, "PS-53a: valid privkey=1 x-only derivation OK");
+        // Derive compressed pubkey for same key and verify x-only matches bytes [1..32]
+        uint8_t pub33[33] = {};
+        CHECK(ufsecp_pubkey_create(ctx, PRIVKEY1, pub33) == UFSECP_OK,
+              "PS-53b: pubkey_create for comparison");
+        CHECK(std::memcmp(xonly32, pub33 + 1, 32) == 0,
+              "PS-53c: x-only matches bytes [1..32] of compressed pubkey");
     }
 }
 

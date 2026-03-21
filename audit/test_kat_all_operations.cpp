@@ -527,7 +527,8 @@ static void run_kat35_ecdh_ext(ufsecp_ctx* ctx) {
         0,0,0,0,0,0,0,0, 0,0,0,0,0,0,0,13
     };
 
-    uint8_t pub3[33]={}, pub5[33]={}, pub11[33]={}, pub13[33]={};
+    uint8_t pub2[33]={}, pub3[33]={}, pub5[33]={}, pub11[33]={}, pub13[33]={};
+    CHECK_OK(ufsecp_pubkey_create(ctx, KEY2, pub2), "KAT-35-setup: pubkey(2)");
     CHECK_OK(ufsecp_pubkey_create(ctx, KEY3, pub3), "KAT-35-setup: pubkey(3)");
     CHECK_OK(ufsecp_pubkey_create(ctx, KEY5, pub5), "KAT-35-setup: pubkey(5)");
     CHECK_OK(ufsecp_pubkey_create(ctx, KEY11, pub11), "KAT-35-setup: pubkey(11)");
