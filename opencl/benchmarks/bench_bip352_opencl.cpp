@@ -642,10 +642,11 @@ int main(int argc, char** argv) {
 
     std::printf("\n  OpenCL%s: %.1f ns/op (%.2f M/s)\n", use_lut ? " LUT" : "", ns_per_op, ops_per_sec / 1e6);
     std::printf("  validation prefix: 0x%016llx\n", static_cast<unsigned long long>(ocl_validation));
-    // CUDA reference: bench_bip352 on RTX 5060 Ti (SM 12.0, 36 SMs, 384 tpb).
-    // GLV (no LUT): 260.4 ns/op (3.84 M/s).  LUT: 127.2 ns/op (7.86 M/s).
-    constexpr double CUDA_GLV_NS = 260.4;
-    constexpr double CUDA_LUT_NS = 127.2;
+    // CUDA reference: bench_bip352 on RTX 5060 Ti (SM 12.0, 36 SMs).
+    // Measured with BENCH_CLOCK_WARMUP=15 pre-warmup fix, batch=500K.
+    // GLV tpb=256: 204.3 ns/op (4.89 M/s).  LUT tpb=128: 108.8 ns/op (9.19 M/s).
+    constexpr double CUDA_GLV_NS = 204.3;
+    constexpr double CUDA_LUT_NS = 108.8;
     double cuda_ref = use_lut ? CUDA_LUT_NS : CUDA_GLV_NS;
     std::printf("  CUDA reference:    %.1f ns/op (%.2f M/s) [%s]\n",
                 cuda_ref, 1e9 / cuda_ref / 1e6, use_lut ? "LUT" : "GLV");
