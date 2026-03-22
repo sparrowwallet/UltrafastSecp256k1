@@ -106,10 +106,10 @@ __device__ __forceinline__ std::uint32_t d_rotl32(std::uint32_t v, int n) {
 
 __device__ void d_chacha20_quarter_round(std::uint32_t& a, std::uint32_t& b,
                                           std::uint32_t& c, std::uint32_t& d) {
-    a += b; d ^= a; d = d_rotl32(d, 16);
-    c += d; b ^= c; b = d_rotl32(b, 12);
-    a += b; d ^= a; d = d_rotl32(d, 8);
-    c += d; b ^= c; b = d_rotl32(b, 7);
+    a += b; d ^= a; d = __byte_perm(d, 0, 0x1032);       // rotl32(16) via PTX
+    c += d; b ^= c; b = __funnelshift_l(b, b, 12);       // rotl32(12) via PTX
+    a += b; d ^= a; d = __byte_perm(d, 0, 0x0321);       // rotl32(8)  via PTX
+    c += d; b ^= c; b = __funnelshift_l(b, b, 7);        // rotl32(7)  via PTX
 }
 
 __device__ void d_chacha20_block(const std::uint32_t input[16],
@@ -295,18 +295,31 @@ __device__ void d_aead_encrypt(const std::uint8_t key[32],
                                 std::size_t plaintext_len,
                                 std::uint8_t* ciphertext,
                                 std::uint8_t tag[16]) {
-    // 1. Poly1305 key from ChaCha20 block 0
-    std::uint8_t poly_key[64];
+    // 1. Setup state once (reused for poly key + encryption)
     std::uint32_t state[16];
     d_chacha20_setup(state, key, nonce, 0);
+
+    // 2. Poly1305 key from block 0
+    std::uint8_t poly_key[64];
     d_chacha20_block(state, poly_key);
 
-    // 2. Encrypt (counter=1)
-    for (std::size_t i = 0; i < plaintext_len; ++i)
-        ciphertext[i] = plaintext[i];
-    d_chacha20_crypt(key, nonce, 1, ciphertext, plaintext_len);
+    // 3. Encrypt (counter=1) — reuse state, skip redundant setup
+    state[12] = 1;
+    {
+        std::uint8_t block[64];
+        std::size_t offset = 0;
+        while (offset < plaintext_len) {
+            d_chacha20_block(state, block);
+            state[12]++;
+            std::size_t use = (plaintext_len - offset < 64)
+                            ? (plaintext_len - offset) : 64;
+            for (std::size_t j = 0; j < use; ++j)
+                ciphertext[offset + j] = plaintext[offset + j] ^ block[j];
+            offset += use;
+        }
+    }
 
-    // 3. Poly1305 MAC over (empty AAD || ciphertext || lengths)
+    // 4. Poly1305 MAC over (empty AAD || ciphertext || lengths)
     DevPoly1305 st;
     st.init(poly_key);
 
@@ -338,13 +351,15 @@ __device__ bool d_aead_decrypt(const std::uint8_t key[32],
                                 std::size_t ciphertext_len,
                                 const std::uint8_t expected_tag[16],
                                 std::uint8_t* plaintext) {
-    // 1. Poly1305 key
-    std::uint8_t poly_key[64];
+    // 1. Setup state once
     std::uint32_t state[16];
     d_chacha20_setup(state, key, nonce, 0);
+
+    // 2. Poly1305 key from block 0
+    std::uint8_t poly_key[64];
     d_chacha20_block(state, poly_key);
 
-    // 2. Verify tag
+    // 3. Verify tag
     DevPoly1305 st;
     st.init(poly_key);
 
@@ -375,10 +390,21 @@ __device__ bool d_aead_decrypt(const std::uint8_t key[32],
 
     if (diff != 0) return false;
 
-    // 3. Decrypt
-    for (std::size_t i = 0; i < ciphertext_len; ++i)
-        plaintext[i] = ciphertext[i];
-    d_chacha20_crypt(key, nonce, 1, plaintext, ciphertext_len);
+    // 4. Decrypt (counter=1) — reuse state, skip redundant setup
+    state[12] = 1;
+    {
+        std::uint8_t block[64];
+        std::size_t offset = 0;
+        while (offset < ciphertext_len) {
+            d_chacha20_block(state, block);
+            state[12]++;
+            std::size_t use = (ciphertext_len - offset < 64)
+                            ? (ciphertext_len - offset) : 64;
+            for (std::size_t j = 0; j < use; ++j)
+                plaintext[offset + j] = ciphertext[offset + j] ^ block[j];
+            offset += use;
+        }
+    }
     return true;
 }
 
@@ -832,6 +858,305 @@ static void bench_scaling() {
 }
 
 // ============================================================================
+// 6. PCIe-Aware End-to-End (H2D + Kernel + D2H)
+// ============================================================================
+
+static void bench_pcie_aware() {
+    std::printf("--- 6. PCIe-Aware End-to-End (H2D + Kernel + D2H) ---\n");
+
+    static constexpr int COUNT = 1 << 16; // 64K packets
+    static constexpr std::uint32_t PAYLOADS[] = {128, 512, 4096};
+
+    std::printf("  %-8s  %9s  %9s  %9s  %9s  %10s  %9s\n",
+                "payload", "H2D ms", "kern ms", "D2H ms", "total ms",
+                "eff MB/s", "kern%");
+
+    for (auto PAYLOAD : PAYLOADS) {
+        std::size_t wire_stride = PAYLOAD + BIP324_OVERHEAD;
+
+        // Pinned host memory for accurate PCIe measurement
+        std::uint8_t *h_keys, *h_nonces, *h_pt, *h_dec;
+        std::uint32_t *h_sizes, *h_ok;
+        CUDA_CHECK(cudaMallocHost(&h_keys,   COUNT * 32));
+        CUDA_CHECK(cudaMallocHost(&h_nonces, COUNT * 12));
+        CUDA_CHECK(cudaMallocHost(&h_pt,     (std::size_t)COUNT * PAYLOAD));
+        CUDA_CHECK(cudaMallocHost(&h_dec,    (std::size_t)COUNT * PAYLOAD));
+        CUDA_CHECK(cudaMallocHost(&h_sizes,  COUNT * sizeof(std::uint32_t)));
+        CUDA_CHECK(cudaMallocHost(&h_ok,     COUNT * sizeof(std::uint32_t)));
+
+        std::mt19937_64 rng(0x42FC1EULL);
+        for (int i = 0; i < COUNT * 32; ++i)
+            h_keys[i] = static_cast<std::uint8_t>(rng());
+        for (int i = 0; i < COUNT * 12; ++i)
+            h_nonces[i] = static_cast<std::uint8_t>(rng());
+        for (std::size_t i = 0; i < (std::size_t)COUNT * PAYLOAD; ++i)
+            h_pt[i] = static_cast<std::uint8_t>(rng());
+        for (int i = 0; i < COUNT; ++i) h_sizes[i] = PAYLOAD;
+
+        // Device allocations
+        std::uint8_t *d_keys, *d_nonces, *d_pt, *d_wire, *d_dec;
+        std::uint32_t *d_sizes, *d_ok;
+        CUDA_CHECK(cudaMalloc(&d_keys,   COUNT * 32));
+        CUDA_CHECK(cudaMalloc(&d_nonces, COUNT * 12));
+        CUDA_CHECK(cudaMalloc(&d_pt,     (std::size_t)COUNT * PAYLOAD));
+        CUDA_CHECK(cudaMalloc(&d_wire,   (std::size_t)COUNT * wire_stride));
+        CUDA_CHECK(cudaMalloc(&d_dec,    (std::size_t)COUNT * PAYLOAD));
+        CUDA_CHECK(cudaMalloc(&d_sizes,  COUNT * sizeof(std::uint32_t)));
+        CUDA_CHECK(cudaMalloc(&d_ok,     COUNT * sizeof(std::uint32_t)));
+
+        int nblocks = (COUNT + THREADS_PER_BLOCK - 1) / THREADS_PER_BLOCK;
+
+        // Warmup
+        CUDA_CHECK(cudaMemcpy(d_keys, h_keys, COUNT * 32, cudaMemcpyHostToDevice));
+        CUDA_CHECK(cudaMemcpy(d_nonces, h_nonces, COUNT * 12, cudaMemcpyHostToDevice));
+        CUDA_CHECK(cudaMemcpy(d_pt, h_pt, (std::size_t)COUNT * PAYLOAD, cudaMemcpyHostToDevice));
+        CUDA_CHECK(cudaMemcpy(d_sizes, h_sizes, COUNT * sizeof(std::uint32_t), cudaMemcpyHostToDevice));
+        kernel_batch_aead_encrypt<<<nblocks, THREADS_PER_BLOCK>>>(
+            d_keys, d_nonces, d_pt, d_sizes, d_wire, PAYLOAD, COUNT);
+        kernel_batch_aead_decrypt<<<nblocks, THREADS_PER_BLOCK>>>(
+            d_keys, d_nonces, d_wire, d_sizes, d_dec, d_ok, PAYLOAD, COUNT);
+        CUDA_CHECK(cudaDeviceSynchronize());
+
+        // Measure phases separately (median of 7 runs)
+        CudaTimer timer;
+        std::vector<float> t_h2d(7), t_kern(7), t_d2h(7);
+        for (int r = 0; r < 7; ++r) {
+            // H2D phase
+            timer.start();
+            CUDA_CHECK(cudaMemcpy(d_keys, h_keys, COUNT * 32, cudaMemcpyHostToDevice));
+            CUDA_CHECK(cudaMemcpy(d_nonces, h_nonces, COUNT * 12, cudaMemcpyHostToDevice));
+            CUDA_CHECK(cudaMemcpy(d_pt, h_pt, (std::size_t)COUNT * PAYLOAD, cudaMemcpyHostToDevice));
+            CUDA_CHECK(cudaMemcpy(d_sizes, h_sizes, COUNT * sizeof(std::uint32_t), cudaMemcpyHostToDevice));
+            t_h2d[r] = timer.stop_ms();
+
+            // Kernel phase (encrypt + decrypt)
+            timer.start();
+            kernel_batch_aead_encrypt<<<nblocks, THREADS_PER_BLOCK>>>(
+                d_keys, d_nonces, d_pt, d_sizes, d_wire, PAYLOAD, COUNT);
+            kernel_batch_aead_decrypt<<<nblocks, THREADS_PER_BLOCK>>>(
+                d_keys, d_nonces, d_wire, d_sizes, d_dec, d_ok, PAYLOAD, COUNT);
+            t_kern[r] = timer.stop_ms();
+
+            // D2H phase (transfer decrypted data + status)
+            timer.start();
+            CUDA_CHECK(cudaMemcpy(h_dec, d_dec, (std::size_t)COUNT * PAYLOAD, cudaMemcpyDeviceToHost));
+            CUDA_CHECK(cudaMemcpy(h_ok, d_ok, COUNT * sizeof(std::uint32_t), cudaMemcpyDeviceToHost));
+            t_d2h[r] = timer.stop_ms();
+        }
+
+        std::sort(t_h2d.begin(), t_h2d.end());
+        std::sort(t_kern.begin(), t_kern.end());
+        std::sort(t_d2h.begin(), t_d2h.end());
+
+        float h2d  = t_h2d[3];
+        float kern = t_kern[3];
+        float d2h  = t_d2h[3];
+        float total = h2d + kern + d2h;
+
+        double total_payload = static_cast<double>((std::size_t)COUNT * PAYLOAD);
+        double eff_mbps = (total_payload / (total / 1e3)) / (1024.0 * 1024.0);
+
+        std::printf("  %-8u  %9.3f  %9.3f  %9.3f  %9.3f  %9.0f  %8.1f%%\n",
+                    PAYLOAD, h2d, kern, d2h, total, eff_mbps,
+                    100.0 * kern / total);
+
+        CUDA_CHECK(cudaFree(d_keys));  CUDA_CHECK(cudaFree(d_nonces));
+        CUDA_CHECK(cudaFree(d_pt));    CUDA_CHECK(cudaFree(d_wire));
+        CUDA_CHECK(cudaFree(d_dec));   CUDA_CHECK(cudaFree(d_sizes));
+        CUDA_CHECK(cudaFree(d_ok));
+        CUDA_CHECK(cudaFreeHost(h_keys));  CUDA_CHECK(cudaFreeHost(h_nonces));
+        CUDA_CHECK(cudaFreeHost(h_pt));    CUDA_CHECK(cudaFreeHost(h_dec));
+        CUDA_CHECK(cudaFreeHost(h_sizes)); CUDA_CHECK(cudaFreeHost(h_ok));
+    }
+    std::printf("\n");
+}
+
+// ============================================================================
+// 7. Per-Packet Latency vs Batch Size
+// ============================================================================
+
+static void bench_latency_curve() {
+    std::printf("--- 7. Per-Packet Latency vs Batch Size ---\n");
+
+    static constexpr std::uint32_t PAYLOAD = 128;
+    static constexpr int BATCHES[] = {1, 4, 16, 64, 256, 1024, 4096, 16384, 65536};
+
+    std::printf("  %-10s  %10s  %12s  %12s\n",
+                "batch", "total us", "us/packet", "pkt/sec");
+
+    for (int bs : BATCHES) {
+        std::vector<std::uint32_t> sizes(bs, PAYLOAD);
+        auto res = bench_batch_encrypt_decrypt(sizes.data(), bs, PAYLOAD, 5, 11);
+        double us_total = res.total_ms * 1000.0;
+        double us_per_pkt = us_total / bs;
+
+        char pps[32];
+        if (res.packets_per_sec >= 1e6)
+            std::snprintf(pps, sizeof(pps), "%.2f M", res.packets_per_sec / 1e6);
+        else if (res.packets_per_sec >= 1e3)
+            std::snprintf(pps, sizeof(pps), "%.1f K", res.packets_per_sec / 1e3);
+        else
+            std::snprintf(pps, sizeof(pps), "%.0f", res.packets_per_sec);
+
+        std::printf("  %-10d  %10.1f  %12.3f  %12s\n",
+                    bs, us_total, us_per_pkt, pps);
+    }
+    std::printf("\n");
+}
+
+// ============================================================================
+// 8. Multi-Stream Pipeline (Copy/Compute Overlap)
+// ============================================================================
+
+static void bench_multi_stream() {
+    std::printf("--- 8. Multi-Stream Pipeline (Copy/Compute Overlap) ---\n");
+
+    static constexpr int TOTAL = 1 << 17; // 128K packets
+    static constexpr std::uint32_t PAYLOAD = 128;
+    static constexpr int STREAM_COUNTS[] = {1, 2, 4, 8};
+    std::size_t wire_stride = PAYLOAD + BIP324_OVERHEAD;
+
+    // Pinned host memory (required for cudaMemcpyAsync)
+    std::uint8_t *h_keys, *h_nonces, *h_pt;
+    std::uint32_t *h_sizes, *h_ok;
+    CUDA_CHECK(cudaMallocHost(&h_keys,   TOTAL * 32));
+    CUDA_CHECK(cudaMallocHost(&h_nonces, TOTAL * 12));
+    CUDA_CHECK(cudaMallocHost(&h_pt,     (std::size_t)TOTAL * PAYLOAD));
+    CUDA_CHECK(cudaMallocHost(&h_sizes,  TOTAL * sizeof(std::uint32_t)));
+    CUDA_CHECK(cudaMallocHost(&h_ok,     TOTAL * sizeof(std::uint32_t)));
+
+    std::mt19937_64 rng(0x5782EA00ULL);
+    for (int i = 0; i < TOTAL * 32; ++i)
+        h_keys[i] = static_cast<std::uint8_t>(rng());
+    for (int i = 0; i < TOTAL * 12; ++i)
+        h_nonces[i] = static_cast<std::uint8_t>(rng());
+    for (std::size_t i = 0; i < (std::size_t)TOTAL * PAYLOAD; ++i)
+        h_pt[i] = static_cast<std::uint8_t>(rng());
+    for (int i = 0; i < TOTAL; ++i) h_sizes[i] = PAYLOAD;
+
+    // Device memory (one contiguous allocation, split across streams)
+    std::uint8_t *d_keys, *d_nonces, *d_pt, *d_wire, *d_dec;
+    std::uint32_t *d_sizes, *d_ok;
+    CUDA_CHECK(cudaMalloc(&d_keys,   TOTAL * 32));
+    CUDA_CHECK(cudaMalloc(&d_nonces, TOTAL * 12));
+    CUDA_CHECK(cudaMalloc(&d_pt,     (std::size_t)TOTAL * PAYLOAD));
+    CUDA_CHECK(cudaMalloc(&d_wire,   (std::size_t)TOTAL * wire_stride));
+    CUDA_CHECK(cudaMalloc(&d_dec,    (std::size_t)TOTAL * PAYLOAD));
+    CUDA_CHECK(cudaMalloc(&d_sizes,  TOTAL * sizeof(std::uint32_t)));
+    CUDA_CHECK(cudaMalloc(&d_ok,     TOTAL * sizeof(std::uint32_t)));
+
+    std::printf("  %-10s  %12s  %12s  %10s\n",
+                "streams", "time ms", "pkt/sec", "speedup");
+
+    double baseline_ms = 0;
+
+    for (int ns : STREAM_COUNTS) {
+        int chunk = TOTAL / ns;
+        int nblk = (chunk + THREADS_PER_BLOCK - 1) / THREADS_PER_BLOCK;
+
+        std::vector<cudaStream_t> streams(ns);
+        for (int i = 0; i < ns; ++i)
+            CUDA_CHECK(cudaStreamCreate(&streams[i]));
+
+        // Warmup (2 rounds)
+        for (int w = 0; w < 2; ++w) {
+            for (int i = 0; i < ns; ++i) {
+                std::size_t off = (std::size_t)i * chunk;
+                cudaMemcpyAsync(d_keys + off * 32, h_keys + off * 32,
+                    chunk * 32, cudaMemcpyHostToDevice, streams[i]);
+                cudaMemcpyAsync(d_nonces + off * 12, h_nonces + off * 12,
+                    chunk * 12, cudaMemcpyHostToDevice, streams[i]);
+                cudaMemcpyAsync(d_pt + off * PAYLOAD, h_pt + off * PAYLOAD,
+                    (std::size_t)chunk * PAYLOAD, cudaMemcpyHostToDevice, streams[i]);
+                cudaMemcpyAsync(d_sizes + off, h_sizes + off,
+                    chunk * sizeof(std::uint32_t), cudaMemcpyHostToDevice, streams[i]);
+
+                kernel_batch_aead_encrypt<<<nblk, THREADS_PER_BLOCK, 0, streams[i]>>>(
+                    d_keys + off * 32, d_nonces + off * 12,
+                    d_pt + off * PAYLOAD, d_sizes + off,
+                    d_wire + off * wire_stride, PAYLOAD, chunk);
+                kernel_batch_aead_decrypt<<<nblk, THREADS_PER_BLOCK, 0, streams[i]>>>(
+                    d_keys + off * 32, d_nonces + off * 12,
+                    d_wire + off * wire_stride, d_sizes + off,
+                    d_dec + off * PAYLOAD, d_ok + off, PAYLOAD, chunk);
+
+                cudaMemcpyAsync(h_ok + off, d_ok + off,
+                    chunk * sizeof(std::uint32_t), cudaMemcpyDeviceToHost, streams[i]);
+            }
+            CUDA_CHECK(cudaDeviceSynchronize());
+        }
+
+        // Measure (median of 7, host timing for cross-stream accuracy)
+        std::vector<double> times(7);
+        for (int r = 0; r < 7; ++r) {
+            CUDA_CHECK(cudaDeviceSynchronize());
+            auto t0 = std::chrono::high_resolution_clock::now();
+
+            for (int i = 0; i < ns; ++i) {
+                std::size_t off = (std::size_t)i * chunk;
+                cudaMemcpyAsync(d_keys + off * 32, h_keys + off * 32,
+                    chunk * 32, cudaMemcpyHostToDevice, streams[i]);
+                cudaMemcpyAsync(d_nonces + off * 12, h_nonces + off * 12,
+                    chunk * 12, cudaMemcpyHostToDevice, streams[i]);
+                cudaMemcpyAsync(d_pt + off * PAYLOAD, h_pt + off * PAYLOAD,
+                    (std::size_t)chunk * PAYLOAD, cudaMemcpyHostToDevice, streams[i]);
+                cudaMemcpyAsync(d_sizes + off, h_sizes + off,
+                    chunk * sizeof(std::uint32_t), cudaMemcpyHostToDevice, streams[i]);
+
+                kernel_batch_aead_encrypt<<<nblk, THREADS_PER_BLOCK, 0, streams[i]>>>(
+                    d_keys + off * 32, d_nonces + off * 12,
+                    d_pt + off * PAYLOAD, d_sizes + off,
+                    d_wire + off * wire_stride, PAYLOAD, chunk);
+                kernel_batch_aead_decrypt<<<nblk, THREADS_PER_BLOCK, 0, streams[i]>>>(
+                    d_keys + off * 32, d_nonces + off * 12,
+                    d_wire + off * wire_stride, d_sizes + off,
+                    d_dec + off * PAYLOAD, d_ok + off, PAYLOAD, chunk);
+
+                cudaMemcpyAsync(h_ok + off, d_ok + off,
+                    chunk * sizeof(std::uint32_t), cudaMemcpyDeviceToHost, streams[i]);
+            }
+
+            CUDA_CHECK(cudaDeviceSynchronize());
+            auto t1 = std::chrono::high_resolution_clock::now();
+            times[r] = std::chrono::duration<double, std::milli>(t1 - t0).count();
+        }
+
+        std::sort(times.begin(), times.end());
+        double ms = times[3];
+
+        if (ns == 1) baseline_ms = ms;
+        double speedup = (baseline_ms > 0) ? baseline_ms / ms : 1.0;
+        double pps = TOTAL / (ms / 1e3);
+
+        char pps_s[32];
+        if (pps >= 1e6)
+            std::snprintf(pps_s, sizeof(pps_s), "%.2f M", pps / 1e6);
+        else
+            std::snprintf(pps_s, sizeof(pps_s), "%.0f K", pps / 1e3);
+
+        std::printf("  %-10d  %12.3f  %12s  %9.2fx\n", ns, ms, pps_s, speedup);
+
+        for (auto& s : streams) CUDA_CHECK(cudaStreamDestroy(s));
+    }
+
+    // Verify correctness on last run
+    int ok_count = 0;
+    for (int i = 0; i < TOTAL; ++i) ok_count += h_ok[i];
+    if (ok_count != TOTAL)
+        std::printf("  WARNING: %d/%d decrypts failed!\n", TOTAL - ok_count, TOTAL);
+
+    CUDA_CHECK(cudaFree(d_keys));  CUDA_CHECK(cudaFree(d_nonces));
+    CUDA_CHECK(cudaFree(d_pt));    CUDA_CHECK(cudaFree(d_wire));
+    CUDA_CHECK(cudaFree(d_dec));   CUDA_CHECK(cudaFree(d_sizes));
+    CUDA_CHECK(cudaFree(d_ok));
+    CUDA_CHECK(cudaFreeHost(h_keys));  CUDA_CHECK(cudaFreeHost(h_nonces));
+    CUDA_CHECK(cudaFreeHost(h_pt));    CUDA_CHECK(cudaFreeHost(h_sizes));
+    CUDA_CHECK(cudaFreeHost(h_ok));
+
+    std::printf("\n");
+}
+
+// ============================================================================
 // Main
 // ============================================================================
 
@@ -864,6 +1189,15 @@ int main() {
 
     // 5. Batch size scaling
     bench_scaling();
+
+    // 6. PCIe-aware end-to-end
+    bench_pcie_aware();
+
+    // 7. Per-packet latency curve
+    bench_latency_curve();
+
+    // 8. Multi-stream pipeline
+    bench_multi_stream();
 
     std::printf("================================================================\n");
     std::printf("  Done.\n");
