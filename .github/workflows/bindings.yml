@@ -101,7 +101,38 @@ jobs:
       - name: Lint
         run: pyflakes bindings/python/ultrafast_secp256k1/
 
-  # -- C# (.NET build) -----------------------------------------------------
+      - name: Download C API artifact (Linux)
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: capi-ubuntu-24.04
+          path: /tmp/capi
+
+      - name: Functional smoke test (sign + verify)
+        # Load the real shared library via ULTRAFAST_SECP256K1_LIB and run a
+        # minimal end-to-end test: key generation, ECDSA sign/verify, Schnorr sign/verify.
+        env:
+          ULTRAFAST_SECP256K1_LIB: /tmp/capi/libultrafast_secp256k1.so
+        run: |
+          python - <<'SMOKE'
+          import sys, os
+          sys.path.insert(0, 'bindings/python')
+          os.environ.setdefault('ULTRAFAST_SECP256K1_LIB',
+              '/tmp/capi/libultrafast_secp256k1.so')
+          from ultrafast_secp256k1 import Secp256k1
+          lib = Secp256k1()
+          privkey = bytes.fromhex(
+              '0000000000000000000000000000000000000000000000000000000000000001')
+          pubkey = lib.ec_pubkey_create(privkey)
+          assert len(pubkey) == 33, f"pubkey bad length: {len(pubkey)}"
+          msg  = b'\x00' * 32
+          sig  = lib.ecdsa_sign(msg, privkey)
+          assert lib.ecdsa_verify(msg, sig, pubkey), "ecdsa_verify failed"
+          xpub = lib.schnorr_pubkey(privkey)
+          aux  = b'\x00' * 32
+          ssig = lib.schnorr_sign(msg, privkey, aux)
+          assert lib.schnorr_verify(msg, ssig, xpub), "schnorr_verify failed"
+          print("Python smoke test: PASS (ECDSA + Schnorr sign/verify)")
+          SMOKE
   csharp:
     name: "C# (.NET build)"
     runs-on: ubuntu-24.04

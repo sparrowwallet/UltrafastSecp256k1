@@ -573,3 +573,78 @@ jobs:
           fail_ci_if_error: false
         env:
           CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
+
+  # -- Differential smoke test (self-consistency, compact, per-PR) -----------
+  differential:
+    name: "Differential Smoke Test"
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - name: Harden the runner (Audit all outbound calls)
+        uses: step-security/harden-runner@fa2e9d605c4eeb9fcad4c99c224cee0c6c7f3594 # v2.16.0
+        with:
+          egress-policy: audit
+
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+
+      - name: Install toolchain
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends g++-13 ninja-build
+
+      - name: Configure
+        run: |
+          cmake -S . -B build -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_CXX_COMPILER=g++-13 \
+            -DSECP256K1_BUILD_TESTS=ON \
+            -DSECP256K1_BUILD_CROSS_TESTS=ON
+
+      - name: Build differential test binary
+        run: cmake --build build --target test_differential_standalone -j"$(nproc)"
+
+      - name: Run differential smoke test (10 K random cases)
+        # DIFFERENTIAL_MULTIPLIER=1 => ~10K cases; fast enough for per-PR gate.
+        # Nightly uses 100 (1M cases) for extended coverage.
+        run: ./build/cpu/test_differential_standalone 1
+
+  # -- Protocol reference vectors (MuSig2 BIP-327 + FROST KAT) --------------
+  protocol-vectors:
+    name: "Protocol Vectors (MuSig2 BIP-327 / FROST-KAT)"
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - name: Harden the runner (Audit all outbound calls)
+        uses: step-security/harden-runner@fa2e9d605c4eeb9fcad4c99c224cee0c6c7f3594 # v2.16.0
+        with:
+          egress-policy: audit
+
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+
+      - name: Install toolchain
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends g++-13 ninja-build
+
+      - name: Configure
+        run: |
+          cmake -S . -B build -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_CXX_COMPILER=g++-13 \
+            -DSECP256K1_BUILD_TESTS=ON \
+            -DSECP256K1_BUILD_PROTOCOL_TESTS=ON
+
+      - name: Build protocol vector tests
+        run: |
+          cmake --build build --target test_musig2_bip327_vectors -j"$(nproc)"
+          cmake --build build --target test_frost_kat -j"$(nproc)"
+          cmake --build build --target test_musig2_frost -j"$(nproc)"
+
+      - name: Run MuSig2 BIP-327 reference vectors
+        run: ctest --test-dir build --output-on-failure -R "^musig2_bip327_vectors$" --timeout 120
+
+      - name: Run FROST KAT reference vectors
+        run: ctest --test-dir build --output-on-failure -R "^frost_kat$" --timeout 120
+
+      - name: Run MuSig2/FROST combined test
+        run: ctest --test-dir build --output-on-failure -R "^musig2_frost$" --timeout 120
