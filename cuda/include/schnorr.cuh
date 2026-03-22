@@ -169,7 +169,7 @@ __device__ inline bool schnorr_sign(
 
     // P = d' * G  (use precomputed constant table for generator)
     JacobianPoint P;
-    scalar_mul_generator_const(private_key, &P);
+    scalar_mul_generator_w8(private_key, &P);
     if (P.infinity) return false;
 
     // Convert to affine
@@ -219,7 +219,7 @@ __device__ inline bool schnorr_sign(
 
     // R = k' * G  (use precomputed constant table for generator)
     JacobianPoint R;
-    scalar_mul_generator_const(&k_prime, &R);
+    scalar_mul_generator_w8(&k_prime, &R);
 
     // Convert R to affine
     FieldElement rz_inv, rz_inv2, rz_inv3, rx, ry;
@@ -358,7 +358,7 @@ __device__ inline bool schnorr_keypair_create(
     if (scalar_is_zero(private_key)) return false;
 
     JacobianPoint P;
-    scalar_mul_generator_const(private_key, &P);
+    scalar_mul_generator_w8(private_key, &P);
     if (P.infinity) return false;
 
     FieldElement ax, ay;
@@ -385,7 +385,7 @@ __device__ inline bool schnorr_pubkey(const Scalar* private_key, uint8_t pubkey_
     if (scalar_is_zero(private_key)) return false;
 
     JacobianPoint P;
-    scalar_mul_generator_const(private_key, &P);
+    scalar_mul_generator_w8(private_key, &P);
     if (P.infinity) return false;
 
     FieldElement ax, ay;
@@ -425,7 +425,7 @@ __device__ inline bool schnorr_sign_with_keypair(
     if (scalar_is_zero(&k_prime)) return false;
 
     JacobianPoint R;
-    scalar_mul_generator_const(&k_prime, &R);
+    scalar_mul_generator_w8(&k_prime, &R);
 
     FieldElement rz_inv, rz_inv2, rz_inv3, rx, ry;
     field_inv(&R.z, &rz_inv);

@@ -109,7 +109,7 @@ __device__ inline void pedersen_commit_device(
     scalar_mul(&H_jac, value, &vH);
 
     // r*G (generator mul, fast path with precomputed tables)
-    scalar_mul_generator_const(blinding, &rG);
+    scalar_mul_generator_w8(blinding, &rG);
 
     // C = vH + rG
     jacobian_add(&vH, &rG, out);

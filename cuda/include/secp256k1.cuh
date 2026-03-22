@@ -1640,6 +1640,7 @@ __device__ inline void jacobian_add_mixed_unchecked(const JacobianPoint* p, cons
     r->x = X3;
     r->y = Y3;
     r->z = Z3;
+    r->infinity = false;  // must be explicit: unchecked variant doesn't guarantee this
 }
 
 // Using madd-2004-hmv formula (8M + 3S) - original baseline
@@ -2664,10 +2665,15 @@ __device__ inline void scalar_mul_generator_windowed(
             uint32_t idx = (uint32_t)((w >> (nib * 4)) & 0xFULL);
 
             if (started) {
-                jacobian_double_unchecked(r, r);
-                jacobian_double_unchecked(r, r);
-                jacobian_double_unchecked(r, r);
-                jacobian_double_unchecked(r, r);
+                // Guard: jacobian_double_unchecked is unsafe on infinity points.
+                // jacobian_add can produce infinity (R = -table[idx]), so we must
+                // skip unchecked doubles and let jacobian_add recover from infinity.
+                if (!r->infinity) {
+                    jacobian_double_unchecked(r, r);
+                    jacobian_double_unchecked(r, r);
+                    jacobian_double_unchecked(r, r);
+                    jacobian_double_unchecked(r, r);
+                }
             }
 
             if (idx != 0) {

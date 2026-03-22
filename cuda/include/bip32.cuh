@@ -12,7 +12,7 @@
 // Reference: BIP-32 (https://github.com/bitcoin/bips/blob/master/bip-0032.mediawiki)
 // ============================================================================
 
-#include "schnorr.cuh"  // for scalar_from_bytes, scalar_mul_generator_const, etc.
+#include "schnorr.cuh"  // for scalar_from_bytes, scalar_mul_generator_w8, etc.
 #include "hash160.cuh"  // for hash160_pubkey (BIP-32 fingerprint)
 
 #if !SECP256K1_CUDA_LIMBS_32
@@ -257,7 +257,7 @@ __device__ inline void bip32_fingerprint(
         Scalar sk;
         scalar_from_bytes(xkey->key, &sk);
         JacobianPoint P;
-        scalar_mul_generator_const(&sk, &P);
+        scalar_mul_generator_w8(&sk, &P);
         point_to_compressed(&P, compressed);
     } else {
         // For public keys, key[0..32] is already the compressed pubkey
@@ -299,7 +299,7 @@ __device__ inline bool bip32_derive_child(
             Scalar sk;
             scalar_from_bytes(parent->key, &sk);
             JacobianPoint P;
-            scalar_mul_generator_const(&sk, &P);
+            scalar_mul_generator_w8(&sk, &P);
             point_to_compressed(&P, data);
         } else {
             for (int i = 0; i < 33; i++) data[i] = parent->key[i];
@@ -361,7 +361,7 @@ __device__ inline bool bip32_derive_child(
     } else {
         // child_pubkey = point(IL) + Kpar
         JacobianPoint IL_point;
-        scalar_mul_generator_const(&IL, &IL_point);
+        scalar_mul_generator_w8(&IL, &IL_point);
 
         JacobianPoint Kpar;
         if (!point_from_compressed(parent->key, &Kpar)) return false;
@@ -412,7 +412,7 @@ __device__ inline bool bip32_public_key(
         Scalar sk;
         scalar_from_bytes(xkey->key, &sk);
         JacobianPoint P;
-        scalar_mul_generator_const(&sk, &P);
+        scalar_mul_generator_w8(&sk, &P);
         return point_to_compressed(&P, compressed);
     } else {
         for (int i = 0; i < 33; i++) compressed[i] = xkey->key[i];
@@ -481,7 +481,7 @@ __device__ inline bool bip32_to_public(
     Scalar sk;
     scalar_from_bytes(xpriv->key, &sk);
     JacobianPoint P;
-    scalar_mul_generator_const(&sk, &P);
+    scalar_mul_generator_w8(&sk, &P);
 
     if (!point_to_compressed(&P, xpub->key)) return false;
 

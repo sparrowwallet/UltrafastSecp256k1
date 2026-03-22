@@ -135,6 +135,11 @@ RESEARCH_DIR = REPO_ROOT / "ReversingResearch"
 # Active language adapter — set by load_config()
 LANG_ADAPTER = None  # type: LanguageAdapter
 
+# ---------- AI output control ----------
+# Set to True by --quiet / -q global flag to suppress decorative headers.
+# Pre-scanned from sys.argv in main() before load_config().
+_QUIET = False
+
 
 # ============================================================
 # LANGUAGE ADAPTER SYSTEM
@@ -385,6 +390,10 @@ class CppAdapter(LanguageAdapter):
             'noexcept', 'static_assert', 'ASSERT', 'CHECK', 'TEST_CASE',
             'LOG', 'define', 'ifdef', 'ifndef', 'elif', 'endif',
             'SingletonInstance', 'DECLARE', 'IMPLEMENT', 'macro', 'emit',
+            # CUDA/OpenCL/Metal GPU qualifiers (must not be captured as func names)
+            '__device__', '__global__', '__host__', '__forceinline__',
+            '__shared__', '__constant__', '__restrict__', '__launch_bounds__',
+            '__kernel', '__attribute__',
         })
 
     def strip_comments_and_strings(self, text):
@@ -2218,7 +2227,8 @@ def load_config():
     project_cfg = cfg.get("project", {})
     language = project_cfg.get("language", "cpp")
     LANG_ADAPTER = get_adapter(language)
-    print(f"[*] Language: {LANG_ADAPTER.name} ({language})")
+    if not _QUIET:
+        print(f"[*] Language: {LANG_ADAPTER.name} ({language})")
 
     # Source directories
     SOURCE_DIRS = []
@@ -5509,7 +5519,7 @@ def scan_function_index(conn):
     for project, base_dir in dirs:
         if not base_dir.exists():
             continue
-        for ext in ("*.cpp", "*.h"):
+        for ext in ("*.cpp", "*.h", "*.hpp", "*.cu", "*.cuh", "*.cl", "*.metal"):
             for filepath in base_dir.rglob(ext):
                 try:
                     n = _scan_file_functions(conn, filepath, project, base_dir)
@@ -6056,33 +6066,38 @@ def build_fts_index(conn):
 # BUILD COMMAND
 # ============================================================
 
+def _bprint(msg):
+    """Print a build-progress message unless --quiet is set."""
+    if not _QUIET:
+        print(msg)
+
 def build():
     """Build the complete source graph database."""
-    print("[*] Creating database...")
+    _bprint("[*] Creating database...")
     conn = create_db()
 
-    print("[*] Recording graph metadata...")
+    _bprint("[*] Recording graph metadata...")
     populate_graph_metadata(conn)
 
     if SEED_DATA:
-        print("[*] Populating seed data from config...")
+        _bprint("[*] Populating seed data from config...")
         populate_seed_data(conn)
     else:
-        print("[*] Populating singletons (120+)...")
+        _bprint("[*] Populating singletons (120+)...")
         populate_singletons(conn)
-        print("[*] Populating Player files (28)...")
+        _bprint("[*] Populating Player files (28)...")
         populate_player_files(conn)
-        print("[*] Populating events (35)...")
+        _bprint("[*] Populating events (35)...")
         populate_events(conn)
-        print("[*] Populating AI handlers (43)...")
+        _bprint("[*] Populating AI handlers (43)...")
         populate_ai_handlers(conn)
-        print("[*] Populating inventory scripts (12)...")
+        _bprint("[*] Populating inventory scripts (12)...")
         populate_inventory_scripts(conn)
-        print("[*] Populating constants (35+)...")
+        _bprint("[*] Populating constants (35+)...")
         populate_constants(conn)
-        print("[*] Populating config files (20)...")
+        _bprint("[*] Populating config files (20)...")
         populate_config_files(conn)
-        print("[*] Populating packet handlers (40+)...")
+        _bprint("[*] Populating packet handlers (40+)...")
         populate_packet_handlers(conn)
 
     print("[*] Scanning source files...")
@@ -7237,7 +7252,8 @@ def _compact_text(value, limit=96):
 def _print_compact_section(title, items):
     if not items:
         return
-    print(f"\n  === {title} ===")
+    if not _QUIET:
+        print(f"\n  === {title} ===")
     for item in items:
         print(f"  - {item}")
 
@@ -7433,6 +7449,36 @@ def _collect_candidate_files(conn, term, limit=12):
             results.append((direct_penalty, query_rank, _file_focus_penalty(file_name), file_name))
     ranked = sorted(results, key=lambda item: (item[0], item[1], item[2], item[3]))
     return [file_name for _, _, _, file_name in ranked[:limit]]
+
+
+def where_cmd(name):
+    """Ultra-compact symbol definition lookup. Returns file+line in JSON.
+    Usage: where <name>  (also available as: def <name>)
+    Output: {"sym":"name","file":"path","line":N,"end":N} or list of matches.
+    """
+    import json as _json
+    conn = get_conn()
+    rows = conn.execute(
+        "SELECT function_name, file, start_line, end_line "
+        "FROM function_index WHERE function_name LIKE ? ORDER BY function_name LIMIT 20",
+        (f"%{name}%",)
+    ).fetchall()
+    if not rows:
+        rows2 = conn.execute(
+            "SELECT path FROM files WHERE path LIKE ? LIMIT 10",
+            (f"%{name}%",)
+        ).fetchall()
+        if not rows2:
+            print(_json.dumps({"error": f"not found: {name}"}, separators=(",",":")))
+            return
+        results = [{"file": r["path"]} for r in rows2]
+    else:
+        results = [{"sym": r["function_name"], "file": r["file"],
+                    "line": r["start_line"], "end": r["end_line"]} for r in rows]
+    if len(results) == 1:
+        print(_json.dumps(results[0], separators=(",",":")))
+    else:
+        print(_json.dumps(results, separators=(",",":")))
 
 
 def _research_matches(conn, term, limit=20):
@@ -8270,7 +8316,8 @@ def focus_cmd(term, budget=80, core_only=False, json_mode=False, mode="explore")
     candidate_files = _select_candidate_files(conn, term, limit=6, core_only=core_only)
     pattern = f"%{term}%"
     mode_suffix = ", core-only" if core_only else ""
-    print(f"\n  === Focus for '{term}' (budget={budget}{mode_suffix}) ===")
+    if not _QUIET:
+        print(f"\n  === Focus for '{term}' (budget={budget}{mode_suffix}) ===")
 
     sections = []
     line_budget = budget
@@ -8398,7 +8445,8 @@ def slice_cmd(term, budget=120, core_only=False, json_mode=False, mode="explore"
         return
 
     mode_suffix = ", core-only" if core_only else ""
-    print(f"\n  === Slice for '{term}' (budget={budget}{mode_suffix}) ===")
+    if not _QUIET:
+        print(f"\n  === Slice for '{term}' (budget={budget}{mode_suffix}) ===")
     sections = []
     line_budget = budget
 
@@ -9964,6 +10012,12 @@ def export_config_cmd():
 # ============================================================
 
 def main():
+    global _QUIET
+    # Pre-scan for --quiet / -q — must happen before load_config()
+    if "--quiet" in sys.argv or "-q" in sys.argv:
+        _QUIET = True
+        sys.argv = [a for a in sys.argv if a not in ("--quiet", "-q")]
+
     # Handle --project <dir> before anything else — it redirects the tool
     # to a different project's config/DB without copying source_graph.py.
     if "--project" in sys.argv:
@@ -9998,6 +10052,8 @@ def main():
                 raise
     elif cmd == "find" and len(sys.argv) > 2:
         find_cmd(" ".join(sys.argv[2:]))
+    elif (cmd in ("where", "def")) and len(sys.argv) > 2:
+        where_cmd(" ".join(sys.argv[2:]))
     elif cmd == "singleton" and len(sys.argv) > 2:
         singleton_cmd(sys.argv[2])
     elif cmd == "file" and len(sys.argv) > 2:

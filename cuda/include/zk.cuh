@@ -412,7 +412,7 @@ __device__ inline bool range_proof_poly_check_device(
 
     JacobianPoint tH, tauG, LHS;
     scalar_mul(&H_jac, &proof->t_hat, &tH);
-    scalar_mul_generator_const(&proof->tau_x, &tauG);
+    scalar_mul_generator_w8(&proof->tau_x, &tauG);
     jacobian_add(&tH, &tauG, &LHS);
 
     // RHS = z^2 * V + delta * H + x * T1 + x^2 * T2
@@ -646,7 +646,7 @@ __device__ inline bool range_verify_full_device(
 
     JacobianPoint tH, tauG, LHS;
     scalar_mul(&H_jac, &proof->t_hat, &tH);
-    scalar_mul_generator_const(&proof->tau_x, &tauG);
+    scalar_mul_generator_w8(&proof->tau_x, &tauG);
     jacobian_add(&tH, &tauG, &LHS);
 
     JacobianPoint V_jac;
@@ -830,7 +830,7 @@ __device__ inline bool range_verify_full_device(
         Scalar neg_mu;
         scalar_negate(&proof->mu, &neg_mu);
         JacobianPoint muG;
-        scalar_mul_generator_const(&neg_mu, &muG);
+        scalar_mul_generator_w8(&neg_mu, &muG);
         jacobian_add(&msm_acc, &muG, &msm_acc);
     }
 
@@ -987,7 +987,7 @@ __device__ inline bool range_verify_warp_device(
 
         JacobianPoint tH, tauG, LHS;
         scalar_mul(&H_jac, &proof->t_hat, &tH);
-        scalar_mul_generator_const(&proof->tau_x, &tauG);
+        scalar_mul_generator_w8(&proof->tau_x, &tauG);
         jacobian_add(&tH, &tauG, &LHS);
 
         JacobianPoint V_jac;
@@ -1128,7 +1128,7 @@ __device__ inline bool range_verify_warp_device(
             Scalar neg_mu;
             scalar_negate(&proof->mu, &neg_mu);
             JacobianPoint muG;
-            scalar_mul_generator_const(&neg_mu, &muG);
+            scalar_mul_generator_w8(&neg_mu, &muG);
             jacobian_add(&msm, &muG, &msm);
         }
         // (t_hat - a*b) * U (H_ped)
@@ -1365,7 +1365,7 @@ __device__ inline bool range_verify_warp_precomp_impl(
 
         JacobianPoint tH, tauG, LHS;
         scalar_mul(&H_jac, &proof->t_hat, &tH);
-        scalar_mul_generator_const(&proof->tau_x, &tauG);
+        scalar_mul_generator_w8(&proof->tau_x, &tauG);
         jacobian_add(&tH, &tauG, &LHS);
 
         JacobianPoint V_jac;
@@ -1494,7 +1494,7 @@ __device__ inline bool range_verify_warp_precomp_impl(
             Scalar neg_mu;
             scalar_negate(&proof->mu, &neg_mu);
             JacobianPoint muG;
-            scalar_mul_generator_const(&neg_mu, &muG);
+            scalar_mul_generator_w8(&neg_mu, &muG);
             jacobian_add(&msm, &muG, &msm);
         }
         {
@@ -1711,7 +1711,7 @@ __device__ inline bool range_verify_warp_lut4_device(
 
         JacobianPoint tH, tauG, LHS;
         scalar_mul(&H_jac, &proof->t_hat, &tH);
-        scalar_mul_generator_const(&proof->tau_x, &tauG);
+        scalar_mul_generator_w8(&proof->tau_x, &tauG);
         jacobian_add(&tH, &tauG, &LHS);
 
         JacobianPoint V_jac;
@@ -1840,7 +1840,7 @@ __device__ inline bool range_verify_warp_lut4_device(
             Scalar neg_mu;
             scalar_negate(&proof->mu, &neg_mu);
             JacobianPoint muG;
-            scalar_mul_generator_const(&neg_mu, &muG);
+            scalar_mul_generator_w8(&neg_mu, &muG);
             jacobian_add(&msm, &muG, &msm);
         }
         {
