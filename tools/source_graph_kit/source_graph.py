@@ -324,10 +324,23 @@ class LanguageAdapter:
 # ============================================================
 
 class CppAdapter(LanguageAdapter):
-    """C/C++ language adapter."""
+    """C/C++ language adapter.
+
+    Covers all C-family source and shader formats used in this repo:
+      - Standard C/C++: .cpp .cc .cxx .c .h .hpp .hxx
+      - CUDA:           .cu .cuh           (NVIDIA GPU kernels)
+      - OpenCL:         .cl                (cross-vendor GPU shaders)
+      - Metal/ObjC++:   .mm .metal         (Apple GPU + Objective-C++)
+    """
     name = "cpp"
-    extensions = ["*.cpp", "*.h", "*.cc", "*.cxx", "*.hpp", "*.hxx", "*.c"]
-    header_extensions = ["*.h", "*.hpp", "*.hxx"]
+    extensions = [
+        "*.cpp", "*.h", "*.cc", "*.cxx", "*.hpp", "*.hxx", "*.c",
+        # GPU / shader extensions
+        "*.cu", "*.cuh",    # CUDA
+        "*.cl",             # OpenCL
+        "*.mm", "*.metal",  # Metal / Objective-C++
+    ]
+    header_extensions = ["*.h", "*.hpp", "*.hxx", "*.cuh"]
     uses_braces = True
 
     def import_pattern(self):
