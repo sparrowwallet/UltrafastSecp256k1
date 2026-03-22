@@ -662,8 +662,8 @@ public:
 
         CUDA_TRY(cudaMemcpy(out_pubkeys33, d_out33, count * 33, cudaMemcpyDeviceToHost));
 
-        std::vector<bool> h_res(count);
-        CUDA_TRY(cudaMemcpy(h_res.data(), d_res, count * sizeof(bool), cudaMemcpyDeviceToHost));
+            std::vector<uint8_t> h_res(count);
+            CUDA_TRY(cudaMemcpy(h_res.data(), d_res, count * sizeof(bool), cudaMemcpyDeviceToHost));
         for (size_t i = 0; i < count; ++i) {
             out_valid[i] = h_res[i] ? 1 : 0;
             if (!h_res[i])
