@@ -73,14 +73,6 @@ static constexpr uint8_t KEY7[32] = {
 // Hex helpers
 // ---------------------------------------------------------------------------
 
-static void hex_to_bytes(const char* hex, uint8_t* out, std::size_t out_len) {
-    for (std::size_t i = 0; i < out_len; ++i) {
-        unsigned int byte = 0;
-        (void)std::sscanf(hex + 2 * i, "%02x", &byte);
-        out[i] = static_cast<uint8_t>(byte);
-    }
-}
-
 static void bytes_to_hex(const uint8_t* in, std::size_t len, char* out) {
     static const char HEX[] = "0123456789abcdef";
     for (std::size_t i = 0; i < len; ++i) {

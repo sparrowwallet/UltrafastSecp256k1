@@ -192,7 +192,13 @@ Point pippenger_msm(const Scalar* scalars,
         Point partial_sum = Point::infinity();
 
         for (std::size_t b = max_touched_digit; b >= 1; --b) {
-            running_sum.add_inplace(buckets[b]);
+            // Only read from buckets that were explicitly written this window.
+            // Untouched slots remain uninitialized on the stack; adding the
+            // identity element would be a no-op, so skipping them is correct
+            // and avoids MSan uninitialized-read false positives.
+            if (used[b]) {
+                running_sum.add_inplace(buckets[b]);
+            }
             partial_sum.add_inplace(running_sum);
         }
 

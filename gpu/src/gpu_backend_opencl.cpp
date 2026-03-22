@@ -135,6 +135,9 @@ public:
         if (ext_schnorr_verify_) { clReleaseKernel(ext_schnorr_verify_); ext_schnorr_verify_ = nullptr; }
         if (ext_program_)        { clReleaseProgram(ext_program_);       ext_program_        = nullptr; }
         ext_init_attempted_ = false;
+        if (frost_kernel_)       { clReleaseKernel(frost_kernel_);       frost_kernel_       = nullptr; }
+        if (frost_program_)      { clReleaseProgram(frost_program_);     frost_program_      = nullptr; }
+        frost_init_attempted_ = false;
         ctx_.reset();
     }
 
@@ -390,12 +393,86 @@ public:
     }
 
     GpuError frost_verify_partial_batch(
-        const uint8_t*, const uint8_t*, const uint8_t*, const uint8_t*,
-        const uint8_t*, const uint8_t*, const uint8_t*, const uint8_t*,
-        size_t, uint8_t*) override
+        const uint8_t* z_i32,
+        const uint8_t* D_i33,
+        const uint8_t* E_i33,
+        const uint8_t* Y_i33,
+        const uint8_t* rho_i32,
+        const uint8_t* lambda_ie32,
+        const uint8_t* negate_R,
+        const uint8_t* negate_key,
+        size_t count,
+        uint8_t* out_results) override
     {
-        return set_error(GpuError::Unsupported,
-                         "FROST partial verify not yet implemented on OpenCL");
+        if (!is_ready()) return set_error(GpuError::Device, "context not initialised");
+        if (count == 0) { clear_error(); return GpuError::Ok; }
+        if (!z_i32 || !D_i33 || !E_i33 || !Y_i33 ||
+            !rho_i32 || !lambda_ie32 || !negate_R || !negate_key || !out_results)
+            return set_error(GpuError::NullArg, "NULL buffer");
+
+        auto err = ensure_frost_kernel();
+        if (err != GpuError::Ok) return err;
+
+        auto* cl_ctx = static_cast<cl_context>(ctx_->native_context());
+        auto* queue  = static_cast<cl_command_queue>(ctx_->native_queue());
+        cl_int clerr;
+
+        /* Allocate GPU buffers for all inputs -------------------------------- */
+        cl_mem d_z   = clCreateBuffer(cl_ctx, CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR,
+                                      32 * count, const_cast<uint8_t*>(z_i32), &clerr);
+        cl_mem d_D   = clCreateBuffer(cl_ctx, CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR,
+                                      33 * count, const_cast<uint8_t*>(D_i33), &clerr);
+        cl_mem d_E   = clCreateBuffer(cl_ctx, CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR,
+                                      33 * count, const_cast<uint8_t*>(E_i33), &clerr);
+        cl_mem d_Y   = clCreateBuffer(cl_ctx, CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR,
+                                      33 * count, const_cast<uint8_t*>(Y_i33), &clerr);
+        cl_mem d_rho = clCreateBuffer(cl_ctx, CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR,
+                                      32 * count, const_cast<uint8_t*>(rho_i32), &clerr);
+        cl_mem d_lam = clCreateBuffer(cl_ctx, CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR,
+                                      32 * count, const_cast<uint8_t*>(lambda_ie32), &clerr);
+        cl_mem d_nR  = clCreateBuffer(cl_ctx, CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR,
+                                      1 * count, const_cast<uint8_t*>(negate_R), &clerr);
+        cl_mem d_nK  = clCreateBuffer(cl_ctx, CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR,
+                                      1 * count, const_cast<uint8_t*>(negate_key), &clerr);
+        cl_mem d_res = clCreateBuffer(cl_ctx, CL_MEM_WRITE_ONLY,
+                                      sizeof(int) * count, nullptr, &clerr);
+
+        cl_uint cl_count = static_cast<cl_uint>(count);
+        clSetKernelArg(frost_kernel_, 0, sizeof(cl_mem),  &d_z);
+        clSetKernelArg(frost_kernel_, 1, sizeof(cl_mem),  &d_D);
+        clSetKernelArg(frost_kernel_, 2, sizeof(cl_mem),  &d_E);
+        clSetKernelArg(frost_kernel_, 3, sizeof(cl_mem),  &d_Y);
+        clSetKernelArg(frost_kernel_, 4, sizeof(cl_mem),  &d_rho);
+        clSetKernelArg(frost_kernel_, 5, sizeof(cl_mem),  &d_lam);
+        clSetKernelArg(frost_kernel_, 6, sizeof(cl_mem),  &d_nR);
+        clSetKernelArg(frost_kernel_, 7, sizeof(cl_mem),  &d_nK);
+        clSetKernelArg(frost_kernel_, 8, sizeof(cl_mem),  &d_res);
+        clSetKernelArg(frost_kernel_, 9, sizeof(cl_uint), &cl_count);
+
+        size_t global = count;
+        clEnqueueNDRangeKernel(queue, frost_kernel_, 1, nullptr,
+                               &global, nullptr, 0, nullptr, nullptr);
+        clFinish(queue);
+
+        std::vector<int> h_res(count);
+        clEnqueueReadBuffer(queue, d_res, CL_TRUE, 0,
+                            sizeof(int) * count, h_res.data(), 0, nullptr, nullptr);
+
+        for (size_t i = 0; i < count; ++i)
+            out_results[i] = h_res[i] ? 1 : 0;
+
+        clReleaseMemObject(d_z);
+        clReleaseMemObject(d_D);
+        clReleaseMemObject(d_E);
+        clReleaseMemObject(d_Y);
+        clReleaseMemObject(d_rho);
+        clReleaseMemObject(d_lam);
+        clReleaseMemObject(d_nR);
+        clReleaseMemObject(d_nK);
+        clReleaseMemObject(d_res);
+
+        clear_error();
+        return GpuError::Ok;
     }
 
     GpuError msm(
@@ -508,6 +585,11 @@ private:
     cl_kernel  ext_schnorr_verify_  = nullptr;
     bool       ext_init_attempted_  = false;
 
+    /* FROST kernel handles (lazy-loaded) */
+    cl_program frost_program_       = nullptr;
+    cl_kernel  frost_kernel_        = nullptr;
+    bool       frost_init_attempted_ = false;
+
     GpuError set_error(GpuError err, const char* msg) {
         last_err_ = err;
         if (msg) {
@@ -608,6 +690,70 @@ private:
             clReleaseKernel(ext_ecdsa_verify_); ext_ecdsa_verify_ = nullptr;
             clReleaseProgram(ext_program_); ext_program_ = nullptr;
             return set_error(GpuError::Launch, "schnorr_verify kernel not found");
+        }
+
+        return GpuError::Ok;
+    }
+
+    /* -- Lazy-load FROST OpenCL program ------------------------------------- */
+    GpuError ensure_frost_kernel() {
+        if (frost_kernel_) return GpuError::Ok;
+        if (frost_init_attempted_)
+            return set_error(GpuError::Launch, "FROST kernel init previously failed");
+        frost_init_attempted_ = true;
+
+        auto* cl_ctx = static_cast<cl_context>(ctx_->native_context());
+        cl_device_id device = nullptr;
+        clGetContextInfo(cl_ctx, CL_CONTEXT_DEVICES, sizeof(device), &device, nullptr);
+
+        const char* search_paths[] = {
+            "kernels/secp256k1_frost.cl",
+            "../kernels/secp256k1_frost.cl",
+            "../../opencl/kernels/secp256k1_frost.cl",
+            "../../../opencl/kernels/secp256k1_frost.cl",
+            "opencl/kernels/secp256k1_frost.cl",
+        };
+
+        std::string src;
+        std::string kernel_dir;
+        for (auto* p : search_paths) {
+            src = load_file_to_string(p);
+            if (!src.empty()) {
+                std::filesystem::path fp(p);
+                kernel_dir = fp.parent_path().string();
+                break;
+            }
+        }
+        if (src.empty())
+            return set_error(GpuError::Launch, "secp256k1_frost.cl not found");
+
+        const char* src_ptr = src.c_str();
+        size_t src_len = src.size();
+        cl_int err;
+        frost_program_ = clCreateProgramWithSource(cl_ctx, 1, &src_ptr, &src_len, &err);
+        if (err != CL_SUCCESS)
+            return set_error(GpuError::Launch, "frost clCreateProgramWithSource failed");
+
+        std::string opts = "-cl-std=CL1.2 -cl-fast-relaxed-math -cl-mad-enable";
+        if (!kernel_dir.empty())
+            opts += " -I " + kernel_dir;
+
+        err = clBuildProgram(frost_program_, 1, &device, opts.c_str(), nullptr, nullptr);
+        if (err != CL_SUCCESS) {
+            size_t log_len = 0;
+            clGetProgramBuildInfo(frost_program_, device, CL_PROGRAM_BUILD_LOG, 0, nullptr, &log_len);
+            std::string log(log_len, '\0');
+            clGetProgramBuildInfo(frost_program_, device, CL_PROGRAM_BUILD_LOG, log_len, log.data(), nullptr);
+            clReleaseProgram(frost_program_);
+            frost_program_ = nullptr;
+            std::string msg = "frost.cl build failed: " + log.substr(0, 200);
+            return set_error(GpuError::Launch, msg.c_str());
+        }
+
+        frost_kernel_ = clCreateKernel(frost_program_, "frost_verify_partial", &err);
+        if (err != CL_SUCCESS) {
+            clReleaseProgram(frost_program_); frost_program_ = nullptr;
+            return set_error(GpuError::Launch, "frost_verify_partial kernel not found");
         }
 
         return GpuError::Ok;

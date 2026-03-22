@@ -1048,3 +1048,134 @@ kernel void pedersen_verify_sum(
     result[0] = z_zero;
 }
 
+// =============================================================================
+// Kernel 20: FROST Partial Signature Verification
+// =============================================================================
+// Verifies one FROST-secp256k1 partial signature per thread.
+//
+// Algorithm (per thread i):
+//   R_i = D_i + rho_i * E_i           (nonce combination)
+//   lhs = z_i * G                     (partial sig on generator)
+//   rhs = R_i + lambda_i_e * Y_i      (weighted verification share)
+//   valid = (lhs == rhs)
+//
+// Optionally negate R_i (negate_R[i] != 0) and/or Y_i (negate_key[i] != 0)
+// to handle even-y conventions.
+// =============================================================================
+
+// ---- Internal helpers -------------------------------------------------------
+
+// Decompress a 33-byte SEC1 compressed point to a JacobianPoint (Z=1).
+// Returns false on invalid prefix or non-square y.
+inline bool frost_decompress_sec1(device const uchar* sec1_33,
+                                   thread JacobianPoint &out)
+{
+    uchar prefix = sec1_33[0];
+    if (prefix != 0x02u && prefix != 0x03u) return false;
+    int parity = (prefix == 0x03u) ? 1 : 0;
+
+    FieldElement x;
+    for (int i = 0; i < 8; i++) {
+        uint off = (uint)(1 + (7 - i) * 4);
+        x.limbs[i] = ((uint)sec1_33[off]   << 24) |
+                     ((uint)sec1_33[off+1]  << 16) |
+                     ((uint)sec1_33[off+2]  << 8)  |
+                     ((uint)sec1_33[off+3]);
+    }
+    return lift_x_field(x, parity, out);
+}
+
+// Read a 32-byte big-endian scalar from a device buffer at byte offset.
+inline Scalar256 frost_read_scalar(device const uchar* buf, uint tid)
+{
+    Scalar256 s;
+    uint off = tid * 32;
+    for (int i = 0; i < 8; i++) {
+        uint b = off + (uint)(7 - i) * 4;
+        s.limbs[i] = ((uint)buf[b]   << 24) |
+                     ((uint)buf[b+1] << 16) |
+                     ((uint)buf[b+2] << 8)  |
+                     ((uint)buf[b+3]);
+    }
+    return s;
+}
+
+// Compare two JacobianPoints for equality via affine x bytes + y parity.
+// Returns true if both represent the same curve point.
+inline bool frost_jac_equal(thread const JacobianPoint &a_in,
+                             thread const JacobianPoint &b_in)
+{
+    if (a_in.infinity && b_in.infinity) return true;
+    if (a_in.infinity || b_in.infinity) return false;
+
+    AffinePoint a_aff = jacobian_to_affine(a_in);
+    AffinePoint b_aff = jacobian_to_affine(b_in);
+
+    uchar ax[32], ay[32], bx[32], by[32];
+    field_to_bytes(a_aff.x, ax);
+    field_to_bytes(a_aff.y, ay);
+    field_to_bytes(b_aff.x, bx);
+    field_to_bytes(b_aff.y, by);
+
+    for (int i = 0; i < 32; i++)
+        if (ax[i] != bx[i] || ay[i] != by[i]) return false;
+    return true;
+}
+
+// ---- Kernel -----------------------------------------------------------------
+
+kernel void frost_verify_partial_batch(
+    device const uchar *z_i32         [[buffer(0)]],   // N × 32  partial sig scalar
+    device const uchar *D_i33         [[buffer(1)]],   // N × 33  hiding nonce
+    device const uchar *E_i33         [[buffer(2)]],   // N × 33  binding nonce
+    device const uchar *Y_i33         [[buffer(3)]],   // N × 33  verification share
+    device const uchar *rho_i32       [[buffer(4)]],   // N × 32  binding factor
+    device const uchar *lambda_ie32   [[buffer(5)]],   // N × 32  lambda_i * e
+    device const uchar *negate_R      [[buffer(6)]],   // N × 1   negate R flag
+    device const uchar *negate_key    [[buffer(7)]],   // N × 1   negate Y flag
+    device uint        *results       [[buffer(8)]],   // N × 1   output (1=valid)
+    constant uint      &count         [[buffer(9)]],
+    uint tid [[thread_position_in_grid]]
+) {
+    if (tid >= count) { return; }
+
+    /* Parse scalars */
+    Scalar256 z_i      = frost_read_scalar(z_i32,      tid);
+    Scalar256 rho_i    = frost_read_scalar(rho_i32,    tid);
+    Scalar256 lambda_ie = frost_read_scalar(lambda_ie32, tid);
+
+    /* Decompress points */
+    JacobianPoint D_jac, E_jac, Y_jac;
+    if (!frost_decompress_sec1(D_i33 + tid * 33u, D_jac)) { results[tid] = 0u; return; }
+    if (!frost_decompress_sec1(E_i33 + tid * 33u, E_jac)) { results[tid] = 0u; return; }
+    if (!frost_decompress_sec1(Y_i33 + tid * 33u, Y_jac)) { results[tid] = 0u; return; }
+
+    /* Extract affine for scalar_mul_glv (Z=1 after decompress) */
+    AffinePoint E_aff = { E_jac.x, E_jac.y };
+    AffinePoint Y_aff = { Y_jac.x, Y_jac.y };
+
+    /* Optionally negate Y_i */
+    if (negate_key[tid]) {
+        Y_aff.y = field_negate(Y_aff.y);
+    }
+
+    /* R_i = D_i + rho_i * E_i */
+    JacobianPoint rho_E = scalar_mul_glv(E_aff, rho_i);
+    JacobianPoint R_i   = jacobian_add(D_jac, rho_E);
+
+    /* Optionally negate R_i */
+    if (negate_R[tid]) {
+        R_i.y = field_negate(R_i.y);
+    }
+
+    /* lhs = z_i * G */
+    JacobianPoint lhs = scalar_mul_generator_windowed(z_i);
+
+    /* rhs = R_i + lambda_i_e * Y_i */
+    JacobianPoint lambda_Y = scalar_mul_glv(Y_aff, lambda_ie);
+    JacobianPoint rhs      = jacobian_add(R_i, lambda_Y);
+
+    /* Compare */
+    results[tid] = frost_jac_equal(lhs, rhs) ? 1u : 0u;
+}
+

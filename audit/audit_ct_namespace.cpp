@@ -70,7 +70,8 @@ static ScanResult read_source_file(const char* path) {
         return r;
     }
     r.content.resize(static_cast<std::size_t>(sz));
-    (void)std::fread(&r.content[0], 1, static_cast<std::size_t>(sz), f);
+    auto const nread = std::fread(&r.content[0], 1, static_cast<std::size_t>(sz), f);
+    if (nread != static_cast<std::size_t>(sz)) r.content.clear();
     (void)std::fclose(f);
     return r;
 }
