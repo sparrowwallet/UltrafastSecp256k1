@@ -388,6 +388,148 @@ UFSECP_API ufsecp_error_t ufsecp_taproot_verify(
     const uint8_t* merkle_root, size_t merkle_root_len);
 
 /* ===========================================================================
+ * BIP-143: SegWit v0 Sighash
+ * =========================================================================== */
+
+/** Compute BIP-143 sighash digest for a SegWit v0 input.
+ *  hash_prevouts, hash_sequence, hash_outputs: precomputed 32-byte hashes.
+ *  outpoint_txid: 32-byte LE txid of the input being signed.
+ *  outpoint_vout: output index of the input being signed.
+ *  script_code / script_code_len: the scriptCode for this input.
+ *  value: satoshi amount of the output being spent.
+ *  sequence: nSequence of this input.
+ *  sighash_type: SIGHASH_ALL etc. */
+UFSECP_API ufsecp_error_t ufsecp_bip143_sighash(
+    ufsecp_ctx* ctx,
+    uint32_t version,
+    const uint8_t hash_prevouts[32],
+    const uint8_t hash_sequence[32],
+    const uint8_t outpoint_txid[32], uint32_t outpoint_vout,
+    const uint8_t* script_code, size_t script_code_len,
+    uint64_t value,
+    uint32_t sequence,
+    const uint8_t hash_outputs[32],
+    uint32_t locktime,
+    uint32_t sighash_type,
+    uint8_t sighash_out[32]);
+
+/** Build P2WPKH scriptCode (25 bytes) from a 20-byte pubkey hash. */
+UFSECP_API ufsecp_error_t ufsecp_bip143_p2wpkh_script_code(
+    const uint8_t pubkey_hash[20],
+    uint8_t script_code_out[25]);
+
+/* ===========================================================================
+ * BIP-144: Witness Transaction Serialization
+ * =========================================================================== */
+
+/** Compute txid (legacy hash, no witness) from raw witness-serialized tx.
+ *  raw_tx/raw_tx_len: complete witness-format transaction bytes.
+ *  txid_out: 32-byte LE txid. */
+UFSECP_API ufsecp_error_t ufsecp_bip144_txid(
+    ufsecp_ctx* ctx,
+    const uint8_t* raw_tx, size_t raw_tx_len,
+    uint8_t txid_out[32]);
+
+/** Compute wtxid from raw witness-serialized transaction bytes. */
+UFSECP_API ufsecp_error_t ufsecp_bip144_wtxid(
+    ufsecp_ctx* ctx,
+    const uint8_t* raw_tx, size_t raw_tx_len,
+    uint8_t wtxid_out[32]);
+
+/** Compute witness commitment: SHA256d(witness_root || witness_nonce). */
+UFSECP_API ufsecp_error_t ufsecp_bip144_witness_commitment(
+    const uint8_t witness_root[32],
+    const uint8_t witness_nonce[32],
+    uint8_t commitment_out[32]);
+
+/* ===========================================================================
+ * BIP-141: Segregated Witness — Witness Programs
+ * =========================================================================== */
+
+/** Check if a scriptPubKey is a witness program. Returns 1 if yes, 0 if no. */
+UFSECP_API int ufsecp_segwit_is_witness_program(
+    const uint8_t* script, size_t script_len);
+
+/** Parse a witness program from a scriptPubKey.
+ *  version_out: witness version (0-16), or -1 if not a witness program.
+ *  program_out: buffer for the program (at least 40 bytes).
+ *  program_len_out: actual program length.
+ *  Returns UFSECP_OK on success, UFSECP_ERR_BAD_INPUT if not a witness program. */
+UFSECP_API ufsecp_error_t ufsecp_segwit_parse_program(
+    const uint8_t* script, size_t script_len,
+    int* version_out,
+    uint8_t* program_out, size_t* program_len_out);
+
+/** Build P2WPKH scriptPubKey (22 bytes) from 20-byte pubkey hash. */
+UFSECP_API ufsecp_error_t ufsecp_segwit_p2wpkh_spk(
+    const uint8_t pubkey_hash[20],
+    uint8_t spk_out[22]);
+
+/** Build P2WSH scriptPubKey (34 bytes) from 32-byte script hash. */
+UFSECP_API ufsecp_error_t ufsecp_segwit_p2wsh_spk(
+    const uint8_t script_hash[32],
+    uint8_t spk_out[34]);
+
+/** Build P2TR scriptPubKey (34 bytes) from 32-byte x-only output key. */
+UFSECP_API ufsecp_error_t ufsecp_segwit_p2tr_spk(
+    const uint8_t output_key[32],
+    uint8_t spk_out[34]);
+
+/** Compute SHA256 of witness script (for P2WSH program). */
+UFSECP_API ufsecp_error_t ufsecp_segwit_witness_script_hash(
+    const uint8_t* script, size_t script_len,
+    uint8_t hash_out[32]);
+
+/* ===========================================================================
+ * BIP-342: Tapscript Sighash
+ * =========================================================================== */
+
+/** Compute BIP-341 key-path sighash.
+ *  All input prevout txids, vouts, amounts, sequences, and scriptPubKeys
+ *  must be provided as flat arrays. */
+UFSECP_API ufsecp_error_t ufsecp_taproot_keypath_sighash(
+    ufsecp_ctx* ctx,
+    uint32_t version, uint32_t locktime,
+    size_t input_count,
+    const uint8_t* prevout_txids,   /* input_count*32 bytes, flattened */
+    const uint32_t* prevout_vouts,
+    const uint64_t* input_amounts,
+    const uint32_t* input_sequences,
+    const uint8_t* const* input_spks,
+    const size_t* input_spk_lens,
+    size_t output_count,
+    const uint64_t* output_values,
+    const uint8_t* const* output_spks,
+    const size_t* output_spk_lens,
+    size_t input_index,
+    uint8_t hash_type,
+    const uint8_t* annex, size_t annex_len,
+    uint8_t sighash_out[32]);
+
+/** Compute BIP-342 tapscript sighash. Same as key-path + extension data. */
+UFSECP_API ufsecp_error_t ufsecp_tapscript_sighash(
+    ufsecp_ctx* ctx,
+    uint32_t version, uint32_t locktime,
+    size_t input_count,
+    const uint8_t* prevout_txids,
+    const uint32_t* prevout_vouts,
+    const uint64_t* input_amounts,
+    const uint32_t* input_sequences,
+    const uint8_t* const* input_spks,
+    const size_t* input_spk_lens,
+    size_t output_count,
+    const uint64_t* output_values,
+    const uint8_t* const* output_spks,
+    const size_t* output_spk_lens,
+    size_t input_index,
+    uint8_t hash_type,
+    const uint8_t tapleaf_hash[32],
+    uint8_t key_version,
+    uint32_t code_separator_pos,
+    const uint8_t* annex, size_t annex_len,
+    uint8_t sighash_out[32]);
+
+/* ===========================================================================
  * Ethereum (conditional: SECP256K1_BUILD_ETHEREUM)
  * =========================================================================== */
 

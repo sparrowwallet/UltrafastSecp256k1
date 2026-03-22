@@ -36,6 +36,9 @@
 #include "secp256k1/address.hpp"
 #include "secp256k1/bip32.hpp"
 #include "secp256k1/taproot.hpp"
+#include "secp256k1/bip143.hpp"
+#include "secp256k1/bip144.hpp"
+#include "secp256k1/segwit.hpp"
 #include "secp256k1/init.hpp"
 #include "secp256k1/bip39.hpp"
 #include "secp256k1/batch_verify.hpp"
@@ -1272,6 +1275,386 @@ ufsecp_error_t ufsecp_taproot_verify(ufsecp_ctx* ctx,
         return ctx_set_err(ctx, UFSECP_ERR_VERIFY_FAIL, "taproot commitment invalid");
 }
 
+    return UFSECP_OK;
+}
+
+/* ===========================================================================
+ * BIP-143: SegWit v0 Sighash
+ * =========================================================================== */
+
+ufsecp_error_t ufsecp_bip143_sighash(
+    ufsecp_ctx* ctx,
+    uint32_t version,
+    const uint8_t hash_prevouts[32],
+    const uint8_t hash_sequence[32],
+    const uint8_t outpoint_txid[32], uint32_t outpoint_vout,
+    const uint8_t* script_code, size_t script_code_len,
+    uint64_t value,
+    uint32_t sequence,
+    const uint8_t hash_outputs[32],
+    uint32_t locktime,
+    uint32_t sighash_type,
+    uint8_t sighash_out[32]) {
+    if (!ctx || !hash_prevouts || !hash_sequence || !outpoint_txid ||
+        !script_code || !hash_outputs || !sighash_out)
+        return UFSECP_ERR_NULL_ARG;
+    ctx_clear_err(ctx);
+
+    secp256k1::Bip143Preimage pre{};
+    pre.version = version;
+    std::memcpy(pre.hash_prevouts.data(), hash_prevouts, 32);
+    std::memcpy(pre.hash_sequence.data(), hash_sequence, 32);
+    std::memcpy(pre.hash_outputs.data(),  hash_outputs,  32);
+    pre.locktime = locktime;
+
+    secp256k1::Outpoint op{};
+    std::memcpy(op.txid.data(), outpoint_txid, 32);
+    op.vout = outpoint_vout;
+
+    auto h = secp256k1::bip143_sighash(pre, op, script_code, script_code_len,
+                                        value, sequence, sighash_type);
+    std::memcpy(sighash_out, h.data(), 32);
+    return UFSECP_OK;
+}
+
+ufsecp_error_t ufsecp_bip143_p2wpkh_script_code(
+    const uint8_t pubkey_hash[20],
+    uint8_t script_code_out[25]) {
+    if (!pubkey_hash || !script_code_out) return UFSECP_ERR_NULL_ARG;
+
+    auto sc = secp256k1::bip143_p2wpkh_script_code(pubkey_hash);
+    std::memcpy(script_code_out, sc.data(), 25);
+    return UFSECP_OK;
+}
+
+/* ===========================================================================
+ * BIP-144: Witness Transaction Serialization
+ * =========================================================================== */
+
+// Helper: read Bitcoin CompactSize from buffer; returns 0 on overflow
+static size_t read_compact_size(const uint8_t* buf, size_t len,
+                                size_t& offset, uint64_t& val) {
+    if (offset >= len) return 0;
+    uint8_t first = buf[offset++];
+    if (first < 0xFD) { val = first; return 1; }
+    if (first == 0xFD) {
+        if (offset + 2 > len) return 0;
+        val = uint64_t(buf[offset]) | (uint64_t(buf[offset+1]) << 8);
+        offset += 2; return 3;
+    }
+    if (first == 0xFE) {
+        if (offset + 4 > len) return 0;
+        val = uint64_t(buf[offset]) | (uint64_t(buf[offset+1]) << 8) |
+              (uint64_t(buf[offset+2]) << 16) | (uint64_t(buf[offset+3]) << 24);
+        offset += 4; return 5;
+    }
+    // 0xFF
+    if (offset + 8 > len) return 0;
+    val = 0;
+    for (int i = 0; i < 8; ++i) val |= uint64_t(buf[offset+i]) << (8*i);
+    offset += 8; return 9;
+}
+
+// Helper: skip CompactSize-prefixed blob (e.g. scriptSig or scriptPubKey)
+static bool skip_compact_bytes(const uint8_t* buf, size_t len, size_t& offset) {
+    uint64_t sz = 0;
+    if (!read_compact_size(buf, len, offset, sz)) return false;
+    if (offset + sz > len) return false;
+    offset += static_cast<size_t>(sz);
+    return true;
+}
+
+ufsecp_error_t ufsecp_bip144_txid(
+    ufsecp_ctx* /*ctx*/,
+    const uint8_t* raw_tx, size_t raw_tx_len,
+    uint8_t txid_out[32]) {
+    if (!raw_tx || !txid_out) return UFSECP_ERR_NULL_ARG;
+    if (raw_tx_len < 10) return UFSECP_ERR_BAD_INPUT;
+
+    // Detect witness flag: version(4) + marker(0x00) + flag(0x01)
+    bool has_witness = (raw_tx_len > 6 && raw_tx[4] == 0x00 && raw_tx[5] == 0x01);
+
+    if (!has_witness) {
+        // Legacy tx: txid = double-SHA256 of the entire raw bytes
+        auto h = secp256k1::SHA256::hash256(raw_tx, raw_tx_len);
+        std::memcpy(txid_out, h.data(), 32);
+        return UFSECP_OK;
+    }
+
+    // Witness tx: strip marker+flag and witness data
+    // Legacy = version(4) | inputs | outputs | locktime(4)
+    secp256k1::SHA256 h1;
+    // version
+    h1.update(raw_tx, 4);
+
+    // Skip marker+flag, parse inputs+outputs from offset 6
+    size_t off = 6;
+    uint64_t n_in = 0;
+    size_t cs_start = off;
+    if (!read_compact_size(raw_tx, raw_tx_len, off, n_in)) return UFSECP_ERR_BAD_INPUT;
+
+    // Record start of vin count for hashing
+    size_t io_start = cs_start;
+
+    // Skip all inputs (each: txid(32) + vout(4) + scriptSig + sequence(4))
+    for (uint64_t i = 0; i < n_in; ++i) {
+        if (off + 36 > raw_tx_len) return UFSECP_ERR_BAD_INPUT;
+        off += 36; // txid + vout
+        if (!skip_compact_bytes(raw_tx, raw_tx_len, off)) return UFSECP_ERR_BAD_INPUT;
+        if (off + 4 > raw_tx_len) return UFSECP_ERR_BAD_INPUT;
+        off += 4; // sequence
+    }
+
+    // Parse outputs count
+    uint64_t n_out = 0;
+    if (!read_compact_size(raw_tx, raw_tx_len, off, n_out)) return UFSECP_ERR_BAD_INPUT;
+
+    // Skip all outputs (each: value(8) + scriptPubKey)
+    for (uint64_t i = 0; i < n_out; ++i) {
+        if (off + 8 > raw_tx_len) return UFSECP_ERR_BAD_INPUT;
+        off += 8; // value
+        if (!skip_compact_bytes(raw_tx, raw_tx_len, off)) return UFSECP_ERR_BAD_INPUT;
+    }
+    size_t io_end = off;
+
+    // Hash inputs+outputs section (cs_start..io_end)
+    h1.update(raw_tx + io_start, io_end - io_start);
+
+    // locktime = last 4 bytes
+    if (raw_tx_len < 4) return UFSECP_ERR_BAD_INPUT;
+    h1.update(raw_tx + raw_tx_len - 4, 4);
+
+    auto first = h1.finalize();
+    secp256k1::SHA256 h2;
+    h2.update(first.data(), 32);
+    auto txid = h2.finalize();
+    std::memcpy(txid_out, txid.data(), 32);
+    return UFSECP_OK;
+}
+
+ufsecp_error_t ufsecp_bip144_wtxid(
+    ufsecp_ctx* /*ctx*/,
+    const uint8_t* raw_tx, size_t raw_tx_len,
+    uint8_t wtxid_out[32]) {
+    if (!raw_tx || !wtxid_out) return UFSECP_ERR_NULL_ARG;
+    if (raw_tx_len < 10) return UFSECP_ERR_BAD_INPUT;
+
+    // wtxid = double-SHA256 of the full witness-serialized tx
+    auto h = secp256k1::SHA256::hash256(raw_tx, raw_tx_len);
+    std::memcpy(wtxid_out, h.data(), 32);
+    return UFSECP_OK;
+}
+
+ufsecp_error_t ufsecp_bip144_witness_commitment(
+    const uint8_t witness_root[32],
+    const uint8_t witness_nonce[32],
+    uint8_t commitment_out[32]) {
+    if (!witness_root || !witness_nonce || !commitment_out)
+        return UFSECP_ERR_NULL_ARG;
+
+    std::array<uint8_t, 32> wr, wn;
+    std::memcpy(wr.data(), witness_root, 32);
+    std::memcpy(wn.data(), witness_nonce, 32);
+
+    auto c = secp256k1::witness_commitment(wr, wn);
+    std::memcpy(commitment_out, c.data(), 32);
+    return UFSECP_OK;
+}
+
+/* ===========================================================================
+ * BIP-141: Segregated Witness — Witness Programs
+ * =========================================================================== */
+
+int ufsecp_segwit_is_witness_program(
+    const uint8_t* script, size_t script_len) {
+    if (!script) return 0;
+    return secp256k1::is_witness_program(script, script_len) ? 1 : 0;
+}
+
+ufsecp_error_t ufsecp_segwit_parse_program(
+    const uint8_t* script, size_t script_len,
+    int* version_out,
+    uint8_t* program_out, size_t* program_len_out) {
+    if (!script || !version_out || !program_out || !program_len_out)
+        return UFSECP_ERR_NULL_ARG;
+
+    auto wp = secp256k1::parse_witness_program(script, script_len);
+    if (wp.version < 0) {
+        *version_out = -1;
+        *program_len_out = 0;
+        return UFSECP_ERR_BAD_INPUT;
+    }
+    *version_out = wp.version;
+    *program_len_out = wp.program.size();
+    std::memcpy(program_out, wp.program.data(), wp.program.size());
+    return UFSECP_OK;
+}
+
+ufsecp_error_t ufsecp_segwit_p2wpkh_spk(
+    const uint8_t pubkey_hash[20],
+    uint8_t spk_out[22]) {
+    if (!pubkey_hash || !spk_out) return UFSECP_ERR_NULL_ARG;
+
+    auto spk = secp256k1::segwit_scriptpubkey_p2wpkh(pubkey_hash);
+    std::memcpy(spk_out, spk.data(), 22);
+    return UFSECP_OK;
+}
+
+ufsecp_error_t ufsecp_segwit_p2wsh_spk(
+    const uint8_t script_hash[32],
+    uint8_t spk_out[34]) {
+    if (!script_hash || !spk_out) return UFSECP_ERR_NULL_ARG;
+
+    auto spk = secp256k1::segwit_scriptpubkey_p2wsh(script_hash);
+    std::memcpy(spk_out, spk.data(), 34);
+    return UFSECP_OK;
+}
+
+ufsecp_error_t ufsecp_segwit_p2tr_spk(
+    const uint8_t output_key[32],
+    uint8_t spk_out[34]) {
+    if (!output_key || !spk_out) return UFSECP_ERR_NULL_ARG;
+
+    auto spk = secp256k1::segwit_scriptpubkey_p2tr(output_key);
+    std::memcpy(spk_out, spk.data(), 34);
+    return UFSECP_OK;
+}
+
+ufsecp_error_t ufsecp_segwit_witness_script_hash(
+    const uint8_t* script, size_t script_len,
+    uint8_t hash_out[32]) {
+    if (!script || !hash_out) return UFSECP_ERR_NULL_ARG;
+
+    auto h = secp256k1::witness_script_hash(script, script_len);
+    std::memcpy(hash_out, h.data(), 32);
+    return UFSECP_OK;
+}
+
+/* ===========================================================================
+ * BIP-342: Tapscript Sighash
+ * =========================================================================== */
+
+// Helper: build TapSighashTxData from flat arrays,
+// converting flattened prevout_txids to array-of-array.
+static secp256k1::TapSighashTxData build_tap_tx_data(
+    uint32_t version, uint32_t locktime,
+    size_t input_count,
+    const uint8_t* prevout_txids_flat,
+    const uint32_t* prevout_vouts,
+    const uint64_t* input_amounts,
+    const uint32_t* input_sequences,
+    const uint8_t* const* input_spks,
+    const size_t* input_spk_lens,
+    size_t output_count,
+    const uint64_t* output_values,
+    const uint8_t* const* output_spks,
+    const size_t* output_spk_lens,
+    std::vector<std::array<uint8_t, 32>>& txid_storage) {
+
+    // Convert flat txid array to array-of-array
+    txid_storage.resize(input_count);
+    for (size_t i = 0; i < input_count; ++i) {
+        std::memcpy(txid_storage[i].data(), prevout_txids_flat + i * 32, 32);
+    }
+
+    secp256k1::TapSighashTxData td{};
+    td.version = version;
+    td.locktime = locktime;
+    td.input_count = input_count;
+    td.prevout_txids = txid_storage.data();
+    td.prevout_vouts = prevout_vouts;
+    td.input_amounts = input_amounts;
+    td.input_sequences = input_sequences;
+    td.input_scriptpubkeys = input_spks;
+    td.input_scriptpubkey_lens = input_spk_lens;
+    td.output_count = output_count;
+    td.output_values = output_values;
+    td.output_scriptpubkeys = output_spks;
+    td.output_scriptpubkey_lens = output_spk_lens;
+    return td;
+}
+
+ufsecp_error_t ufsecp_taproot_keypath_sighash(
+    ufsecp_ctx* ctx,
+    uint32_t version, uint32_t locktime,
+    size_t input_count,
+    const uint8_t* prevout_txids,
+    const uint32_t* prevout_vouts,
+    const uint64_t* input_amounts,
+    const uint32_t* input_sequences,
+    const uint8_t* const* input_spks,
+    const size_t* input_spk_lens,
+    size_t output_count,
+    const uint64_t* output_values,
+    const uint8_t* const* output_spks,
+    const size_t* output_spk_lens,
+    size_t input_index,
+    uint8_t hash_type,
+    const uint8_t* annex, size_t annex_len,
+    uint8_t sighash_out[32]) {
+    if (!ctx || !prevout_txids || !prevout_vouts || !input_amounts ||
+        !input_sequences || !input_spks || !input_spk_lens ||
+        !output_values || !output_spks || !output_spk_lens || !sighash_out)
+        return UFSECP_ERR_NULL_ARG;
+    if (input_index >= input_count)
+        return UFSECP_ERR_BAD_INPUT;
+    ctx_clear_err(ctx);
+
+    std::vector<std::array<uint8_t, 32>> txid_storage;
+    auto td = build_tap_tx_data(version, locktime, input_count,
+        prevout_txids, prevout_vouts, input_amounts, input_sequences,
+        input_spks, input_spk_lens, output_count, output_values,
+        output_spks, output_spk_lens, txid_storage);
+
+    auto h = secp256k1::taproot_keypath_sighash(td, input_index, hash_type,
+                                                 annex, annex_len);
+    std::memcpy(sighash_out, h.data(), 32);
+    return UFSECP_OK;
+}
+
+ufsecp_error_t ufsecp_tapscript_sighash(
+    ufsecp_ctx* ctx,
+    uint32_t version, uint32_t locktime,
+    size_t input_count,
+    const uint8_t* prevout_txids,
+    const uint32_t* prevout_vouts,
+    const uint64_t* input_amounts,
+    const uint32_t* input_sequences,
+    const uint8_t* const* input_spks,
+    const size_t* input_spk_lens,
+    size_t output_count,
+    const uint64_t* output_values,
+    const uint8_t* const* output_spks,
+    const size_t* output_spk_lens,
+    size_t input_index,
+    uint8_t hash_type,
+    const uint8_t tapleaf_hash[32],
+    uint8_t key_version,
+    uint32_t code_separator_pos,
+    const uint8_t* annex, size_t annex_len,
+    uint8_t sighash_out[32]) {
+    if (!ctx || !prevout_txids || !prevout_vouts || !input_amounts ||
+        !input_sequences || !input_spks || !input_spk_lens ||
+        !output_values || !output_spks || !output_spk_lens ||
+        !tapleaf_hash || !sighash_out)
+        return UFSECP_ERR_NULL_ARG;
+    if (input_index >= input_count)
+        return UFSECP_ERR_BAD_INPUT;
+    ctx_clear_err(ctx);
+
+    std::vector<std::array<uint8_t, 32>> txid_storage;
+    auto td = build_tap_tx_data(version, locktime, input_count,
+        prevout_txids, prevout_vouts, input_amounts, input_sequences,
+        input_spks, input_spk_lens, output_count, output_values,
+        output_spks, output_spk_lens, txid_storage);
+
+    std::array<uint8_t, 32> tlh;
+    std::memcpy(tlh.data(), tapleaf_hash, 32);
+
+    auto h = secp256k1::tapscript_sighash(td, input_index, hash_type,
+                                           tlh, key_version, code_separator_pos,
+                                           annex, annex_len);
+    std::memcpy(sighash_out, h.data(), 32);
     return UFSECP_OK;
 }
 

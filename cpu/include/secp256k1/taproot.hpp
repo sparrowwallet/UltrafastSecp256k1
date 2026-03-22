@@ -108,6 +108,81 @@ std::array<std::uint8_t, 32> taproot_merkle_root_from_proof(
 std::array<std::uint8_t, 32> taproot_merkle_root(
     const std::vector<std::array<std::uint8_t, 32>>& leaf_hashes);
 
+// ============================================================================
+// BIP-342: Validation of Taproot Scripts (Tapscript Sighash)
+// ============================================================================
+// Implements the signature message (SigMsg) for tapscript spending as defined
+// in BIP-342 §5. This is an extension of BIP-341 common signature message
+// with additional tapscript-specific fields:
+//   - tapleaf_hash (tagged hash of the executed script + leaf version)
+//   - key_version (0x00 for BIP-342)
+//   - code_separator_position (opcode position of last OP_CODESEPARATOR)
+//
+// The epoch byte (0x00) is prepended to distinguish from future upgrades.
+
+// Input amounts and scriptPubKeys for all inputs
+// (required for BIP-341 common signature message)
+struct TapSighashTxData {
+    std::uint32_t version;
+    std::uint32_t locktime;
+
+    // Per-input data
+    std::size_t input_count;
+    const std::array<std::uint8_t, 32>* prevout_txids; // input_count elements
+    const std::uint32_t* prevout_vouts;                 // input_count elements
+    const std::uint64_t* input_amounts;                 // input_count elements
+    const std::uint32_t* input_sequences;               // input_count elements
+    // Per-input scriptPubKeys (for sha_scriptpubkeys)
+    const std::uint8_t* const* input_scriptpubkeys;     // input_count pointers
+    const std::size_t* input_scriptpubkey_lens;          // input_count lengths
+
+    // Output data
+    std::size_t output_count;
+    const std::uint64_t* output_values;
+    const std::uint8_t* const* output_scriptpubkeys;
+    const std::size_t* output_scriptpubkey_lens;
+};
+
+// Sighash types for BIP-341/342 (different encoding from legacy)
+// 0x00 = SIGHASH_DEFAULT (treated as ALL)
+// 0x01 = SIGHASH_ALL
+// 0x02 = SIGHASH_NONE
+// 0x03 = SIGHASH_SINGLE
+// 0x81 = SIGHASH_ALL|ANYONECANPAY
+// 0x82 = SIGHASH_NONE|ANYONECANPAY
+// 0x83 = SIGHASH_SINGLE|ANYONECANPAY
+
+// Compute BIP-342 tapscript signature hash.
+//
+// tx_data:     Transaction data (all inputs/outputs)
+// input_index: Index of the input being signed
+// hash_type:   Sighash type (0x00=DEFAULT, 0x01=ALL, etc.)
+// tapleaf_hash: H_TapLeaf(leaf_version || compact_size(script) || script)
+// key_version: 0x00 for BIP-342
+// code_separator_pos: Position of last OP_CODESEPARATOR, or 0xFFFFFFFF if none
+// annex:       Optional annex data (may be nullptr if annex_len == 0)
+// annex_len:   Length of annex data
+//
+// Returns: 32-byte signature hash
+std::array<std::uint8_t, 32> tapscript_sighash(
+    const TapSighashTxData& tx_data,
+    std::size_t input_index,
+    std::uint8_t hash_type,
+    const std::array<std::uint8_t, 32>& tapleaf_hash,
+    std::uint8_t key_version,
+    std::uint32_t code_separator_pos,
+    const std::uint8_t* annex = nullptr,
+    std::size_t annex_len = 0) noexcept;
+
+// Compute BIP-341 key-path signature hash.
+// Same as tapscript_sighash but without ext_flag / tapscript-specific data.
+std::array<std::uint8_t, 32> taproot_keypath_sighash(
+    const TapSighashTxData& tx_data,
+    std::size_t input_index,
+    std::uint8_t hash_type,
+    const std::uint8_t* annex = nullptr,
+    std::size_t annex_len = 0) noexcept;
+
 } // namespace secp256k1
 
 #endif // SECP256K1_TAPROOT_HPP

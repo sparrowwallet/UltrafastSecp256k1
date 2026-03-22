@@ -36,7 +36,10 @@ set(SECP256K1_SOURCES
     src/ecdh.cpp         # ECDH key exchange
     src/ecies.cpp        # ECIES encryption (AES-256-CTR + HMAC-SHA256)
     src/recovery.cpp     # ECDSA public key recovery
-    src/taproot.cpp      # Taproot (BIP-341/342) key tweaking
+    src/taproot.cpp      # Taproot (BIP-341/342) key tweaking + tapscript sighash
+    src/bip143.cpp       # BIP-143 SegWit v0 sighash
+    src/bip144.cpp       # BIP-144 witness transaction serialization
+    src/segwit.cpp       # BIP-141 segregated witness program ops
     src/batch_add_affine.cpp  # Affine batch addition for sequential ECC search
     src/hash_accel.cpp    # Accelerated SHA-256 (SHA-NI) + RIPEMD-160 + Hash160
     src/pedersen.cpp      # Pedersen commitments (homomorphic)
@@ -1019,6 +1022,20 @@ if(BUILD_TESTING)
     target_compile_definitions(test_sha_standalone PRIVATE STANDALONE_TEST)
     add_test(NAME sha COMMAND test_sha_standalone)
 
+    # -- BIP-141/143/144 SegWit tests --
+    target_sources(run_selftest PRIVATE tests/test_bip141_143_144.cpp)
+    add_executable(test_bip141_143_144_standalone tests/test_bip141_143_144.cpp)
+    target_link_libraries(test_bip141_143_144_standalone PRIVATE ${SECP256K1_LIB_NAME})
+    target_compile_definitions(test_bip141_143_144_standalone PRIVATE STANDALONE_TEST)
+    add_test(NAME bip141_143_144 COMMAND test_bip141_143_144_standalone)
+
+    # -- BIP-342 Tapscript sighash tests --
+    target_sources(run_selftest PRIVATE tests/test_bip342.cpp)
+    add_executable(test_bip342_standalone tests/test_bip342.cpp)
+    target_link_libraries(test_bip342_standalone PRIVATE ${SECP256K1_LIB_NAME})
+    target_compile_definitions(test_bip342_standalone PRIVATE STANDALONE_TEST)
+    add_test(NAME bip342 COMMAND test_bip342_standalone)
+
     # -- FFI C ABI coverage tests (Pedersen switch, ZK range, BIP-324) --
     add_executable(test_ffi_coverage_standalone
         tests/test_ffi_coverage.cpp
@@ -1046,7 +1063,7 @@ if(BUILD_TESTING)
     if(SECP256K1_BUILD_ETHEREUM)
         list(APPEND CORE_TESTS ethereum)
     endif()
-    list(APPEND CORE_TESTS wallet zk_proofs ecies sha ffi_coverage)
+    list(APPEND CORE_TESTS wallet zk_proofs ecies sha bip141_143_144 bip342 ffi_coverage)
     set_tests_properties(${CORE_TESTS} PROPERTIES LABELS "core")
 
     # -- Audit infrastructure lives in audit/ ------------------------------

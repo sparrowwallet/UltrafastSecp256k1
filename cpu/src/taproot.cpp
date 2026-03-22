@@ -242,4 +242,258 @@ std::array<uint8_t, 32> taproot_merkle_root(
     return level[0];
 }
 
+// ============================================================================
+// BIP-342: Tapscript Sighash (+ BIP-341 Key-Path Sighash)
+// ============================================================================
+
+// Internal: LE serialization helpers
+static inline void write_le32(uint8_t* dst, uint32_t v) noexcept {
+    dst[0] = static_cast<uint8_t>(v);
+    dst[1] = static_cast<uint8_t>(v >> 8);
+    dst[2] = static_cast<uint8_t>(v >> 16);
+    dst[3] = static_cast<uint8_t>(v >> 24);
+}
+
+static inline void write_le64(uint8_t* dst, uint64_t v) noexcept {
+    dst[0] = static_cast<uint8_t>(v);
+    dst[1] = static_cast<uint8_t>(v >> 8);
+    dst[2] = static_cast<uint8_t>(v >> 16);
+    dst[3] = static_cast<uint8_t>(v >> 24);
+    dst[4] = static_cast<uint8_t>(v >> 32);
+    dst[5] = static_cast<uint8_t>(v >> 40);
+    dst[6] = static_cast<uint8_t>(v >> 48);
+    dst[7] = static_cast<uint8_t>(v >> 56);
+}
+
+// Internal: write compactSize to SHA256 context
+static void sha_compact_size(SHA256& ctx, uint64_t n) {
+    if (n < 253) {
+        auto b = static_cast<uint8_t>(n);
+        ctx.update(&b, 1);
+    } else if (n <= 0xFFFF) {
+        uint8_t buf[3];
+        buf[0] = 0xFD;
+        buf[1] = static_cast<uint8_t>(n & 0xFF);
+        buf[2] = static_cast<uint8_t>((n >> 8) & 0xFF);
+        ctx.update(buf, 3);
+    } else if (n <= 0xFFFFFFFF) {
+        uint8_t buf[5];
+        buf[0] = 0xFE;
+        write_le32(buf + 1, static_cast<uint32_t>(n));
+        ctx.update(buf, 5);
+    } else {
+        uint8_t buf[9];
+        buf[0] = 0xFF;
+        write_le64(buf + 1, n);
+        ctx.update(buf, 9);
+    }
+}
+
+// Internal: compute sha_prevouts for BIP-341
+static std::array<uint8_t, 32> tap_sha_prevouts(const TapSighashTxData& tx) {
+    SHA256 ctx;
+    for (std::size_t i = 0; i < tx.input_count; ++i) {
+        ctx.update(tx.prevout_txids[i].data(), 32);
+        uint8_t vout_le[4];
+        write_le32(vout_le, tx.prevout_vouts[i]);
+        ctx.update(vout_le, 4);
+    }
+    return ctx.finalize();
+}
+
+// Internal: compute sha_amounts for BIP-341
+static std::array<uint8_t, 32> tap_sha_amounts(const TapSighashTxData& tx) {
+    SHA256 ctx;
+    for (std::size_t i = 0; i < tx.input_count; ++i) {
+        uint8_t val_le[8];
+        write_le64(val_le, tx.input_amounts[i]);
+        ctx.update(val_le, 8);
+    }
+    return ctx.finalize();
+}
+
+// Internal: compute sha_scriptpubkeys for BIP-341
+static std::array<uint8_t, 32> tap_sha_scriptpubkeys(const TapSighashTxData& tx) {
+    SHA256 ctx;
+    for (std::size_t i = 0; i < tx.input_count; ++i) {
+        sha_compact_size(ctx, tx.input_scriptpubkey_lens[i]);
+        ctx.update(tx.input_scriptpubkeys[i], tx.input_scriptpubkey_lens[i]);
+    }
+    return ctx.finalize();
+}
+
+// Internal: compute sha_sequences for BIP-341
+static std::array<uint8_t, 32> tap_sha_sequences(const TapSighashTxData& tx) {
+    SHA256 ctx;
+    for (std::size_t i = 0; i < tx.input_count; ++i) {
+        uint8_t seq_le[4];
+        write_le32(seq_le, tx.input_sequences[i]);
+        ctx.update(seq_le, 4);
+    }
+    return ctx.finalize();
+}
+
+// Internal: compute sha_outputs for BIP-341
+static std::array<uint8_t, 32> tap_sha_outputs(const TapSighashTxData& tx) {
+    SHA256 ctx;
+    for (std::size_t i = 0; i < tx.output_count; ++i) {
+        uint8_t val_le[8];
+        write_le64(val_le, tx.output_values[i]);
+        ctx.update(val_le, 8);
+        sha_compact_size(ctx, tx.output_scriptpubkey_lens[i]);
+        ctx.update(tx.output_scriptpubkeys[i], tx.output_scriptpubkey_lens[i]);
+    }
+    return ctx.finalize();
+}
+
+// Internal: build BIP-341 common signature message and return tagged hash.
+// ext_flag: 0x00 for key path, 0x01 for tapscript
+// Extension data is appended by the caller via ext_data/ext_len.
+static std::array<uint8_t, 32> tap_sighash_common(
+    const TapSighashTxData& tx_data,
+    std::size_t input_index,
+    uint8_t hash_type,
+    uint8_t ext_flag,
+    const uint8_t* ext_data, std::size_t ext_len,
+    const uint8_t* annex, std::size_t annex_len) noexcept {
+
+    uint8_t const output_type = (hash_type == 0x00) ? 0x01 : (hash_type & 0x03);
+    bool const anyone = (hash_type & 0x80) != 0;
+
+    // Tagged hash with "TapSighash"
+    auto tag_hash = SHA256::hash("TapSighash", 10);
+    SHA256 ctx;
+    ctx.update(tag_hash.data(), 32);
+    ctx.update(tag_hash.data(), 32);
+
+    // Epoch (0x00)
+    uint8_t epoch = 0x00;
+    ctx.update(&epoch, 1);
+
+    // hash_type
+    ctx.update(&hash_type, 1);
+
+    // nVersion (LE)
+    uint8_t ver_le[4];
+    write_le32(ver_le, tx_data.version);
+    ctx.update(ver_le, 4);
+
+    // nLockTime (LE)
+    uint8_t lt_le[4];
+    write_le32(lt_le, tx_data.locktime);
+    ctx.update(lt_le, 4);
+
+    // If not ANYONECANPAY: sha_prevouts, sha_amounts, sha_scriptpubkeys, sha_sequences
+    if (!anyone) {
+        auto hp = tap_sha_prevouts(tx_data);
+        ctx.update(hp.data(), 32);
+        auto ha = tap_sha_amounts(tx_data);
+        ctx.update(ha.data(), 32);
+        auto hsp = tap_sha_scriptpubkeys(tx_data);
+        ctx.update(hsp.data(), 32);
+        auto hs = tap_sha_sequences(tx_data);
+        ctx.update(hs.data(), 32);
+    }
+
+    // If output_type == ALL (0x01): sha_outputs
+    if (output_type == 0x01) {
+        auto ho = tap_sha_outputs(tx_data);
+        ctx.update(ho.data(), 32);
+    }
+
+    // spend_type = (ext_flag * 2) + annex_present
+    uint8_t const annex_present = (annex != nullptr && annex_len > 0) ? 1 : 0;
+    uint8_t const spend_type = static_cast<uint8_t>(ext_flag * 2 + annex_present);
+    ctx.update(&spend_type, 1);
+
+    // If ANYONECANPAY: serialize this input's prevout, amount, scriptPubKey, sequence
+    if (anyone) {
+        ctx.update(tx_data.prevout_txids[input_index].data(), 32);
+        uint8_t vout_le[4];
+        write_le32(vout_le, tx_data.prevout_vouts[input_index]);
+        ctx.update(vout_le, 4);
+        uint8_t amt_le[8];
+        write_le64(amt_le, tx_data.input_amounts[input_index]);
+        ctx.update(amt_le, 8);
+        sha_compact_size(ctx, tx_data.input_scriptpubkey_lens[input_index]);
+        ctx.update(tx_data.input_scriptpubkeys[input_index],
+                   tx_data.input_scriptpubkey_lens[input_index]);
+        uint8_t seq_le[4];
+        write_le32(seq_le, tx_data.input_sequences[input_index]);
+        ctx.update(seq_le, 4);
+    } else {
+        // input_index (LE u32)
+        uint8_t idx_le[4];
+        write_le32(idx_le, static_cast<uint32_t>(input_index));
+        ctx.update(idx_le, 4);
+    }
+
+    // If annex present: sha_annex = SHA256(compact_size(annex_len) || annex)
+    if (annex_present) {
+        SHA256 annex_ctx;
+        sha_compact_size(annex_ctx, annex_len);
+        annex_ctx.update(annex, annex_len);
+        auto sha_annex = annex_ctx.finalize();
+        ctx.update(sha_annex.data(), 32);
+    }
+
+    // If SINGLE: sha_single_output (SHA256 of the output at input_index)
+    if (output_type == 0x03) {
+        if (input_index < tx_data.output_count) {
+            SHA256 out_ctx;
+            uint8_t val_le[8];
+            write_le64(val_le, tx_data.output_values[input_index]);
+            out_ctx.update(val_le, 8);
+            sha_compact_size(out_ctx, tx_data.output_scriptpubkey_lens[input_index]);
+            out_ctx.update(tx_data.output_scriptpubkeys[input_index],
+                           tx_data.output_scriptpubkey_lens[input_index]);
+            auto sha_single = out_ctx.finalize();
+            ctx.update(sha_single.data(), 32);
+        }
+        // else: no corresponding output → omit (as per BIP-341)
+    }
+
+    // Extension data (tapscript-specific, appended by caller)
+    if (ext_data != nullptr && ext_len > 0) {
+        ctx.update(ext_data, ext_len);
+    }
+
+    return ctx.finalize();
+}
+
+// -- BIP-342: Tapscript sighash -----------------------------------------------
+
+std::array<uint8_t, 32> tapscript_sighash(
+    const TapSighashTxData& tx_data,
+    std::size_t input_index,
+    uint8_t hash_type,
+    const std::array<uint8_t, 32>& tapleaf_hash,
+    uint8_t key_version,
+    uint32_t code_separator_pos,
+    const uint8_t* annex,
+    std::size_t annex_len) noexcept {
+
+    // Build extension data: tapleaf_hash(32) || key_version(1) || codesep_pos(4 LE)
+    uint8_t ext[37];
+    std::memcpy(ext, tapleaf_hash.data(), 32);
+    ext[32] = key_version;
+    write_le32(ext + 33, code_separator_pos);
+
+    return tap_sighash_common(tx_data, input_index, hash_type,
+                              0x01, ext, 37, annex, annex_len);
+}
+
+// -- BIP-341: Key-path sighash ------------------------------------------------
+
+std::array<uint8_t, 32> taproot_keypath_sighash(
+    const TapSighashTxData& tx_data,
+    std::size_t input_index,
+    uint8_t hash_type,
+    const uint8_t* annex,
+    std::size_t annex_len) noexcept {
+
+    return tap_sighash_common(tx_data, input_index, hash_type,
+                              0x00, nullptr, 0, annex, annex_len);
+}
+
 } // namespace secp256k1

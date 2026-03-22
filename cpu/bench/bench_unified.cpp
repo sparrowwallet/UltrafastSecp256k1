@@ -63,6 +63,9 @@
 #include "secp256k1/pippenger.hpp"
 #include "secp256k1/sha256.hpp"
 #include "secp256k1/sha512.hpp"
+#include "secp256k1/bip143.hpp"
+#include "secp256k1/bip144.hpp"
+#include "secp256k1/segwit.hpp"
 #include "secp256k1/coins/message_signing.hpp"
 #ifdef SECP256K1_BIP324
 #include "secp256k1/bip324.hpp"
@@ -2898,6 +2901,158 @@ int main(int argc, char** argv) {
     }
 
     // =====================================================================
+    //  SECTION 8.12: BIP-141/143/144/342 — SegWit & Tapscript
+    // =====================================================================
+
+    double u_bip143_sighash = 0, u_bip143_script_code = 0;
+    double u_bip144_wtxid = 0, u_bip144_commitment = 0, u_bip144_weight = 0;
+    double u_segwit_parse = 0, u_segwit_p2wpkh_spk = 0, u_segwit_p2wsh_spk = 0;
+    double u_tapscript_sighash = 0, u_keypath_sighash = 0;
+    {
+        using namespace secp256k1;
+
+        // --- BIP-143: SegWit v0 sighash ---
+        Outpoint op{};
+        std::memset(op.txid.data(), 0xAB, 32);
+        op.vout = 0;
+
+        TxOutput txout;
+        txout.value = 100000;
+        txout.script_pubkey.resize(25, 0x76);
+
+        std::array<uint8_t, 20> pkh{};
+        std::memset(pkh.data(), 0xCC, 20);
+        auto sc = bip143_p2wpkh_script_code(pkh.data()); // 25-byte P2WPKH script_code
+
+        uint32_t seq = 0xFFFFFFFF;
+        Bip143Preimage pi = bip143_build_preimage(
+            2, &op, 1, &seq, &txout, 1, 0);
+
+        u_bip143_sighash = bench_ns([&]{
+            auto h = bip143_sighash(pi, op, sc.data(), sc.size(), 100000, seq,
+                                     static_cast<uint32_t>(SighashType::ALL));
+            bench::DoNotOptimize(h[0]);
+        }, N_SIGN);
+
+        u_bip143_script_code = bench_ns([&]{
+            auto s = bip143_p2wpkh_script_code(pkh.data());
+            bench::DoNotOptimize(s[0]);
+        }, N_SIGN * 4);
+
+        // --- BIP-144: Witness transaction ---
+        WitnessTx wtx;
+        wtx.version = 2;
+        wtx.locktime = 0;
+        TxInput tin;
+        std::memset(tin.prev_txid.data(), 0xAB, 32);
+        tin.prev_vout = 0;
+        tin.sequence = 0xFFFFFFFF;
+        wtx.inputs.push_back(tin);
+        TxOut tout;
+        tout.value = 99000;
+        tout.script_pubkey.resize(25, 0x76);
+        wtx.outputs.push_back(tout);
+
+        // Witness stack: one input with [sig(72), pubkey(33)]
+        WitnessStack ws;
+        ws.push_back(WitnessItem(72, 0x30));
+        ws.push_back(WitnessItem(33, 0x02));
+        wtx.witness.push_back(ws);
+
+        u_bip144_wtxid = bench_ns([&]{
+            auto id = compute_wtxid(wtx);
+            bench::DoNotOptimize(id[0]);
+        }, N_SIGN);
+
+        std::array<uint8_t, 32> wr{}, wn{};
+        std::memset(wr.data(), 0x11, 32);
+        std::memset(wn.data(), 0x00, 32);
+        u_bip144_commitment = bench_ns([&]{
+            auto c = witness_commitment(wr, wn);
+            bench::DoNotOptimize(c[0]);
+        }, N_SIGN * 4);
+
+        u_bip144_weight = bench_ns([&]{
+            auto w = tx_weight(wtx);
+            bench::DoNotOptimize(w);
+        }, N_SIGN * 4);
+
+        // --- BIP-141: Witness programs ---
+        uint8_t p2wpkh_spk[22] = {0x00, 0x14};
+        std::memset(p2wpkh_spk + 2, 0xCC, 20);
+
+        u_segwit_parse = bench_ns([&]{
+            auto wp = parse_witness_program(p2wpkh_spk, 22);
+            bench::DoNotOptimize(wp.version);
+        }, N_SIGN * 4);
+
+        u_segwit_p2wpkh_spk = bench_ns([&]{
+            auto spk = segwit_scriptpubkey_p2wpkh(pkh.data());
+            bench::DoNotOptimize(spk[0]);
+        }, N_SIGN * 4);
+
+        std::array<uint8_t, 32> script_hash{};
+        std::memset(script_hash.data(), 0xDD, 32);
+        u_segwit_p2wsh_spk = bench_ns([&]{
+            auto spk = segwit_scriptpubkey_p2wsh(script_hash.data());
+            bench::DoNotOptimize(spk[0]);
+        }, N_SIGN * 4);
+
+        // --- BIP-342 / BIP-341: Tapscript & keypath sighash ---
+        std::array<uint8_t, 32> prev_txid{};
+        std::memset(prev_txid.data(), 0xAB, 32);
+        uint32_t prev_vout = 0;
+        uint64_t in_amount = 100000;
+        uint32_t in_seq = 0xFFFFFFFF;
+        std::vector<uint8_t> spk_data(34, 0x51);
+        spk_data[0] = 0x51; spk_data[1] = 0x20; // OP_1 PUSH32
+        const uint8_t* spk_ptr = spk_data.data();
+        size_t spk_len = spk_data.size();
+        uint64_t out_val = 99000;
+
+        TapSighashTxData td{};
+        td.version = 2;
+        td.locktime = 0;
+        td.input_count = 1;
+        td.prevout_txids = &prev_txid;
+        td.prevout_vouts = &prev_vout;
+        td.input_amounts = &in_amount;
+        td.input_sequences = &in_seq;
+        td.input_scriptpubkeys = &spk_ptr;
+        td.input_scriptpubkey_lens = &spk_len;
+        td.output_count = 1;
+        td.output_values = &out_val;
+        td.output_scriptpubkeys = &spk_ptr;
+        td.output_scriptpubkey_lens = &spk_len;
+
+        u_keypath_sighash = bench_ns([&]{
+            auto h = taproot_keypath_sighash(td, 0, 0x00);
+            bench::DoNotOptimize(h[0]);
+        }, N_SIGN);
+
+        std::array<uint8_t, 32> tapleaf{};
+        std::memset(tapleaf.data(), 0xEE, 32);
+        u_tapscript_sighash = bench_ns([&]{
+            auto h = tapscript_sighash(td, 0, 0x00, tapleaf, 0x00, 0xFFFFFFFF);
+            bench::DoNotOptimize(h[0]);
+        }, N_SIGN);
+
+        print_header("BIP-141/143/144/342 SEGWIT & TAPSCRIPT");
+        print_row("BIP-143 sighash (1-in/1-out)",       u_bip143_sighash);
+        print_row("BIP-143 p2wpkh_script_code",         u_bip143_script_code);
+        print_row("BIP-144 compute_wtxid",               u_bip144_wtxid);
+        print_row("BIP-144 witness_commitment",           u_bip144_commitment);
+        print_row("BIP-144 tx_weight",                    u_bip144_weight);
+        print_row("BIP-141 parse_witness_program",        u_segwit_parse);
+        print_row("BIP-141 p2wpkh_scriptpubkey",          u_segwit_p2wpkh_spk);
+        print_row("BIP-141 p2wsh_scriptpubkey",           u_segwit_p2wsh_spk);
+        print_row("BIP-341 keypath_sighash",              u_keypath_sighash);
+        print_row("BIP-342 tapscript_sighash",            u_tapscript_sighash);
+        print_sep();
+        printf("\n");
+    }
+
+    // =====================================================================
     //  SECTION 9b: BIP-324 Encrypted Transport
     // =====================================================================
 
@@ -3132,6 +3287,14 @@ int main(int argc, char** argv) {
     tput("bip39_generate (24w)",      u_bip39_gen24);
     tput("bip39_validate (12w)",      u_bip39_validate);
     tput("bip39_to_seed (PBKDF2)",    u_bip39_to_seed);
+    printf("\n");
+
+    printf("  --- BIP-141/143/144/342 SegWit ---\n");
+    tput("BIP-143 sighash",           u_bip143_sighash);
+    tput("BIP-144 compute_wtxid",     u_bip144_wtxid);
+    tput("BIP-141 parse_witness",     u_segwit_parse);
+    tput("BIP-341 keypath_sighash",   u_keypath_sighash);
+    tput("BIP-342 tapscript_sighash", u_tapscript_sighash);
     printf("\n");
 
 #ifdef SECP256K1_BIP324
