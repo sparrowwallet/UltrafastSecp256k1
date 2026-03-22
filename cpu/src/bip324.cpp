@@ -96,43 +96,27 @@ std::vector<std::uint8_t> Bip324Cipher::encrypt(
     const std::uint8_t* plaintext, std::size_t plaintext_len) noexcept {
 
     // Output: [3-byte encrypted length] [encrypted payload] [16-byte tag]
-    // The length field encodes plaintext_len as a 3-byte little-endian value.
+    std::size_t const ct_len = 3 + plaintext_len;
+    std::vector<std::uint8_t> output(ct_len + 16);
 
-    // BIP-324 packet structure:
-    // 1. Encrypt the 3-byte length with a separate ChaCha20 keystream
-    // 2. Encrypt the payload with AEAD
-    //
-    // Simplified: we encrypt length||payload as a single AEAD operation.
-    // The 3-byte length prefix is the first 3 bytes of the plaintext.
-
-    // Build length prefix
-    std::uint8_t len_bytes[3];
-    len_bytes[0] = static_cast<std::uint8_t>(plaintext_len & 0xFF);
-    len_bytes[1] = static_cast<std::uint8_t>((plaintext_len >> 8) & 0xFF);
-    len_bytes[2] = static_cast<std::uint8_t>((plaintext_len >> 16) & 0xFF);
-
-    // Combine: [length(3)] [payload(N)]
-    std::vector<std::uint8_t> combined(3 + plaintext_len);
-    std::memcpy(combined.data(), len_bytes, 3);
+    // Build combined plaintext [length(3)][payload(N)] directly in output
+    output[0] = static_cast<std::uint8_t>(plaintext_len & 0xFF);
+    output[1] = static_cast<std::uint8_t>((plaintext_len >> 8) & 0xFF);
+    output[2] = static_cast<std::uint8_t>((plaintext_len >> 16) & 0xFF);
     if (plaintext_len > 0) {
-        std::memcpy(combined.data() + 3, plaintext, plaintext_len);
+        std::memcpy(output.data() + 3, plaintext, plaintext_len);
     }
 
-    // Encrypt with AEAD
+    // Encrypt in place (AEAD supports aliased in/out)
     std::uint8_t nonce[12];
     build_nonce(nonce);
-
-    std::vector<std::uint8_t> output(combined.size() + 16); // ciphertext + tag
-    std::uint8_t tag[16];
 
     aead_chacha20_poly1305_encrypt(
         key_, nonce,
         aad, aad_len,
-        combined.data(), combined.size(),
+        output.data(), ct_len,
         output.data(),
-        tag);
-
-    std::memcpy(output.data() + combined.size(), tag, 16);
+        output.data() + ct_len);
 
     packet_counter_++;
     return output;
@@ -143,48 +127,42 @@ std::vector<std::uint8_t> Bip324Cipher::decrypt(
     const std::uint8_t header_enc[3],
     const std::uint8_t* contents, std::size_t contents_len) noexcept {
 
-    // contents = encrypted_payload || 16-byte tag
-    // Total encrypted data: header(3) + payload
-    // contents_len includes the 16-byte tag
-
     if (contents_len < 16) return {};
 
     std::size_t const ct_len = 3 + (contents_len - 16);
 
-    // Reconstruct the full ciphertext: [header(3)] [payload_ciphertext]
-    std::vector<std::uint8_t> full_ct(ct_len);
-    std::memcpy(full_ct.data(), header_enc, 3);
+    // Single allocation: reconstruct ciphertext and decrypt in place
+    std::vector<std::uint8_t> buf(ct_len);
+    std::memcpy(buf.data(), header_enc, 3);
     if (contents_len > 16) {
-        std::memcpy(full_ct.data() + 3, contents, contents_len - 16);
+        std::memcpy(buf.data() + 3, contents, contents_len - 16);
     }
 
-    // Tag is the last 16 bytes of contents
     const std::uint8_t* tag = contents + (contents_len - 16);
 
     std::uint8_t nonce[12];
     build_nonce(nonce);
 
-    std::vector<std::uint8_t> decrypted(ct_len);
+    // Decrypt in place (AEAD supports aliased in/out)
     bool ok = aead_chacha20_poly1305_decrypt(
         key_, nonce,
         aad, aad_len,
-        full_ct.data(), ct_len,
+        buf.data(), ct_len,
         tag,
-        decrypted.data());
+        buf.data());
 
     packet_counter_++;
 
     if (!ok) return {};
 
-    // Extract length and payload
-    std::uint32_t const payload_len = static_cast<std::uint32_t>(decrypted[0])
-                                    | (static_cast<std::uint32_t>(decrypted[1]) << 8)
-                                    | (static_cast<std::uint32_t>(decrypted[2]) << 16);
+    std::uint32_t const payload_len = static_cast<std::uint32_t>(buf[0])
+                                    | (static_cast<std::uint32_t>(buf[1]) << 8)
+                                    | (static_cast<std::uint32_t>(buf[2]) << 16);
 
     if (payload_len > ct_len - 3) return {};
 
-    return std::vector<std::uint8_t>(decrypted.begin() + 3,
-                                      decrypted.begin() + 3 + payload_len);
+    return std::vector<std::uint8_t>(buf.begin() + 3,
+                                      buf.begin() + 3 + payload_len);
 }
 
 // ============================================================================

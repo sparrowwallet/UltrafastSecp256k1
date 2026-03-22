@@ -85,32 +85,38 @@ bool hkdf_sha256_expand(
 
     if (out_len > 255 * 32) return false;
 
-    std::uint8_t t[32]{}; // T(0) = empty
+    // Pre-compute HMAC ipad/opad blocks from PRK (constant across all iterations)
+    std::uint8_t ipad[64], opad[64];
+    for (int j = 0; j < 32; ++j) {
+        ipad[j] = prk[j] ^ 0x36;
+        opad[j] = prk[j] ^ 0x5C;
+    }
+    std::memset(ipad + 32, 0x36, 32);
+    std::memset(opad + 32, 0x5C, 32);
+
+    // Pre-hash the pad blocks — SHA256 processes exactly one 64-byte block.
+    // Cloning these base states avoids re-hashing the pads on every iteration.
+    SHA256 ipad_base;
+    ipad_base.update(ipad, 64);
+    SHA256 opad_base;
+    opad_base.update(opad, 64);
+
+    detail::secure_erase(ipad, sizeof(ipad));
+    detail::secure_erase(opad, sizeof(opad));
+
+    std::uint8_t t[32]{};
     std::size_t t_len = 0;
     std::size_t offset = 0;
 
     for (std::uint8_t i = 1; offset < out_len; ++i) {
         // T(i) = HMAC-SHA256(PRK, T(i-1) || info || i)
-        SHA256 inner, outer;
-
-        // Build HMAC key pads
-        std::uint8_t ipad[64], opad[64];
-        for (int j = 0; j < 32; ++j) {
-            ipad[j] = prk[j] ^ 0x36;
-            opad[j] = prk[j] ^ 0x5C;
-        }
-        std::memset(ipad + 32, 0x36, 32);
-        std::memset(opad + 32, 0x5C, 32);
-
-        // inner = SHA256(ipad || T(i-1) || info || i)
-        inner.update(ipad, 64);
+        SHA256 inner = ipad_base;  // clone pre-hashed ipad state
         if (t_len > 0) inner.update(t, t_len);
         if (info_len > 0) inner.update(info, info_len);
         inner.update(&i, 1);
         auto inner_hash = inner.finalize();
 
-        // outer = SHA256(opad || inner_hash)
-        outer.update(opad, 64);
+        SHA256 outer = opad_base;  // clone pre-hashed opad state
         outer.update(inner_hash.data(), 32);
         auto ti = outer.finalize();
 
@@ -120,9 +126,6 @@ bool hkdf_sha256_expand(
         std::size_t const copy = std::min<std::size_t>(32, out_len - offset);
         std::memcpy(out + offset, t, copy);
         offset += copy;
-
-        detail::secure_erase(ipad, sizeof(ipad));
-        detail::secure_erase(opad, sizeof(opad));
     }
 
     detail::secure_erase(t, sizeof(t));
