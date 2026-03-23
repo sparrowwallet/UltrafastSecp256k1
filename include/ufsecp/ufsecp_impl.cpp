@@ -1969,6 +1969,10 @@ ufsecp_error_t ufsecp_pubkey_combine(ufsecp_ctx* ctx,
     if (!ctx || !pubkeys || !out33) return UFSECP_ERR_NULL_ARG;
     if (n == 0) return ctx_set_err(ctx, UFSECP_ERR_BAD_INPUT, "need >= 1 pubkey");
     ctx_clear_err(ctx);
+    std::size_t total_pubkey_bytes = 0;
+    if (!checked_mul_size(n, static_cast<std::size_t>(33), total_pubkey_bytes)) {
+        return ctx_set_err(ctx, UFSECP_ERR_BAD_INPUT, "pubkey array length too large");
+    }
     auto acc = point_from_compressed(pubkeys);
     if (acc.is_infinity()) {
         return ctx_set_err(ctx, UFSECP_ERR_BAD_PUBKEY, "invalid pubkey[0]");
@@ -2222,6 +2226,12 @@ ufsecp_error_t ufsecp_multi_scalar_mul(ufsecp_ctx* ctx,
     if (!ctx || !scalars || !points || !out33) return UFSECP_ERR_NULL_ARG;
     if (n == 0) return ctx_set_err(ctx, UFSECP_ERR_BAD_INPUT, "n must be >= 1");
     ctx_clear_err(ctx);
+    std::size_t total_scalar_bytes = 0;
+    std::size_t total_point_bytes = 0;
+    if (!checked_mul_size(n, static_cast<std::size_t>(32), total_scalar_bytes)
+        || !checked_mul_size(n, static_cast<std::size_t>(33), total_point_bytes)) {
+        return ctx_set_err(ctx, UFSECP_ERR_BAD_INPUT, "scalar/point array length too large");
+    }
     std::vector<Scalar> svec(n);
     std::vector<Point> pvec(n);
     for (size_t i = 0; i < n; ++i) {

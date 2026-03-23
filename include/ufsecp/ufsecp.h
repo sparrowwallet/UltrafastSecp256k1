@@ -610,7 +610,8 @@ UFSECP_API ufsecp_error_t ufsecp_pubkey_tweak_mul(ufsecp_ctx* ctx,
                                                   uint8_t out33[33]);
 
 /** Combine N compressed public keys: out = sum(pubkeys[i]).
- *  pubkeys: array of 33-byte compressed keys, contiguous. */
+ *  pubkeys: array of 33-byte compressed keys, contiguous.
+ *  The total contiguous byte span n * 33 must fit in size_t. */
 UFSECP_API ufsecp_error_t ufsecp_pubkey_combine(ufsecp_ctx* ctx,
                                                 const uint8_t* pubkeys,
                                                 size_t n,
@@ -706,7 +707,8 @@ UFSECP_API ufsecp_error_t ufsecp_shamir_trick(
     uint8_t out33[33]);
 
 /** Multi-scalar multiplication: compute sum(scalars[i] * points[i]).
- *  scalars: n * 32 bytes contiguous. points: n * 33 bytes contiguous. */
+ *  scalars: n * 32 bytes contiguous. points: n * 33 bytes contiguous.
+ *  Both contiguous byte spans must fit in size_t. */
 UFSECP_API ufsecp_error_t ufsecp_multi_scalar_mul(
     ufsecp_ctx* ctx,
     const uint8_t* scalars, const uint8_t* points, size_t n,

@@ -3350,6 +3350,12 @@ static void test_ffi_malformed_counts() {
         }
     }
 
+    // overflow n for pubkey_combine must reject before pointer arithmetic wraps
+    {
+        const ufsecp_error_t rc = ufsecp_pubkey_combine(ctx, pub33, static_cast<size_t>(-1), out33);
+        CHECK(rc != UFSECP_OK, "pubkey_combine rejects overflow-sized pubkey array");
+    }
+
     // Schnorr batch verify with n=0
     {
         uint8_t dummy[128];
@@ -3364,6 +3370,13 @@ static void test_ffi_malformed_counts() {
         const ufsecp_error_t rc = ufsecp_multi_scalar_mul(ctx, dummy_sc, dummy_pt, 0, dummy_out);
         CHECK(true, "multi_scalar_mul n=0 did not crash");
         (void)rc;
+    }
+
+    // overflow n for multi_scalar_mul must reject before pointer arithmetic wraps
+    {
+        uint8_t dummy_sc[32], dummy_pt[33], dummy_out[33];
+        const ufsecp_error_t rc = ufsecp_multi_scalar_mul(ctx, dummy_sc, dummy_pt, static_cast<size_t>(-1), dummy_out);
+        CHECK(rc != UFSECP_OK, "multi_scalar_mul rejects overflow-sized scalar/point arrays");
     }
 
     ufsecp_ctx_destroy(ctx);
