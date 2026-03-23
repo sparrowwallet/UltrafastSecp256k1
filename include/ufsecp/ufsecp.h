@@ -719,7 +719,7 @@ UFSECP_API ufsecp_error_t ufsecp_multi_scalar_mul(
 #define UFSECP_MUSIG2_PUBNONCE_LEN   66  /**< 33 + 33 bytes */
 #define UFSECP_MUSIG2_AGGNONCE_LEN   66
 #define UFSECP_MUSIG2_KEYAGG_LEN     165 /**< opaque serialised key agg context */
-#define UFSECP_MUSIG2_SESSION_LEN    165 /**< opaque serialised session state */
+#define UFSECP_MUSIG2_SESSION_LEN    165 /**< opaque serialised session state, including participant count metadata */
 #define UFSECP_MUSIG2_SECNONCE_LEN   64  /**< secret nonce (2 x 32 bytes) */
 
 /** Aggregate public keys for MuSig2.
@@ -752,7 +752,10 @@ UFSECP_API ufsecp_error_t ufsecp_musig2_nonce_agg(
     uint8_t aggnonce_out[UFSECP_MUSIG2_AGGNONCE_LEN]);
 
 /** Start a MuSig2 signing session.
- *  keyagg must be a valid opaque context previously produced by ufsecp_musig2_key_agg. */
+ *  keyagg must be a valid opaque context previously produced by ufsecp_musig2_key_agg.
+ *  session_out binds the participant count from keyagg and must later be paired
+ *  with exactly the same signer set arity during partial signing, verification,
+ *  and aggregation. */
 UFSECP_API ufsecp_error_t ufsecp_musig2_start_sign_session(
     ufsecp_ctx* ctx,
     const uint8_t aggnonce[UFSECP_MUSIG2_AGGNONCE_LEN],
@@ -763,7 +766,8 @@ UFSECP_API ufsecp_error_t ufsecp_musig2_start_sign_session(
 /** Produce a partial signature.
  *  IMPORTANT: secnonce is zeroed after use to prevent nonce reuse.
  *  keyagg must be a valid opaque context previously produced by ufsecp_musig2_key_agg.
- *  signer_index must be a valid participant index within the aggregated key set. */
+ *  signer_index must be a valid participant index within the aggregated key set.
+ *  session must carry the same participant count as keyagg. */
 UFSECP_API ufsecp_error_t ufsecp_musig2_partial_sign(
     ufsecp_ctx* ctx,
     uint8_t secnonce[UFSECP_MUSIG2_SECNONCE_LEN],
@@ -775,7 +779,8 @@ UFSECP_API ufsecp_error_t ufsecp_musig2_partial_sign(
 
 /** Verify a partial signature.
  *  keyagg must be a valid opaque context previously produced by ufsecp_musig2_key_agg.
- *  signer_index must be a valid participant index within the aggregated key set. */
+ *  signer_index must be a valid participant index within the aggregated key set.
+ *  session must carry the same participant count as keyagg. */
 UFSECP_API ufsecp_error_t ufsecp_musig2_partial_verify(
     ufsecp_ctx* ctx,
     const uint8_t partial_sig32[32],
@@ -787,7 +792,7 @@ UFSECP_API ufsecp_error_t ufsecp_musig2_partial_verify(
 
 /** Aggregate partial signatures into a final BIP-340 Schnorr signature.
  *  partial_sigs must contain exactly n records of 32 bytes.
- *  n must be non-zero. */
+ *  n must be non-zero and must match the participant count bound into session. */
 UFSECP_API ufsecp_error_t ufsecp_musig2_partial_sig_agg(
     ufsecp_ctx* ctx,
     const uint8_t* partial_sigs, size_t n,

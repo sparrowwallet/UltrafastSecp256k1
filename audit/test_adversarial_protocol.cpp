@@ -337,6 +337,84 @@ static void test_musig2_hostile_args() {
     ufsecp_ctx_destroy(ctx);
 }
 
+    // A.3c: Aggregation must reject partial-signature arity mismatches against session metadata.
+    static void test_musig2_partial_sig_agg_rejects_arity_mismatch() {
+        (void)std::printf("  [A.3c] MuSig2: partial_sig_agg rejects arity mismatch\n");
+
+        ufsecp_ctx* ctx = nullptr;
+        ufsecp_ctx_create(&ctx);
+
+        uint8_t priv1[32], priv2[32];
+        hex_to_bytes(PRIVKEY1_HEX, priv1, 32);
+        hex_to_bytes(PRIVKEY2_HEX, priv2, 32);
+        uint8_t xonly1[32], xonly2[32];
+        CHECK_OK(ufsecp_pubkey_xonly(ctx, priv1, xonly1), "xonly1 for arity mismatch test");
+        CHECK_OK(ufsecp_pubkey_xonly(ctx, priv2, xonly2), "xonly2 for arity mismatch test");
+
+        uint8_t pubkeys[64];
+        std::memcpy(pubkeys, xonly1, 32);
+        std::memcpy(pubkeys + 32, xonly2, 32);
+        uint8_t keyagg[UFSECP_MUSIG2_KEYAGG_LEN], agg_pub[32];
+        CHECK_OK(ufsecp_musig2_key_agg(ctx, pubkeys, 2, keyagg, agg_pub), "key_agg for arity mismatch test");
+
+        uint8_t msg32[32];
+        hex_to_bytes(MSG_HEX, msg32, 32);
+        uint8_t extra[32] = {};
+
+        uint8_t sn1[UFSECP_MUSIG2_SECNONCE_LEN], pn1[UFSECP_MUSIG2_PUBNONCE_LEN];
+        CHECK_OK(ufsecp_musig2_nonce_gen(ctx, priv1, xonly1, agg_pub, msg32, extra, sn1, pn1),
+             "nonce_gen signer1 for arity mismatch test");
+        extra[0] = 1;
+        uint8_t sn2[UFSECP_MUSIG2_SECNONCE_LEN], pn2[UFSECP_MUSIG2_PUBNONCE_LEN];
+        CHECK_OK(ufsecp_musig2_nonce_gen(ctx, priv2, xonly2, agg_pub, msg32, extra, sn2, pn2),
+             "nonce_gen signer2 for arity mismatch test");
+
+        uint8_t nonces_all[2 * UFSECP_MUSIG2_PUBNONCE_LEN];
+        std::memcpy(nonces_all, pn1, UFSECP_MUSIG2_PUBNONCE_LEN);
+        std::memcpy(nonces_all + UFSECP_MUSIG2_PUBNONCE_LEN, pn2, UFSECP_MUSIG2_PUBNONCE_LEN);
+        uint8_t aggnonce[UFSECP_MUSIG2_AGGNONCE_LEN];
+        CHECK_OK(ufsecp_musig2_nonce_agg(ctx, nonces_all, 2, aggnonce), "nonce_agg for arity mismatch test");
+
+        uint8_t session[UFSECP_MUSIG2_SESSION_LEN];
+        CHECK_OK(ufsecp_musig2_start_sign_session(ctx, aggnonce, keyagg, msg32, session),
+             "start_sign_session for arity mismatch test");
+
+        uint8_t psig1[32], psig2[32];
+        CHECK_OK(ufsecp_musig2_partial_sign(ctx, sn1, priv1, keyagg, session, 0, psig1),
+             "partial_sign signer1 for arity mismatch test");
+        CHECK_OK(ufsecp_musig2_partial_sign(ctx, sn2, priv2, keyagg, session, 1, psig2),
+             "partial_sign signer2 for arity mismatch test");
+
+        uint8_t psigs_ok[64];
+        std::memcpy(psigs_ok, psig1, 32);
+        std::memcpy(psigs_ok + 32, psig2, 32);
+        uint8_t sig64[64];
+        CHECK_OK(ufsecp_musig2_partial_sig_agg(ctx, psigs_ok, 2, session, sig64),
+             "partial_sig_agg accepts exact session arity");
+        CHECK_OK(ufsecp_schnorr_verify(ctx, msg32, sig64, agg_pub),
+             "final sig from exact session arity verifies");
+
+        CHECK(ufsecp_musig2_partial_sig_agg(ctx, psigs_ok, 1, session, sig64) != UFSECP_OK,
+            "partial_sig_agg rejects missing partial signatures");
+
+        uint8_t psigs_extra[96] = {};
+        std::memcpy(psigs_extra, psig1, 32);
+        std::memcpy(psigs_extra + 32, psig2, 32);
+        CHECK(ufsecp_musig2_partial_sig_agg(ctx, psigs_extra, 3, session, sig64) != UFSECP_OK,
+            "partial_sig_agg rejects extra partial signatures");
+
+        uint8_t session_bad[UFSECP_MUSIG2_SESSION_LEN];
+        std::memcpy(session_bad, session, sizeof(session_bad));
+        const uint32_t impossible_count = 3;
+        std::memcpy(session_bad + 98, &impossible_count, sizeof(impossible_count));
+        CHECK(ufsecp_musig2_partial_sig_agg(ctx, psigs_ok, 2, session_bad, sig64) != UFSECP_OK,
+            "partial_sig_agg rejects corrupted session participant count");
+        CHECK(ufsecp_musig2_partial_sign(ctx, psigs_extra, priv1, keyagg, session_bad, 0, psig1) != UFSECP_OK,
+            "partial_sign rejects session participant count mismatch");
+
+        ufsecp_ctx_destroy(ctx);
+    }
+
 // A.3b: Fixed-size keyagg blob must reject participant counts that do not fit.
 static void test_musig2_keyagg_participant_overflow() {
     (void)std::printf("  [A.3b] MuSig2: keyagg participant overflow\n");
@@ -3350,6 +3428,7 @@ int test_adversarial_protocol_run() {
     test_musig2_nonce_reuse();
     test_musig2_partial_sig_replay();
     test_musig2_hostile_args();
+    test_musig2_partial_sig_agg_rejects_arity_mismatch();
     test_musig2_keyagg_participant_overflow();
     test_musig2_rogue_key();
     test_musig2_transcript_mutation();

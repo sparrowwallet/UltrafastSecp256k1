@@ -135,12 +135,17 @@ namespace {
 
 constexpr std::size_t kMuSig2KeyAggHeaderLen = 38;
 constexpr std::size_t kMuSig2KeyAggCoeffLen = 32;
+constexpr std::size_t kMuSig2SessionSerializedLen = 98;
+constexpr std::size_t kMuSig2SessionCountOffset = kMuSig2SessionSerializedLen;
+constexpr std::size_t kMuSig2SessionCountLen = 4;
 constexpr uint32_t kMuSig2MinParticipants = 2;
 constexpr uint32_t kMuSig2MaxKeyAggParticipants =
     static_cast<uint32_t>((UFSECP_MUSIG2_KEYAGG_LEN - kMuSig2KeyAggHeaderLen) / kMuSig2KeyAggCoeffLen);
 
 static_assert(kMuSig2MaxKeyAggParticipants >= kMuSig2MinParticipants,
               "MuSig2 keyagg blob must encode at least two participants");
+static_assert(kMuSig2SessionCountOffset + kMuSig2SessionCountLen <= UFSECP_MUSIG2_SESSION_LEN,
+              "MuSig2 session blob must have room for participant count metadata");
 
 static ufsecp_error_t parse_musig2_keyagg(ufsecp_ctx* ctx,
                                           const uint8_t keyagg[UFSECP_MUSIG2_KEYAGG_LEN],
@@ -168,6 +173,29 @@ static ufsecp_error_t parse_musig2_keyagg(ufsecp_ctx* ctx,
             return ctx_set_err(ctx, UFSECP_ERR_BAD_INPUT, "invalid key coefficient in keyagg");
         }
         out.key_coefficients.push_back(coefficient);
+    }
+    return UFSECP_OK;
+}
+
+static ufsecp_error_t parse_musig2_session(ufsecp_ctx* ctx,
+                                           const uint8_t session[UFSECP_MUSIG2_SESSION_LEN],
+                                           secp256k1::MuSig2Session& out,
+                                           uint32_t& participant_count_out) {
+    out.R = point_from_compressed(session);
+    if (out.R.is_infinity()) {
+        return ctx_set_err(ctx, UFSECP_ERR_BAD_INPUT, "invalid session R point");
+    }
+    if (!scalar_parse_strict(session + 33, out.b)) {
+        return ctx_set_err(ctx, UFSECP_ERR_BAD_INPUT, "invalid session scalar b");
+    }
+    if (!scalar_parse_strict(session + 65, out.e)) {
+        return ctx_set_err(ctx, UFSECP_ERR_BAD_INPUT, "invalid session scalar e");
+    }
+    out.R_negated = (session[97] != 0);
+
+    std::memcpy(&participant_count_out, session + kMuSig2SessionCountOffset, sizeof(participant_count_out));
+    if (participant_count_out < kMuSig2MinParticipants || participant_count_out > kMuSig2MaxKeyAggParticipants) {
+        return ctx_set_err(ctx, UFSECP_ERR_BAD_INPUT, "invalid session participant count");
     }
     return UFSECP_OK;
 }
@@ -2323,6 +2351,8 @@ ufsecp_error_t ufsecp_musig2_start_sign_session(
     scalar_to_bytes(sess.b, session_out + 33);
     scalar_to_bytes(sess.e, session_out + 65);
     session_out[97] = sess.R_negated ? 1 : 0;
+    const uint32_t participant_count = static_cast<uint32_t>(kagg.key_coefficients.size());
+    std::memcpy(session_out + kMuSig2SessionCountOffset, &participant_count, sizeof(participant_count));
     return UFSECP_OK;
 }
 
@@ -2363,16 +2393,16 @@ ufsecp_error_t ufsecp_musig2_partial_sign(
         return ctx_set_err(ctx, UFSECP_ERR_BAD_INPUT, "signer_index out of range");
     }
     secp256k1::MuSig2Session sess;
-    sess.R = point_from_compressed(session);
-    if (sess.R.is_infinity()) {
-        return ctx_set_err(ctx, UFSECP_ERR_BAD_INPUT, "invalid session R point");
+    uint32_t session_participant_count = 0;
+    {
+        const ufsecp_error_t rc = parse_musig2_session(ctx, session, sess, session_participant_count);
+        if (rc != UFSECP_OK) {
+            return rc;
+        }
     }
-    if (!scalar_parse_strict(session + 33, sess.b))
-        return ctx_set_err(ctx, UFSECP_ERR_BAD_INPUT, "invalid session scalar b");
-    if (!scalar_parse_strict(session + 65, sess.e)) {
-        return ctx_set_err(ctx, UFSECP_ERR_BAD_INPUT, "invalid session scalar e");
+    if (session_participant_count != kagg.key_coefficients.size()) {
+        return ctx_set_err(ctx, UFSECP_ERR_BAD_INPUT, "session participant count does not match keyagg");
     }
-    sess.R_negated = (session[97] != 0);
     auto psig = secp256k1::musig2_partial_sign(sn, sk, kagg, sess, signer_index);
     secp256k1::detail::secure_erase(&sk, sizeof(sk));
     secp256k1::detail::secure_erase(&sn, sizeof(sn));
@@ -2414,16 +2444,16 @@ ufsecp_error_t ufsecp_musig2_partial_verify(
         return ctx_set_err(ctx, UFSECP_ERR_BAD_INPUT, "signer_index out of range");
     }
     secp256k1::MuSig2Session sess;
-    sess.R = point_from_compressed(session);
-    if (sess.R.is_infinity()) {
-        return ctx_set_err(ctx, UFSECP_ERR_BAD_INPUT, "invalid session R point");
+    uint32_t session_participant_count = 0;
+    {
+        const ufsecp_error_t rc = parse_musig2_session(ctx, session, sess, session_participant_count);
+        if (rc != UFSECP_OK) {
+            return rc;
+        }
     }
-    if (!scalar_parse_strict(session + 33, sess.b))
-        return ctx_set_err(ctx, UFSECP_ERR_BAD_INPUT, "invalid session scalar b");
-    if (!scalar_parse_strict(session + 65, sess.e)) {
-        return ctx_set_err(ctx, UFSECP_ERR_BAD_INPUT, "invalid session scalar e");
+    if (session_participant_count != kagg.key_coefficients.size()) {
+        return ctx_set_err(ctx, UFSECP_ERR_BAD_INPUT, "session participant count does not match keyagg");
     }
-    sess.R_negated = (session[97] != 0);
     if (!secp256k1::musig2_partial_verify(psig, pn, pk_arr, kagg, sess, signer_index)) {
         return ctx_set_err(ctx, UFSECP_ERR_VERIFY_FAIL, "partial sig verify failed");
     }
@@ -2447,16 +2477,16 @@ ufsecp_error_t ufsecp_musig2_partial_sig_agg(
         }
     }
     secp256k1::MuSig2Session sess;
-    sess.R = point_from_compressed(session);
-    if (sess.R.is_infinity()) {
-        return ctx_set_err(ctx, UFSECP_ERR_BAD_INPUT, "invalid session R point");
+    uint32_t session_participant_count = 0;
+    {
+        const ufsecp_error_t rc = parse_musig2_session(ctx, session, sess, session_participant_count);
+        if (rc != UFSECP_OK) {
+            return rc;
+        }
     }
-    if (!scalar_parse_strict(session + 33, sess.b))
-        return ctx_set_err(ctx, UFSECP_ERR_BAD_INPUT, "invalid session scalar b");
-    if (!scalar_parse_strict(session + 65, sess.e)) {
-        return ctx_set_err(ctx, UFSECP_ERR_BAD_INPUT, "invalid session scalar e");
+    if (n != session_participant_count) {
+        return ctx_set_err(ctx, UFSECP_ERR_BAD_INPUT, "partial_sigs count does not match session participant count");
     }
-    sess.R_negated = (session[97] != 0);
     auto final_sig = secp256k1::musig2_partial_sig_agg(psigs, sess);
     std::memcpy(sig64_out, final_sig.data(), 64);
     return UFSECP_OK;
