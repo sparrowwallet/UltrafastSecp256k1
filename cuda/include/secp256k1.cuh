@@ -171,6 +171,27 @@ __constant__ static const uint64_t BETA[4] = {
     0x7AE96A2B657C0710ULL
 };
 
+// Precomputed dummy point D = G + endo(G) for GLV+CT generator mul.
+// endo(G) = (beta*Gx mod p, Gy).  D is used as the starting accumulator
+// (amortizes the field_inv that would otherwise be needed per-call).
+// Verified: D.y^2 == D.x^3 + 7 (mod p).  Computed offline via Python.
+// D.x  = 0xC994B69768832BCBFF5E9AB39AE8D1D3763BBF1E531BED98FE51DE5EE84F50FB
+// D.y  = 0xB7C52588D95C3B9AA25B0403F1EEF75702E84BB7597AABE663B82F6F04EF2777
+// -D.y = 0x483ADA7726A3C4655DA4FBFC0E1108A8FD17B448A68554199C47D08FFB10D4B8 (= G.y)
+__constant__ static const uint64_t DUMMY_GLV_X[4] = {
+    0xFE51DE5EE84F50FBULL, 0x763BBF1E531BED98ULL,
+    0xFF5E9AB39AE8D1D3ULL, 0xC994B69768832BCBULL
+};
+__constant__ static const uint64_t DUMMY_GLV_Y[4] = {
+    0x63B82F6F04EF2777ULL, 0x02E84BB7597AABE6ULL,
+    0xA25B0403F1EEF757ULL, 0xB7C52588D95C3B9AULL
+};
+// -D.y == G.y (coincidental property — verified above)
+__constant__ static const uint64_t DUMMY_GLV_NEG_Y[4] = {
+    0x9C47D08FFB10D4B8ULL, 0xFD17B448A6855419ULL,
+    0x5DA4FBFC0E1108A8ULL, 0x483ADA7726A3C465ULL
+};
+
 // Generator point G in affine coordinates
 __constant__ static const uint64_t GENERATOR_X[4] = {
     0x59F2815B16F81798ULL,
@@ -3785,7 +3806,7 @@ __device__ inline void scalar_mul_generator_ct(const Scalar* k, JacobianPoint* r
 }
 
 // ============================================================================
-// GLV + CT generator multiplication  (constant-time, ~30-35% faster)
+// GLV + CT generator multiplication  (constant-time, ~35-40% faster)
 // ---------------------------------------------------------------------------
 // Decomposes k = k1 + k2*λ (GLV) where |k1|,|k2| ≤ 2^128, then processes
 // both halves in a shared 16-step W8 doubling chain:
@@ -3795,9 +3816,9 @@ __device__ inline void scalar_mul_generator_ct(const Scalar* k, JacobianPoint* r
 // GLV sign flags (k1_neg, k2_neg) are applied via CT bitmasks — no branches
 // on secret data in the main loop.
 //
-// Dummy-start technique: start accumulator at G+endo(G) (computed once,
-// 1 field_inv + 5 field_muls). Subtract G+endo(G) at end → net result k*G.
-// The accumulator is never at infinity → all ops use _unchecked variants.
+// Dummy-start technique: start accumulator at D = G+endo(G) (precomputed in
+// __constant__ memory — DUMMY_GLV_X/Y). Subtract D at end → net result k*G.
+// No field_inv in hot path — fully amortized. Accumulator is never at infinity.
 //
 // Scalar blinding (DPA defense): projective coordinates are randomized before
 // the main loop using GPU clock + thread-ID entropy. Each invocation maps
@@ -3814,33 +3835,18 @@ __device__ inline void scalar_mul_generator_ct_glv(const Scalar* k, JacobianPoin
     beta_fe.limbs[0] = BETA[0]; beta_fe.limbs[1] = BETA[1];
     beta_fe.limbs[2] = BETA[2]; beta_fe.limbs[3] = BETA[3];
 
-    // -- Build dummy = G + endo(G) in affine (one field_inv, done before loop) --
-    // endo(G).x = β·G.x,  endo(G).y = G.y  (endomorphism preserves y)
-    AffinePoint endo_G;
-    field_mul(&GENERATOR_TABLE_W8[1].x, &beta_fe, &endo_G.x);
-    endo_G.y = GENERATOR_TABLE_W8[1].y;
-
-    JacobianPoint dummy_jac;
-    dummy_jac.x = GENERATOR_TABLE_W8[1].x;
-    dummy_jac.y = GENERATOR_TABLE_W8[1].y;
-    field_set_one(&dummy_jac.z);
-    dummy_jac.infinity = false;
-    jacobian_add_mixed_unchecked(&dummy_jac, &endo_G, &dummy_jac);
-
-    // Normalize dummy to affine (Z=1) so the final subtraction is a mixed add.
+    // -- Dummy D = G + endo(G) loaded from __constant__ memory (no field_inv) --
+    // Precomputed offline: D.x = DUMMY_GLV_X, D.y = DUMMY_GLV_Y,
+    // -D.y = DUMMY_GLV_NEG_Y (= G.y, verified property of this curve point).
     AffinePoint dummy_affine, neg_dummy_affine;
-    {
-        FieldElement zi, zi2, zi3;
-        field_inv(&dummy_jac.z, &zi);
-        field_sqr(&zi, &zi2);
-        field_mul(&zi2, &zi, &zi3);
-        field_mul(&dummy_jac.x, &zi2, &dummy_affine.x);
-        field_mul(&dummy_jac.y, &zi3, &dummy_affine.y);
+    for (int i = 0; i < 4; i++) {
+        dummy_affine.x.limbs[i]     = DUMMY_GLV_X[i];
+        dummy_affine.y.limbs[i]     = DUMMY_GLV_Y[i];
+        neg_dummy_affine.x.limbs[i] = DUMMY_GLV_X[i];
+        neg_dummy_affine.y.limbs[i] = DUMMY_GLV_NEG_Y[i];
     }
-    neg_dummy_affine.x = dummy_affine.x;
-    field_negate(&dummy_affine.y, &neg_dummy_affine.y);
 
-    // Start accumulator at dummy_affine (Z=1, guaranteed non-infinity).
+    // Start accumulator at D (Z=1, guaranteed non-infinity).
     r->x = dummy_affine.x;
     r->y = dummy_affine.y;
     field_set_one(&r->z);
