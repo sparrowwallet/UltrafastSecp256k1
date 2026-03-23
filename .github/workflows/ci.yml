@@ -156,10 +156,10 @@ jobs:
           test -n "$BENCH_KP"
           test -n "$BENCH_BIP324"
 
-          timeout 180 "$QEMU_AARCH64" -L "$SYSROOT" "$SELFTEST" smoke
-          timeout 120 "$QEMU_AARCH64" -L "$SYSROOT" "$BIP324_TEST"
-          timeout 120 "$QEMU_AARCH64" -L "$SYSROOT" "$BENCH_KP" | tee arm64_bench_kP.txt
-          timeout 180 "$QEMU_AARCH64" -L "$SYSROOT" "$BENCH_BIP324" | tee arm64_bench_bip324.txt
+          timeout 360 "$QEMU_AARCH64" -L "$SYSROOT" "$SELFTEST" smoke
+          timeout 180 "$QEMU_AARCH64" -L "$SYSROOT" "$BIP324_TEST"
+          timeout 180 "$QEMU_AARCH64" -L "$SYSROOT" "$BENCH_KP" | tee arm64_bench_kP.txt
+          timeout 360 "$QEMU_AARCH64" -L "$SYSROOT" "$BENCH_BIP324" | tee arm64_bench_bip324.txt
 
       - name: ARM64 smoke summary
         if: success() || failure()
