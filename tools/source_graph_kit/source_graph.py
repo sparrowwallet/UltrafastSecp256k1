@@ -38,6 +38,7 @@ Usage:
     python source_graph.py context <file>     # Unified context: summary + functions + deps
     python source_graph.py func <name>        # Find function with line ranges
     python source_graph.py body <name>        # Print function source from DB (no file read)
+    python source_graph.py bodygrep <text>    # Search string literals inside function bodies (replaces grep)
     python source_graph.py gaps               # Find documentation/coverage gaps
     python source_graph.py summary            # Project overview with statistics
     python source_graph.py stats              # Database statistics
@@ -7634,6 +7635,27 @@ def find_cmd(term):
             "SELECT entity_type, name, file, category, description FROM fts_index WHERE name LIKE ? OR description LIKE ? OR file LIKE ? LIMIT 30",
             (pattern, pattern, pattern)
         ).fetchall()
+    # Fallback: also search function bodies for string literals
+    if len(rows) < 30:
+        body_pattern = f"%{term}%"
+        try:
+            body_rows = conn2.execute(
+                "SELECT 'body' AS entity_type, function_name AS name, file, project AS category, "
+                "'function body match' AS description "
+                "FROM function_bodies WHERE body LIKE ? "
+                "ORDER BY file, start_line LIMIT 15",
+                (body_pattern,)
+            ).fetchall()
+            seen_bodies = set()
+            for br in body_rows:
+                key = (br[0], br[1], br[2])
+                if key not in seen_bodies:
+                    rows.append(br)
+                    seen_bodies.add(key)
+                    if len(rows) >= 30:
+                        break
+        except sqlite3.OperationalError:
+            pass
     conn2.close()
     cols = ["entity_type", "name", "file", "category", "description"]
     print(f"\n  Search: '{term}'")
@@ -9254,6 +9276,28 @@ def body_cmd(name):
         print(row['body'])
 
 
+def bodygrep_cmd(term):
+    """Search for a string literal inside function bodies (SQL LIKE).
+
+    This replaces grep/rg for finding error messages, throw strings,
+    constant literals, or any text inside indexed function bodies.
+    """
+    conn = get_conn()
+    pattern = f"%{term}%"
+    rows = conn.execute(
+        "SELECT function_name, class_name, file, start_line, end_line, line_count, project "
+        "FROM function_bodies WHERE body LIKE ? "
+        "ORDER BY file, start_line LIMIT 30",
+        (pattern,)
+    ).fetchall()
+    print(f"\n  Body grep: '{term}'")
+    if not rows:
+        print("  (no results)")
+        return
+    print_table(rows, ["function_name", "class_name", "file", "start_line", "end_line", "line_count", "project"])
+    print(f"\n  ({len(rows)} results)")
+
+
 def summarize_cmd(args):
     """Generate or show function summaries."""
     conn = get_conn()
@@ -10286,6 +10330,8 @@ def main():
         sql_cmd(" ".join(sys.argv[2:]))
     elif cmd == "body" and len(sys.argv) > 2:
         body_cmd(sys.argv[2])
+    elif cmd == "bodygrep" and len(sys.argv) > 2:
+        bodygrep_cmd(" ".join(sys.argv[2:]))
     elif cmd == "summarize":
         summarize_cmd(sys.argv[2:])
     elif cmd == "decide" and len(sys.argv) > 2:

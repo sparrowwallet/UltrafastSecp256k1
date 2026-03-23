@@ -1383,8 +1383,10 @@ static_assert(UFSECP_SIG_COMPACT_LEN == 64,
               "ABI break: UFSECP_SIG_COMPACT_LEN changed");
 #else
 /* C11 _Static_assert equivalent for pure-C consumers */
+#if defined(__STDC_VERSION__) && __STDC_VERSION__ >= 201112L
 _Static_assert(sizeof(ufsecp_bip32_key) == 82,
                "ABI break: ufsecp_bip32_key size changed (expected 82)");
+#endif
 #endif
 
 #endif /* UFSECP_H */

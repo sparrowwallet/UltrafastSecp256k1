@@ -2,6 +2,7 @@
 
 #include <iostream>
 #include <cstdlib>
+#include <mutex>
 
 namespace secp256k1::fast {
 
@@ -11,29 +12,28 @@ extern bool Selftest(bool verbose);
 // Auto-run selftest on first library use
 // Call this at the start of every application's main()
 inline bool ensure_library_integrity(bool verbose = false) {
-    static bool tested = false;
+    static std::once_flag flag;
     static bool result = true;
-    
-    if (!tested) {
+
+    std::call_once(flag, [verbose]() {
         if (verbose) {
             std::cout << "[*] Running library integrity check...\n" << std::flush;
         }
-        
+
         result = Selftest(verbose);
-        tested = true;
-        
+
         if (!result) {
             std::cerr << "\n[FAIL] CRITICAL: Library integrity check FAILED!\n";
             std::cerr << "   The secp256k1 library has failed self-validation.\n";
             std::cerr << "   This application cannot continue safely.\n" << std::flush;
             std::abort();
         }
-        
+
         if (verbose) {
             std::cout << "[OK] Library integrity verified\n\n" << std::flush;
         }
-    }
-    
+    });
+
     return result;
 }
 
