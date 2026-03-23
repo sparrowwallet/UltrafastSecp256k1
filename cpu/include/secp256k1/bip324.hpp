@@ -48,11 +48,13 @@ public:
 
     // Decrypt a packet. header_enc is the 3-byte encrypted length prefix.
     // contents is the encrypted payload + 16-byte tag.
-    // Returns decrypted payload, or empty vector on auth failure.
-    std::vector<std::uint8_t> decrypt(
+    // Returns true on success and writes the decrypted payload to plaintext_out.
+    // Returns false on auth failure or malformed decrypted packet framing.
+    bool decrypt(
         const std::uint8_t* aad, std::size_t aad_len,
         const std::uint8_t header_enc[3],
-        const std::uint8_t* contents, std::size_t contents_len) noexcept;
+        const std::uint8_t* contents, std::size_t contents_len,
+        std::vector<std::uint8_t>& plaintext_out) noexcept;
 
     // Get the current packet counter (nonce)
     std::uint64_t packet_counter() const noexcept { return packet_counter_; }
@@ -94,10 +96,12 @@ public:
     // Decrypt a received message.
     // header is the 3-byte encrypted length prefix.
     // payload_and_tag is the encrypted payload followed by the 16-byte tag.
-    // Returns decrypted payload, or empty on auth failure.
-    std::vector<std::uint8_t> decrypt(
+    // Returns true on success and writes the decrypted payload to plaintext_out.
+    // Returns false on auth failure or malformed decrypted packet framing.
+    bool decrypt(
         const std::uint8_t header[3],
-        const std::uint8_t* payload_and_tag, std::size_t len) noexcept;
+        const std::uint8_t* payload_and_tag, std::size_t len,
+        std::vector<std::uint8_t>& plaintext_out) noexcept;
 
     // Check if handshake is complete
     bool is_established() const noexcept { return established_; }

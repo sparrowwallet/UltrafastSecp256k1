@@ -122,12 +122,15 @@ std::vector<std::uint8_t> Bip324Cipher::encrypt(
     return output;
 }
 
-std::vector<std::uint8_t> Bip324Cipher::decrypt(
+bool Bip324Cipher::decrypt(
     const std::uint8_t* aad, std::size_t aad_len,
     const std::uint8_t header_enc[3],
-    const std::uint8_t* contents, std::size_t contents_len) noexcept {
+    const std::uint8_t* contents, std::size_t contents_len,
+    std::vector<std::uint8_t>& plaintext_out) noexcept {
 
-    if (contents_len < 16) return {};
+    plaintext_out.clear();
+
+    if (contents_len < 16) return false;
 
     std::size_t const ct_len = 3 + (contents_len - 16);
 
@@ -153,16 +156,16 @@ std::vector<std::uint8_t> Bip324Cipher::decrypt(
 
     packet_counter_++;
 
-    if (!ok) return {};
+    if (!ok) return false;
 
     std::uint32_t const payload_len = static_cast<std::uint32_t>(buf[0])
                                     | (static_cast<std::uint32_t>(buf[1]) << 8)
                                     | (static_cast<std::uint32_t>(buf[2]) << 16);
 
-    if (payload_len > ct_len - 3) return {};
+    if (payload_len > ct_len - 3) return false;
 
-    return std::vector<std::uint8_t>(buf.begin() + 3,
-                                      buf.begin() + 3 + payload_len);
+    plaintext_out.assign(buf.begin() + 3, buf.begin() + 3 + payload_len);
+    return true;
 }
 
 // ============================================================================
@@ -255,11 +258,15 @@ std::vector<std::uint8_t> Bip324Session::encrypt(
     return send_cipher_.encrypt(nullptr, 0, plaintext, plaintext_len);
 }
 
-std::vector<std::uint8_t> Bip324Session::decrypt(
+bool Bip324Session::decrypt(
     const std::uint8_t header[3],
-    const std::uint8_t* payload_and_tag, std::size_t len) noexcept {
-    if (!established_) return {};
-    return recv_cipher_.decrypt(nullptr, 0, header, payload_and_tag, len);
+    const std::uint8_t* payload_and_tag, std::size_t len,
+    std::vector<std::uint8_t>& plaintext_out) noexcept {
+    if (!established_) {
+        plaintext_out.clear();
+        return false;
+    }
+    return recv_cipher_.decrypt(nullptr, 0, header, payload_and_tag, len, plaintext_out);
 }
 
 } // namespace secp256k1

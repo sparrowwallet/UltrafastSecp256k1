@@ -152,6 +152,26 @@ static void test_hostile_bip324_lengths() {
     CHECK(ufsecp_bip324_encrypt(initiator, &byte, static_cast<size_t>(-1), out, &out_len) != UFSECP_OK,
           "bip324 encrypt rejects overflowing payload length");
 
+        size_t zero_ct_len = sizeof(out);
+        CHECK_OK(ufsecp_bip324_encrypt(initiator, nullptr, 0, out, &zero_ct_len),
+             "bip324 encrypt accepts zero-length payload");
+        CHECK(zero_ct_len == 19, "bip324 zero-length packet has minimum framing size");
+
+        uint8_t zero_plain[1] = {};
+        size_t zero_plain_len = sizeof(zero_plain);
+        CHECK_OK(ufsecp_bip324_decrypt(responder, out, zero_ct_len, zero_plain, &zero_plain_len),
+             "bip324 decrypt accepts authenticated zero-length payload");
+        CHECK(zero_plain_len == 0, "bip324 zero-length decrypt reports empty plaintext");
+
+        uint8_t tampered[64] = {};
+        size_t tampered_len = sizeof(tampered);
+        CHECK_OK(ufsecp_bip324_encrypt(initiator, nullptr, 0, tampered, &tampered_len),
+             "bip324 encrypt second zero-length payload");
+        tampered[tampered_len - 1] ^= 0x01;
+        zero_plain_len = sizeof(zero_plain);
+        CHECK(ufsecp_bip324_decrypt(responder, tampered, tampered_len, zero_plain, &zero_plain_len) != UFSECP_OK,
+            "bip324 decrypt rejects tampered minimum-size packet");
+
     ufsecp_bip324_destroy(initiator);
     ufsecp_bip324_destroy(responder);
     ufsecp_ctx_destroy(ctx);
@@ -1118,6 +1138,16 @@ static void test_frost_hostile_args() {
     CHECK(ufsecp_frost_keygen_begin(nullptr, 1, 2, 3, buf,
           buf, &commits_len, buf, &shares_len) != UFSECP_OK,
           "keygen_begin null ctx");
+        commits_len = sizeof(buf);
+        shares_len = sizeof(buf);
+        CHECK(ufsecp_frost_keygen_begin(ctx, 0, 2, 3, buf,
+            buf, &commits_len, buf, &shares_len) != UFSECP_OK,
+            "keygen_begin rejects participant_id=0");
+        commits_len = sizeof(buf);
+        shares_len = sizeof(buf);
+        CHECK(ufsecp_frost_keygen_begin(ctx, 4, 2, 3, buf,
+            buf, &commits_len, buf, &shares_len) != UFSECP_OK,
+            "keygen_begin rejects participant_id above num_participants");
 
         commits_len = 0;
         shares_len = sizeof(buf);
@@ -1139,6 +1169,8 @@ static void test_frost_hostile_args() {
     // sign_nonce_gen: null ctx
     CHECK(ufsecp_frost_sign_nonce_gen(nullptr, 1, buf, nonce, ncommit) != UFSECP_OK,
           "nonce_gen null ctx");
+          CHECK(ufsecp_frost_sign_nonce_gen(ctx, 0, buf, nonce, ncommit) != UFSECP_OK,
+            "nonce_gen rejects participant_id=0");
 
     // sign: null ctx
     CHECK(ufsecp_frost_sign(nullptr, keypkg, nonce, buf, ncommit, 2, psig) != UFSECP_OK,
@@ -3134,6 +3166,14 @@ static void test_hostile_multi_coin() {
         CHECK(ufsecp_coin_derive_from_seed(ctx, short_seed, sizeof(short_seed), UFSECP_COIN_BITCOIN,
             0, 0, 0, 0, out_priv, out_pub, coin_addr, &coin_addr_len) != UFSECP_OK,
             "coin_derive short seed rejected");
+        uint8_t valid_seed[16] = {1};
+        CHECK(ufsecp_coin_derive_from_seed(ctx, valid_seed, sizeof(valid_seed), UFSECP_COIN_BITCOIN,
+            0, 0, 0, 0, out_priv, out_pub, coin_addr, nullptr) != UFSECP_OK,
+            "coin_derive rejects addr_out without addr_len");
+        coin_addr_len = sizeof(coin_addr);
+        CHECK(ufsecp_coin_derive_from_seed(ctx, valid_seed, sizeof(valid_seed), UFSECP_COIN_BITCOIN,
+            0, 0, 0, 0, out_priv, out_pub, nullptr, &coin_addr_len) != UFSECP_OK,
+            "coin_derive rejects addr_len without addr_out");
 
     // coin_wif_encode: null ctx
     char wif[64]; size_t wif_len = sizeof(wif);

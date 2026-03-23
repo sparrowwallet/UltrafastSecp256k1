@@ -809,6 +809,8 @@ UFSECP_API ufsecp_error_t ufsecp_musig2_partial_sig_agg(
 #define UFSECP_FROST_NONCE_COMMIT_LEN  70   /**< id + hiding_pt + binding_pt */
 
 /** FROST key generation phase 1: produce commitment + shares.
+ *  participant_id must be in [1, num_participants] and threshold must satisfy
+ *  2 <= threshold <= num_participants.
  *  commits_out: commitment blob. shares_out: n shares of UFSECP_FROST_SHARE_LEN each. */
 UFSECP_API ufsecp_error_t ufsecp_frost_keygen_begin(
     ufsecp_ctx* ctx,
@@ -832,7 +834,8 @@ UFSECP_API ufsecp_error_t ufsecp_frost_keygen_finalize(
     uint32_t threshold, uint32_t num_participants,
     uint8_t keypkg_out[UFSECP_FROST_KEYPKG_LEN]);
 
-/** Generate FROST signing nonce. */
+/** Generate FROST signing nonce.
+ *  participant_id must be non-zero and use the protocol's 1-based participant numbering. */
 UFSECP_API ufsecp_error_t ufsecp_frost_sign_nonce_gen(
     ufsecp_ctx* ctx,
     uint32_t participant_id,
@@ -1080,7 +1083,8 @@ UFSECP_API ufsecp_error_t ufsecp_coin_address(
 /** Derive full key from seed for a specific coin.
  *  seed must be 16 to 64 bytes.
  *  Derives using best_purpose for the coin.
- *  privkey32_out, pubkey33_out: optional (NULL to skip). */
+ *  privkey32_out, pubkey33_out: optional (NULL to skip).
+ *  addr_out and addr_len are optional as a pair and must be both NULL or both non-NULL. */
 UFSECP_API ufsecp_error_t ufsecp_coin_derive_from_seed(
     ufsecp_ctx* ctx,
     const uint8_t* seed, size_t seed_len,
@@ -1245,7 +1249,8 @@ UFSECP_API ufsecp_error_t ufsecp_bip324_encrypt(
  *  encrypted_len: total length of encrypted data.
  *  plaintext_out: buffer for decrypted payload.
  *  plaintext_len: in = buffer size, out = payload bytes written.
- *  Returns UFSECP_OK on success, UFSECP_ERROR on auth failure. */
+ *  Returns UFSECP_OK on success, including valid zero-length payloads.
+ *  Returns UFSECP_ERR_VERIFY_FAIL on authentication or integrity failure. */
 UFSECP_API ufsecp_error_t ufsecp_bip324_decrypt(
     ufsecp_bip324_session* session,
     const uint8_t* encrypted, size_t encrypted_len,

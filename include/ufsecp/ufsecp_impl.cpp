@@ -2509,6 +2509,9 @@ ufsecp_error_t ufsecp_frost_keygen_begin(
     if (threshold < 2 || threshold > num_participants) {
         return ctx_set_err(ctx, UFSECP_ERR_BAD_INPUT, "invalid threshold");
     }
+    if (participant_id == 0 || participant_id > num_participants) {
+        return ctx_set_err(ctx, UFSECP_ERR_BAD_INPUT, "invalid participant_id");
+    }
     std::array<uint8_t, 32> seed_arr;
     std::memcpy(seed_arr.data(), seed, 32);
     auto [commit, shares] = secp256k1::frost_keygen_begin(
@@ -2666,6 +2669,9 @@ ufsecp_error_t ufsecp_frost_sign_nonce_gen(
     uint8_t nonce_commit_out[UFSECP_FROST_NONCE_COMMIT_LEN]) {
     if (!ctx || !nonce_seed || !nonce_out || !nonce_commit_out) return UFSECP_ERR_NULL_ARG;
     ctx_clear_err(ctx);
+    if (participant_id == 0) {
+        return ctx_set_err(ctx, UFSECP_ERR_BAD_INPUT, "invalid participant_id");
+    }
     std::array<uint8_t, 32> seed_arr;
     std::memcpy(seed_arr.data(), nonce_seed, 32);
     auto [nonce, commit] = secp256k1::frost_sign_nonce_gen(participant_id, seed_arr);
@@ -3585,6 +3591,10 @@ ufsecp_error_t ufsecp_coin_derive_from_seed(
     char* addr_out, size_t* addr_len) {
     if (!ctx || !seed) return UFSECP_ERR_NULL_ARG;
     ctx_clear_err(ctx);
+    if ((addr_out == nullptr) != (addr_len == nullptr)) {
+        return ctx_set_err(ctx, UFSECP_ERR_NULL_ARG,
+            "addr_out and addr_len must both be null or both be non-null");
+    }
     if (seed_len < 16 || seed_len > 64) {
         return ctx_set_err(ctx, UFSECP_ERR_BAD_INPUT, "seed must be 16-64 bytes");
     }
@@ -3597,22 +3607,29 @@ ufsecp_error_t ufsecp_coin_derive_from_seed(
     if (!m_ok) {
         return ctx_set_err(ctx, UFSECP_ERR_INTERNAL, "BIP-32 master key failed");
     }
+    const auto cleanup_keys = [&]() {
+        secp256k1::detail::secure_erase(master.key.data(), master.key.size());
+        secp256k1::detail::secure_erase(master.chain_code.data(), master.chain_code.size());
+    };
     /* Derive coin key */
     auto [key, d_ok] = secp256k1::coins::coin_derive_key(
         master, *coin, account, change != 0, index);
     if (!d_ok) {
+        cleanup_keys();
         return ctx_set_err(ctx, UFSECP_ERR_INTERNAL, "coin key derivation failed");
     }
+    const auto cleanup_derived_key = [&]() {
+        secp256k1::detail::secure_erase(key.key.data(), key.key.size());
+        secp256k1::detail::secure_erase(key.chain_code.data(), key.chain_code.size());
+    };
     if (privkey32_out) {
         auto sk = key.private_key();
         scalar_to_bytes(sk, privkey32_out);
         secp256k1::detail::secure_erase(&sk, sizeof(sk));
     }
     auto pk = key.public_key();
-    secp256k1::detail::secure_erase(master.key.data(), master.key.size());
-    secp256k1::detail::secure_erase(master.chain_code.data(), master.chain_code.size());
-    secp256k1::detail::secure_erase(key.key.data(), key.key.size());
-    secp256k1::detail::secure_erase(key.chain_code.data(), key.chain_code.size());
+    cleanup_keys();
+    cleanup_derived_key();
     if (pubkey33_out) {
         point_to_compressed(pk, pubkey33_out);
     }
@@ -4043,8 +4060,10 @@ ufsecp_error_t ufsecp_bip324_decrypt(
     const uint8_t* payload_tag = encrypted + 3;
     size_t payload_tag_len = encrypted_len - 3;
 
-    auto dec = session->cpp_session->decrypt(header, payload_tag, payload_tag_len);
-    if (dec.empty() && encrypted_len > 19) return UFSECP_ERR_INTERNAL; // auth failure
+    std::vector<uint8_t> dec;
+    if (!session->cpp_session->decrypt(header, payload_tag, payload_tag_len, dec)) {
+        return UFSECP_ERR_VERIFY_FAIL;
+    }
 
     if (*plaintext_len < dec.size()) return UFSECP_ERR_BUF_TOO_SMALL;
     std::memcpy(plaintext_out, dec.data(), dec.size());
