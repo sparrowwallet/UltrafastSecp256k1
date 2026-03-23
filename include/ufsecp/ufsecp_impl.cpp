@@ -129,6 +129,8 @@ static inline void scalar_to_bytes(const Scalar& s, uint8_t out[32]) {
     std::memcpy(out, arr.data(), 32);
 }
 
+static inline Point point_from_compressed(const uint8_t pub[33]);
+
 namespace {
 
 constexpr std::size_t kMuSig2KeyAggHeaderLen = 38;
