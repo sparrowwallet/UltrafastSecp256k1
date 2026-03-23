@@ -811,6 +811,8 @@ UFSECP_API ufsecp_error_t ufsecp_musig2_partial_sig_agg(
 /** FROST key generation phase 1: produce commitment + shares.
  *  participant_id must be in [1, num_participants] and threshold must satisfy
  *  2 <= threshold <= num_participants.
+ *  commits_out must have room for 8 + threshold * 33 bytes.
+ *  shares_out must have room for num_participants * UFSECP_FROST_SHARE_LEN bytes.
  *  commits_out: commitment blob. shares_out: n shares of UFSECP_FROST_SHARE_LEN each. */
 UFSECP_API ufsecp_error_t ufsecp_frost_keygen_begin(
     ufsecp_ctx* ctx,
@@ -822,10 +824,11 @@ UFSECP_API ufsecp_error_t ufsecp_frost_keygen_begin(
 /** FROST key generation phase 2: finalise key package.
  *  participant_id must be in [1, num_participants] and threshold must satisfy
  *  2 <= threshold <= num_participants.
- *  all_commits must contain exactly num_participants unique commitment records,
- *  each with exactly threshold coefficients.
- *  received_shares must contain exactly num_participants unique share records and
- *  shares_len must be an exact multiple of UFSECP_FROST_SHARE_LEN. */
+ *  all_commits length must equal num_participants * (8 + threshold * 33) and
+ *  must contain exactly num_participants unique commitment records, each with
+ *  exactly threshold coefficients.
+ *  received_shares length must equal num_participants * UFSECP_FROST_SHARE_LEN
+ *  and must contain exactly num_participants unique share records. */
 UFSECP_API ufsecp_error_t ufsecp_frost_keygen_finalize(
     ufsecp_ctx* ctx,
     uint32_t participant_id,

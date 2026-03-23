@@ -18,6 +18,7 @@
 #include <cstdint>
 #include <cstdlib>
 #include <array>
+#include <limits>
 #include <string>
 #include <new>
 
@@ -198,6 +199,22 @@ static ufsecp_error_t parse_musig2_session(ufsecp_ctx* ctx,
         return ctx_set_err(ctx, UFSECP_ERR_BAD_INPUT, "invalid session participant count");
     }
     return UFSECP_OK;
+}
+
+static bool checked_mul_size(std::size_t left, std::size_t right, std::size_t& out) {
+    if (left != 0 && right > std::numeric_limits<std::size_t>::max() / left) {
+        return false;
+    }
+    out = left * right;
+    return true;
+}
+
+static bool checked_add_size(std::size_t left, std::size_t right, std::size_t& out) {
+    if (right > std::numeric_limits<std::size_t>::max() - left) {
+        return false;
+    }
+    out = left + right;
+    return true;
 }
 
 } // namespace
@@ -2512,6 +2529,20 @@ ufsecp_error_t ufsecp_frost_keygen_begin(
     if (participant_id == 0 || participant_id > num_participants) {
         return ctx_set_err(ctx, UFSECP_ERR_BAD_INPUT, "invalid participant_id");
     }
+    std::size_t required_commit_coeff_bytes = 0;
+    std::size_t required_commits = 0;
+    std::size_t required_shares = 0;
+    if (!checked_mul_size(static_cast<std::size_t>(threshold), static_cast<std::size_t>(33), required_commit_coeff_bytes)
+        || !checked_add_size(static_cast<std::size_t>(8), required_commit_coeff_bytes, required_commits)
+        || !checked_mul_size(static_cast<std::size_t>(num_participants), static_cast<std::size_t>(UFSECP_FROST_SHARE_LEN), required_shares)) {
+        return ctx_set_err(ctx, UFSECP_ERR_BAD_INPUT, "FROST cardinality too large");
+    }
+    if (*commits_len < required_commits) {
+        return ctx_set_err(ctx, UFSECP_ERR_BUF_TOO_SMALL, "commits buffer too small");
+    }
+    if (*shares_len < required_shares) {
+        return ctx_set_err(ctx, UFSECP_ERR_BUF_TOO_SMALL, "shares buffer too small");
+    }
     std::array<uint8_t, 32> seed_arr;
     std::memcpy(seed_arr.data(), seed, 32);
     auto [commit, shares] = secp256k1::frost_keygen_begin(
@@ -2567,6 +2598,22 @@ ufsecp_error_t ufsecp_frost_keygen_finalize(
     }
     if (participant_id == 0 || participant_id > num_participants) {
         return ctx_set_err(ctx, UFSECP_ERR_BAD_INPUT, "invalid participant_id");
+    }
+    std::size_t expected_commit_coeff_bytes = 0;
+    std::size_t expected_commit_record_len = 0;
+    std::size_t expected_commits_len = 0;
+    std::size_t expected_shares_len = 0;
+    if (!checked_mul_size(static_cast<std::size_t>(threshold), static_cast<std::size_t>(33), expected_commit_coeff_bytes)
+        || !checked_add_size(static_cast<std::size_t>(8), expected_commit_coeff_bytes, expected_commit_record_len)
+        || !checked_mul_size(static_cast<std::size_t>(num_participants), expected_commit_record_len, expected_commits_len)
+        || !checked_mul_size(static_cast<std::size_t>(num_participants), static_cast<std::size_t>(UFSECP_FROST_SHARE_LEN), expected_shares_len)) {
+        return ctx_set_err(ctx, UFSECP_ERR_BAD_INPUT, "FROST cardinality too large");
+    }
+    if (commits_len != expected_commits_len) {
+        return ctx_set_err(ctx, UFSECP_ERR_BAD_INPUT, "all_commits length does not match threshold and num_participants");
+    }
+    if (shares_len != expected_shares_len) {
+        return ctx_set_err(ctx, UFSECP_ERR_BAD_INPUT, "received_shares length does not match num_participants");
     }
     /* Deserialize commitments */
     std::vector<secp256k1::FrostCommitment> commits;

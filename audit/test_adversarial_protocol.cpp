@@ -1160,11 +1160,19 @@ static void test_frost_hostile_args() {
         CHECK(ufsecp_frost_keygen_begin(ctx, 1, 2, 3, buf,
             buf, &commits_len, buf, &shares_len) != UFSECP_OK,
             "keygen_begin rejects too-small shares buffer");
+        commits_len = sizeof(buf);
+        shares_len = sizeof(buf);
+        CHECK(ufsecp_frost_keygen_begin(ctx, 1, 2, 0xffffffffu, buf,
+            buf, &commits_len, buf, &shares_len) != UFSECP_OK,
+            "keygen_begin rejects oversized participant cardinality before allocation");
 
     // keygen_finalize: null ctx
     CHECK(ufsecp_frost_keygen_finalize(nullptr, 1, buf, 100, buf, 100,
           2, 3, keypkg) != UFSECP_OK,
           "keygen_finalize null ctx");
+        CHECK(ufsecp_frost_keygen_finalize(ctx, 1, buf, sizeof(buf), buf, sizeof(buf),
+            2, 0xffffffffu, keypkg) != UFSECP_OK,
+            "keygen_finalize rejects oversized participant cardinality before allocation");
 
     // sign_nonce_gen: null ctx
     CHECK(ufsecp_frost_sign_nonce_gen(nullptr, 1, buf, nonce, ncommit) != UFSECP_OK,
