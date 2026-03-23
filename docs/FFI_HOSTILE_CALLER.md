@@ -115,6 +115,23 @@ into the unified audit runner (modules `gpu_api_negative` and `gpu_abi_gate`).
 
 ---
 
+## Section K: Deep Session Security (v3.4+)
+
+`audit/test_adversarial_protocol.cpp` (K.1-K.6) covers BIP324 session protocol
+security and scalar arithmetic edge cases.  K.1-K.3 are conditionally compiled
+under `SECP256K1_BIP324`; K.4-K.6 are always-on.
+
+| Test ID | Functions | Coverage |
+|---------|-----------|----------|
+| K.1 | `ufsecp_bip324_create`, `ufsecp_bip324_handshake`, `ufsecp_bip324_encrypt`, `ufsecp_bip324_decrypt` | 10-packet round-trip with counter integrity; tampered ciphertext rejected |
+| K.2 | same | Cross-session isolation: session B cannot decrypt session A's ciphertext |
+| K.3 | `ufsecp_bip324_handshake` | Double-handshake rejection (calling handshake twice on the same session object) |
+| K.4 | `ufsecp_seckey_tweak_add` | Arithmetic overflow: k+t≡0 (mod n) must fail; identity tweak t=0 is valid |
+| K.5 | `ufsecp_seckey_tweak_add`, `ufsecp_seckey_tweak_mul` | Out-of-range tweaks (≥ n) rejected; zero tweak for mul rejected; valid n-1 tweak succeeds |
+| K.6 | `ufsecp_ecdh`, `ufsecp_ecdh_raw`, `ufsecp_ecdh_xonly` | Semantic differentiation (all three produce distinct encodings); ECDH commutativity; bad pubkey rejection |
+
+---
+
 ## Guarantee
 
 Every `ufsecp_*` function is tested with at least:

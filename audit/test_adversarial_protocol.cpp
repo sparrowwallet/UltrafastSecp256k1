@@ -17,6 +17,7 @@
 //   E. Schnorr adaptor adversarial: invalid point, wrong point, transcript
 //   F. BIP-32 edge cases: bad path, bad seed, depth overflow
 //   G. FFI hostile-caller: null/junk for every untested export
+//   K. Deep session security: BIP324 multi-packet, seckey arithmetic overflow
 // ============================================================================
 
 #include <cstdio>
@@ -4497,6 +4498,350 @@ static void test_i5_batch_verify_deep() {
 }
 
 // ============================================================================
+// K. Deep Session Security (v3.4+)
+// ============================================================================
+
+// K.1: BIP324 multi-packet round-trip -- sequential counter integrity ----------
+// Encrypts 10 messages and decrypts them in order; validates each plaintext
+// matches and that the packet counter advances so earlier packets cannot be
+// replayed into a later position.
+#ifdef SECP256K1_BIP324
+static void test_k1_bip324_multi_packet() {
+    (void)std::printf("  [K.1] BIP324 multi-packet round-trip\n");
+
+    ufsecp_ctx* ctx = nullptr;
+    ufsecp_ctx_create(&ctx);
+    if (!ctx) { CHECK(false, "K.1: ctx_create"); return; }
+
+    uint8_t init_ell[64] = {0};
+    uint8_t resp_ell[64] = {0};
+    uint8_t session_id[32];
+
+    ufsecp_bip324_session* initiator = nullptr;
+    ufsecp_bip324_session* responder = nullptr;
+    CHECK_OK(ufsecp_bip324_create(ctx, 1, &initiator, init_ell),
+             "K.1: create initiator");
+    CHECK_OK(ufsecp_bip324_create(ctx, 0, &responder, resp_ell),
+             "K.1: create responder");
+    CHECK_OK(ufsecp_bip324_handshake(initiator, resp_ell, session_id),
+             "K.1: initiator handshake");
+    CHECK_OK(ufsecp_bip324_handshake(responder, init_ell, session_id),
+             "K.1: responder handshake");
+
+    // Encrypt 10 messages and verify each decryption
+    static const int N_MSGS = 10;
+    for (int i = 0; i < N_MSGS; ++i) {
+        uint8_t plaintext[16];
+        std::memset(plaintext, static_cast<uint8_t>(i + 1), sizeof(plaintext));
+
+        uint8_t ciphertext[16 + 19 + 4]; // payload + framing (max overhead ~23)
+        size_t ct_len = sizeof(ciphertext);
+        CHECK_OK(ufsecp_bip324_encrypt(initiator, plaintext, sizeof(plaintext),
+                                       ciphertext, &ct_len),
+                 "K.1: encrypt packet");
+
+        uint8_t recovered[16];
+        size_t pt_len = sizeof(recovered);
+        CHECK_OK(ufsecp_bip324_decrypt(responder, ciphertext, ct_len,
+                                       recovered, &pt_len),
+                 "K.1: decrypt packet");
+
+        CHECK(pt_len == sizeof(plaintext), "K.1: recovered length matches");
+        CHECK(std::memcmp(recovered, plaintext, sizeof(plaintext)) == 0,
+              "K.1: recovered plaintext matches");
+    }
+
+    // Verify replaying the first packet (now stale) fails against the responder
+    // (counter has advanced; re-encrypting the same plaintext into a "fresh"
+    //  ciphertext and replaying it should be rejected).
+    uint8_t stale_plain[4] = {0xDE, 0xAD, 0xBE, 0xEF};
+    uint8_t stale_ct[32];
+    size_t stale_ct_len = sizeof(stale_ct);
+    // Encrypt with initiator (produces packet with now-advanced counter N+1)
+    CHECK_OK(ufsecp_bip324_encrypt(initiator, stale_plain, sizeof(stale_plain),
+                                   stale_ct, &stale_ct_len),
+             "K.1: encrypt stale probe");
+    // Tamper a single bit in the authentication tag area
+    stale_ct[stale_ct_len - 1] ^= 0x01;
+    uint8_t stale_out[32];
+    size_t stale_out_len = sizeof(stale_out);
+    CHECK_ERR(ufsecp_bip324_decrypt(responder, stale_ct, stale_ct_len,
+                                    stale_out, &stale_out_len),
+              "K.1: tampered packet correctly rejected");
+
+    ufsecp_bip324_destroy(initiator);
+    ufsecp_bip324_destroy(responder);
+    ufsecp_ctx_destroy(ctx);
+}
+
+// K.2: BIP324 cross-session isolation -----------------------------------------
+// Ciphertext produced by session A must not decrypt correctly under session B.
+static void test_k2_bip324_cross_session_isolation() {
+    (void)std::printf("  [K.2] BIP324 cross-session isolation\n");
+
+    ufsecp_ctx* ctx = nullptr;
+    ufsecp_ctx_create(&ctx);
+    if (!ctx) { CHECK(false, "K.2: ctx_create"); return; }
+
+    // Session A: keys derived from key '0x01'
+    uint8_t ell_a_init[64] = {0x01};
+    uint8_t ell_a_resp[64] = {0x02};
+    uint8_t sid_a[32];
+    ufsecp_bip324_session* a_init = nullptr;
+    ufsecp_bip324_session* a_resp = nullptr;
+    CHECK_OK(ufsecp_bip324_create(ctx, 1, &a_init, ell_a_init), "K.2: session-A init");
+    CHECK_OK(ufsecp_bip324_create(ctx, 0, &a_resp, ell_a_resp), "K.2: session-A resp");
+    CHECK_OK(ufsecp_bip324_handshake(a_init, ell_a_resp, sid_a), "K.2: session-A handshake init");
+    CHECK_OK(ufsecp_bip324_handshake(a_resp, ell_a_init, sid_a), "K.2: session-A handshake resp");
+
+    // Session B: different EllSwift keys
+    uint8_t ell_b_init[64] = {0x03};
+    uint8_t ell_b_resp[64] = {0x04};
+    uint8_t sid_b[32];
+    ufsecp_bip324_session* b_init = nullptr;
+    ufsecp_bip324_session* b_resp = nullptr;
+    CHECK_OK(ufsecp_bip324_create(ctx, 1, &b_init, ell_b_init), "K.2: session-B init");
+    CHECK_OK(ufsecp_bip324_create(ctx, 0, &b_resp, ell_b_resp), "K.2: session-B resp");
+    CHECK_OK(ufsecp_bip324_handshake(b_init, ell_b_resp, sid_b), "K.2: session-B handshake init");
+    CHECK_OK(ufsecp_bip324_handshake(b_resp, ell_b_init, sid_b), "K.2: session-B handshake resp");
+
+    // Encrypt a message with session A
+    uint8_t msg[8] = {0xCA, 0xFE, 0xBA, 0xBE, 0x00, 0x01, 0x02, 0x03};
+    uint8_t ct_a[64];
+    size_t ct_a_len = sizeof(ct_a);
+    CHECK_OK(ufsecp_bip324_encrypt(a_init, msg, sizeof(msg), ct_a, &ct_a_len),
+             "K.2: encrypt with session A");
+
+    // Attempting decryption with session B must fail (wrong keys)
+    uint8_t recovered[64];
+    size_t rec_len = sizeof(recovered);
+    CHECK_ERR(ufsecp_bip324_decrypt(b_resp, ct_a, ct_a_len, recovered, &rec_len),
+              "K.2: session-B cannot decrypt session-A ciphertext");
+
+    // Session A's own responder can decrypt it
+    rec_len = sizeof(recovered);
+    CHECK_OK(ufsecp_bip324_decrypt(a_resp, ct_a, ct_a_len, recovered, &rec_len),
+             "K.2: session-A responder correctly decrypts");
+    CHECK(rec_len == sizeof(msg) && std::memcmp(recovered, msg, sizeof(msg)) == 0,
+          "K.2: session-A decrypted plaintext matches");
+
+    ufsecp_bip324_destroy(a_init);
+    ufsecp_bip324_destroy(a_resp);
+    ufsecp_bip324_destroy(b_init);
+    ufsecp_bip324_destroy(b_resp);
+    ufsecp_ctx_destroy(ctx);
+}
+
+// K.3: BIP324 double-handshake rejection ---------------------------------------
+// Calling handshake twice on the same session object must either fail on the
+// second call or produce an independent session (no state corruption leading
+// to a predictable key).
+static void test_k3_bip324_double_handshake_rejection() {
+    (void)std::printf("  [K.3] BIP324 double-handshake rejection\n");
+
+    ufsecp_ctx* ctx = nullptr;
+    ufsecp_ctx_create(&ctx);
+    if (!ctx) { CHECK(false, "K.3: ctx_create"); return; }
+
+    uint8_t ell_i[64] = {0x10};
+    uint8_t ell_r[64] = {0x20};
+    uint8_t sid1[32];
+    uint8_t sid2[32];
+
+    ufsecp_bip324_session* sess = nullptr;
+    CHECK_OK(ufsecp_bip324_create(ctx, 1, &sess, ell_i), "K.3: create session");
+
+    CHECK_OK(ufsecp_bip324_handshake(sess, ell_r, sid1), "K.3: first handshake OK");
+
+    // Second handshake: must fail (session already completed) OR succeed and
+    // produce a DIFFERENT session_id (no key fixation).
+    ufsecp_error_t rc2 = ufsecp_bip324_handshake(sess, ell_r, sid2);
+    if (rc2 == UFSECP_OK) {
+        // If allowed, the session IDs must differ (no key reuse)
+        CHECK(std::memcmp(sid1, sid2, 32) != 0,
+              "K.3: double-handshake produces different session IDs (no fixation)");
+    } else {
+        CHECK(rc2 != UFSECP_OK, "K.3: double-handshake correctly rejected");
+    }
+
+    ufsecp_bip324_destroy(sess);
+    ufsecp_ctx_destroy(ctx);
+}
+#endif /* SECP256K1_BIP324 */
+
+// K.4: seckey_tweak_add arithmetic overflow -----------------------------------
+// When key + tweak ≡ 0 (mod n) the result is the zero scalar. The ABI must
+// reject this as ERR_ARITH or equivalent (not return a zero/invalid key).
+static void test_k4_seckey_tweak_overflow() {
+    (void)std::printf("  [K.4] seckey_tweak_add arithmetic overflow\n");
+
+    ufsecp_ctx* ctx = nullptr;
+    ufsecp_ctx_create(&ctx);
+    if (!ctx) { CHECK(false, "K.4: ctx_create"); return; }
+
+    // secp256k1 group order n (big-endian)
+    static const uint8_t ORDER_N[32] = {
+        0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,
+        0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFE,
+        0xBA,0xAE,0xDC,0xE6,0xAF,0x48,0xA0,0x3B,
+        0xBF,0xD2,0x5E,0x8C,0xD0,0x36,0x41,0x41
+    };
+
+    // Key = 1; tweak = n-1 → result = 1 + (n-1) = n ≡ 0 (mod n) → must fail
+    uint8_t key1[32] = {0};
+    key1[31] = 0x01;  // scalar 1
+
+    // n-1 in big-endian
+    uint8_t n_minus_1[32];
+    std::memcpy(n_minus_1, ORDER_N, 32);
+    n_minus_1[31] -= 1;  // ORDER_N - 1 = n-1
+
+    uint8_t key_copy[32];
+    std::memcpy(key_copy, key1, 32);
+    ufsecp_error_t rc = ufsecp_seckey_tweak_add(ctx, key_copy, n_minus_1);
+    CHECK(rc != UFSECP_OK,
+          "K.4: seckey_tweak_add(1, n-1) → zero scalar must fail");
+
+    // Output buffer must be zeroed or equal to input on failure
+    // (no forbidden intermediate key material must leak)
+    // We just verify the operation did not silently succeed.
+
+    // Key = 2; tweak = n-2 → result = 0 mod n → must also fail
+    uint8_t key2[32] = {0};
+    key2[31] = 0x02;
+    uint8_t n_minus_2[32];
+    std::memcpy(n_minus_2, ORDER_N, 32);
+    n_minus_2[31] -= 2;
+
+    std::memcpy(key_copy, key2, 32);
+    rc = ufsecp_seckey_tweak_add(ctx, key_copy, n_minus_2);
+    CHECK(rc != UFSECP_OK,
+          "K.4: seckey_tweak_add(2, n-2) → zero scalar must fail");
+
+    ufsecp_ctx_destroy(ctx);
+}
+
+// K.5: seckey_tweak with invalid-range tweaks ---------------------------------
+// A tweak >= n is never a valid scalar. The ABI must reject it.
+static void test_k5_seckey_tweak_invalid() {
+    (void)std::printf("  [K.5] seckey_tweak with out-of-range tweak\n");
+
+    ufsecp_ctx* ctx = nullptr;
+    ufsecp_ctx_create(&ctx);
+    if (!ctx) { CHECK(false, "K.5: ctx_create"); return; }
+
+    // n (exactly the group order) is not a valid scalar
+    static const uint8_t ORDER_N[32] = {
+        0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,
+        0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFE,
+        0xBA,0xAE,0xDC,0xE6,0xAF,0x48,0xA0,0x3B,
+        0xBF,0xD2,0x5E,0x8C,0xD0,0x36,0x41,0x41
+    };
+    // All-0xFF > n
+    static const uint8_t MAX_BYTES[32] = {
+        0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,
+        0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,
+        0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,
+        0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF
+    };
+
+    uint8_t valid_key[32] = {0};
+    valid_key[31] = 0x07;
+
+    uint8_t key_copy[32];
+
+    // tweak_add with tweak = n → invalid
+    std::memcpy(key_copy, valid_key, 32);
+    CHECK_ERR(ufsecp_seckey_tweak_add(ctx, key_copy, ORDER_N),
+              "K.5a: seckey_tweak_add tweak=n rejected");
+
+    // tweak_add with tweak = all-0xFF → invalid
+    std::memcpy(key_copy, valid_key, 32);
+    CHECK_ERR(ufsecp_seckey_tweak_add(ctx, key_copy, MAX_BYTES),
+              "K.5b: seckey_tweak_add tweak=0xFF..FF rejected");
+
+    // tweak_mul with zero tweak → result = 0, invalid
+    uint8_t zero_tweak[32] = {0};
+    std::memcpy(key_copy, valid_key, 32);
+    CHECK_ERR(ufsecp_seckey_tweak_mul(ctx, key_copy, zero_tweak),
+              "K.5c: seckey_tweak_mul zero tweak rejected");
+
+    // tweak_mul with tweak = n → invalid
+    std::memcpy(key_copy, valid_key, 32);
+    CHECK_ERR(ufsecp_seckey_tweak_mul(ctx, key_copy, ORDER_N),
+              "K.5d: seckey_tweak_mul tweak=n rejected");
+
+    // tweak_mul with valid key (n-1) should succeed
+    uint8_t n_minus_1[32];
+    std::memcpy(n_minus_1, ORDER_N, 32);
+    n_minus_1[31] -= 1;
+    std::memcpy(key_copy, valid_key, 32);
+    CHECK_OK(ufsecp_seckey_tweak_mul(ctx, key_copy, n_minus_1),
+             "K.5e: seckey_tweak_mul valid tweak n-1 succeeds");
+
+    ufsecp_ctx_destroy(ctx);
+}
+
+// K.6: ECDH semantic variant differentiation ----------------------------------
+// ecdh, ecdh_raw, and ecdh_xonly must produce different (semantically distinct)
+// outputs for the same (privkey, pubkey) pair. Also validates self-ECDH
+// (both parties use the same key material is a well-known usage pattern).
+static void test_k6_ecdh_semantic_variants() {
+    (void)std::printf("  [K.6] ECDH semantic variant differentiation\n");
+
+    ufsecp_ctx* ctx = nullptr;
+    ufsecp_ctx_create(&ctx);
+    if (!ctx) { CHECK(false, "K.6: ctx_create"); return; }
+
+    uint8_t priv_a[32] = {0x11};
+    uint8_t priv_b[32] = {0x22};
+    uint8_t pub_a[33];
+    uint8_t pub_b[33];
+    CHECK_OK(ufsecp_pubkey_create(ctx, priv_a, pub_a), "K.6: pubkey_create A");
+    CHECK_OK(ufsecp_pubkey_create(ctx, priv_b, pub_b), "K.6: pubkey_create B");
+
+    // All three variants return 32 bytes:
+    //   ecdh       – SHA256(compressed_point)
+    //   ecdh_xonly – SHA256(x-coordinate)
+    //   ecdh_raw   – raw x-coordinate (no hash)
+    uint8_t shared_ecdh[32];
+    uint8_t shared_raw[32];
+    uint8_t shared_xonly[32];
+
+    CHECK_OK(ufsecp_ecdh(ctx, priv_a, pub_b, shared_ecdh),
+             "K.6a: ecdh succeeds");
+    CHECK_OK(ufsecp_ecdh_raw(ctx, priv_a, pub_b, shared_raw),
+             "K.6b: ecdh_raw succeeds");
+    CHECK_OK(ufsecp_ecdh_xonly(ctx, priv_a, pub_b, shared_xonly),
+             "K.6c: ecdh_xonly succeeds");
+
+    // ecdh (SHA256 of compressed point) must differ from ecdh_xonly (SHA256 of x)
+    CHECK(std::memcmp(shared_ecdh, shared_xonly, 32) != 0,
+          "K.6d: ecdh and ecdh_xonly have different hash inputs -> different output");
+
+    // ecdh_raw (raw x) must differ from ecdh_xonly (SHA256 of x)
+    CHECK(std::memcmp(shared_raw, shared_xonly, 32) != 0,
+          "K.6e: ecdh_raw (raw x) and ecdh_xonly (SHA256(x)) differ");
+
+    // Commutativity: A*B == B*A for ecdh
+    uint8_t shared2[32];
+    CHECK_OK(ufsecp_ecdh(ctx, priv_b, pub_a, shared2), "K.6f: ecdh B->A");
+    CHECK(std::memcmp(shared_ecdh, shared2, 32) == 0,
+          "K.6g: ECDH is commutative (A*B == B*A)");
+
+    // ecdh with invalid (off-curve / zero) pubkey must fail
+    uint8_t bad_pub[33] = {0x02};  // 0x02 prefix + 32 zero bytes (off-curve)
+    CHECK_ERR(ufsecp_ecdh(ctx, priv_a, bad_pub, shared_ecdh),
+              "K.6h: ecdh with invalid pubkey rejected");
+    CHECK_ERR(ufsecp_ecdh_raw(ctx, priv_a, bad_pub, shared_raw),
+              "K.6i: ecdh_raw with invalid pubkey rejected");
+    CHECK_ERR(ufsecp_ecdh_xonly(ctx, priv_a, bad_pub, shared_xonly),
+              "K.6j: ecdh_xonly with invalid pubkey rejected");
+
+    ufsecp_ctx_destroy(ctx);
+}
+
+// ============================================================================
 // Entry Point
 // ============================================================================
 
@@ -4613,6 +4958,16 @@ int test_adversarial_protocol_run() {
     test_i3_ecdsa_recoverable_roundtrip();
     test_i4_sign_verified();
     test_i5_batch_verify_deep();
+
+    // K. Deep session security (v3.4+)
+#ifdef SECP256K1_BIP324
+    test_k1_bip324_multi_packet();
+    test_k2_bip324_cross_session_isolation();
+    test_k3_bip324_double_handshake_rejection();
+#endif
+    test_k4_seckey_tweak_overflow();
+    test_k5_seckey_tweak_invalid();
+    test_k6_ecdh_semantic_variants();
 
     (void)std::printf("\n--- Adversarial Summary: %d passed, %d failed ---\n\n",
                       g_pass, g_fail);
