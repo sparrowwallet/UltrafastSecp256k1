@@ -2803,11 +2803,13 @@ static void test_hostile_zk() {
           "dleq_verify null ctx");
 
         const uint64_t value = 7;
+        uint8_t value_scalar[32] = {};
+        value_scalar[31] = 7; /* big-endian encoding of value=7 */
         uint8_t blinding[32] = {};
         uint8_t aux_rand[32] = {};
         blinding[31] = 5;
         aux_rand[31] = 9;
-        CHECK_OK(ufsecp_pedersen_commit(ctx, blinding, reinterpret_cast<const uint8_t*>(&value), commit),
+        CHECK_OK(ufsecp_pedersen_commit(ctx, value_scalar, blinding, commit),
              "pedersen_commit for range proof");
 
         uint8_t proof[700] = {};
