@@ -104,6 +104,7 @@ bindings/rust/target/
 bindings/rust/*/target/
 bindings/rust/Cargo.lock
 bindings/dart/.dart_tool/
+bindings/swift/.build/
 bindings/nodejs/node_modules/
 bindings/nodejs/package-lock.json
 bindings/ruby/*.gem
