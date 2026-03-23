@@ -34,7 +34,7 @@ static int g_fail = 0;
 static void test_backend_discovery() {
     std::printf("[gpu_abi_gate] Backend discovery\n");
 
-    uint32_t count = ufsecp_gpu_backend_count(nullptr, 0);
+    const uint32_t count = ufsecp_gpu_backend_count(nullptr, 0);
     CHECK(count <= 3, "backend_count <= 3 (max: CUDA + OpenCL + Metal)");
 
     /* Backend name for valid IDs */
@@ -52,7 +52,7 @@ static void test_backend_discovery() {
     /* List backend IDs */
     if (count > 0) {
         uint32_t ids[4] = {};
-        uint32_t n = ufsecp_gpu_backend_count(ids, 4);
+        const uint32_t n = ufsecp_gpu_backend_count(ids, 4);
         CHECK(n == count, "backend_count with ids returns same count");
         for (uint32_t i = 0; i < n; ++i) {
             CHECK(ids[i] >= 1 && ids[i] <= 3,
@@ -82,9 +82,9 @@ static void test_device_info() {
 
     /* If we have any backend, try querying device 0 */
     uint32_t ids[4] = {};
-    uint32_t n = ufsecp_gpu_backend_count(ids, 4);
+    const uint32_t n = ufsecp_gpu_backend_count(ids, 4);
     for (uint32_t i = 0; i < n; ++i) {
-        uint32_t dcount = ufsecp_gpu_device_count(ids[i]);
+        const uint32_t dcount = ufsecp_gpu_device_count(ids[i]);
         if (dcount > 0) {
             ufsecp_gpu_device_info_t di{};
             auto err = ufsecp_gpu_device_info(ids[i], 0, &di);
@@ -94,7 +94,7 @@ static void test_device_info() {
             CHECK(di.device_index == 0, "device_index == 0");
             std::printf("    Device: %s (mem=%lu MB, CUs=%u, %u MHz)\n",
                         di.name,
-                        (unsigned long)(di.global_mem_bytes / (1024*1024)),
+                        (unsigned long)(di.global_mem_bytes / (1024ULL * 1024ULL)),
                         di.compute_units, di.max_clock_mhz);
         }
     }
@@ -167,7 +167,7 @@ static void test_gpu_ops_if_available() {
 
     /* Find first available backend */
     uint32_t ids[4] = {};
-    uint32_t n = ufsecp_gpu_backend_count(ids, 4);
+    const uint32_t n = ufsecp_gpu_backend_count(ids, 4);
     uint32_t avail_id = 0;
     for (uint32_t i = 0; i < n; ++i) {
         if (ufsecp_gpu_is_available(ids[i])) {

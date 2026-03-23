@@ -3662,10 +3662,11 @@ ufsecp_error_t ufsecp_coin_derive_from_seed(
         return ctx_set_err(ctx, UFSECP_ERR_BAD_INPUT, "unknown coin type");
     }
     /* BIP-32 master */
-    auto [master, m_ok] = secp256k1::bip32_master_key(seed, seed_len);
-    if (!m_ok) {
+    auto bip32_result = secp256k1::bip32_master_key(seed, seed_len);
+    if (!bip32_result.second) {
         return ctx_set_err(ctx, UFSECP_ERR_INTERNAL, "BIP-32 master key failed");
     }
+    auto master = std::move(bip32_result.first);
     const auto cleanup_keys = [&]() {
         secp256k1::detail::secure_erase(master.key.data(), master.key.size());
         secp256k1::detail::secure_erase(master.chain_code.data(), master.chain_code.size());
@@ -4117,7 +4118,7 @@ ufsecp_error_t ufsecp_bip324_decrypt(
 
     const uint8_t* header = encrypted;
     const uint8_t* payload_tag = encrypted + 3;
-    size_t payload_tag_len = encrypted_len - 3;
+    const size_t payload_tag_len = encrypted_len - 3;
 
     std::vector<uint8_t> dec;
     if (!session->cpp_session->decrypt(header, payload_tag, payload_tag_len, dec)) {

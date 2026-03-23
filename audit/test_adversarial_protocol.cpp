@@ -4343,8 +4343,8 @@ static void test_i3_ecdsa_recoverable_roundtrip() {
           "I.3q: recovered pubkey matches original");
 
     // Wrong recid produces wrong or rejected key
-    int wrong_recid = (recid + 1) % 4;
-    ufsecp_error_t rc_bad = ufsecp_ecdsa_recover(ctx, msg32, sig64, wrong_recid, recovered33);
+    const int wrong_recid = (recid + 1) % 4;
+    const ufsecp_error_t rc_bad = ufsecp_ecdsa_recover(ctx, msg32, sig64, wrong_recid, recovered33);
     if (rc_bad == UFSECP_OK) {
         CHECK(std::memcmp(recovered33, expected33, 33) != 0,
               "I.3r: wrong recid does not recover original pubkey");

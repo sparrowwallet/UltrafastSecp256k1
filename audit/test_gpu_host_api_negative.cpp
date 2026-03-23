@@ -183,7 +183,7 @@ static void test_invalid_device() {
 
     /* Find a valid backend to test invalid device on */
     uint32_t ids[4] = {};
-    uint32_t n = ufsecp_gpu_backend_count(ids, 4);
+    const uint32_t n = ufsecp_gpu_backend_count(ids, 4);
     uint32_t avail_id = 0;
     for (uint32_t i = 0; i < n; ++i) {
         if (ufsecp_gpu_is_available(ids[i])) { avail_id = ids[i]; break; }
@@ -194,7 +194,7 @@ static void test_invalid_device() {
         return;
     }
 
-    uint32_t dcount = ufsecp_gpu_device_count(avail_id);
+    const uint32_t dcount = ufsecp_gpu_device_count(avail_id);
 
     /* Device index out of range */
     ufsecp_gpu_ctx* ctx = nullptr;
@@ -241,7 +241,7 @@ static void test_unsupported_ops(ufsecp_gpu_ctx* ctx) {
     auto e6 = ufsecp_gpu_msm(ctx, buf, buf, 1, buf);
     if (e6 == UFSECP_ERR_GPU_UNSUPPORTED) ops_tested++;
 
-      int recid = 0;
+      const int recid = 0;
       auto e7 = ufsecp_gpu_ecrecover_batch(ctx, buf, buf, &recid, 1, buf, buf + 64);
       if (e7 == UFSECP_ERR_GPU_UNSUPPORTED) ops_tested++;
 
@@ -257,19 +257,21 @@ static void test_error_strings() {
     std::printf("[gpu_negative] Error strings\n");
 
     /* All GPU error codes should have non-empty descriptions */
-    int gpu_codes[] = {
+    const int gpu_codes[] = {
         UFSECP_ERR_GPU_UNAVAILABLE, UFSECP_ERR_GPU_DEVICE,
         UFSECP_ERR_GPU_LAUNCH, UFSECP_ERR_GPU_MEMORY,
         UFSECP_ERR_GPU_UNSUPPORTED, UFSECP_ERR_GPU_BACKEND,
         UFSECP_ERR_GPU_QUEUE
     };
 
-    for (int code : gpu_codes) {
+    for (const int code : gpu_codes) {
         const char* str = ufsecp_gpu_error_str(code);
         char msg[128];
-        std::snprintf(msg, sizeof(msg), "error_str(%d) is non-empty", code);
+        (void)std::snprintf(msg, sizeof(msg), "error_str(%d) is non-empty", code);
         CHECK(str != nullptr && str[0] != '\0', msg);
-        CHECK(std::strcmp(str, "unknown error") != 0, msg);
+        if (str != nullptr) {
+            CHECK(std::strcmp(str, "unknown error") != 0, msg);
+        }
     }
 
     /* Unknown code returns "unknown error" */
@@ -305,7 +307,7 @@ int test_gpu_host_api_negative_run() {
 
     /* Try to create a context for ops tests */
     uint32_t ids[4] = {};
-    uint32_t n = ufsecp_gpu_backend_count(ids, 4);
+    const uint32_t n = ufsecp_gpu_backend_count(ids, 4);
     uint32_t avail_id = 0;
     for (uint32_t i = 0; i < n; ++i) {
         if (ufsecp_gpu_is_available(ids[i])) { avail_id = ids[i]; break; }

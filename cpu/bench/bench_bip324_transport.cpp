@@ -363,7 +363,7 @@ static void bench_latency_mode(int num_packets) {
         SessionPair sp;
         // Warmup
         for (int w = 0; w < 100; ++w) {
-            std::size_t sz = rng.range(1, 4096);
+            const std::size_t sz = rng.range(1, 4096);
             auto pkt = sp.initiator.encrypt(src.data(), sz);
             auto dec = decrypt_packet(sp.responder, pkt);
             bench::DoNotOptimize(dec);
@@ -622,7 +622,7 @@ static void bench_e2e_socket(int num_roundtrips) {
         m_resp.complete_handshake(m_init.our_ellswift_encoding().data());
         m_init.complete_handshake(m_resp.our_ellswift_encoding().data());
 
-        double mem_ns = H.run(5000, [&]() {
+        const double mem_ns = H.run(5000, [&]() {
             auto pkt = m_init.encrypt(src.data(), 128);
             auto dec = decrypt_packet(m_resp, pkt);
             bench::DoNotOptimize(dec);

@@ -63,18 +63,17 @@ uint32_t backend_ids(uint32_t* ids, uint32_t max_ids) {
 }
 
 std::unique_ptr<GpuBackend> create_backend(uint32_t backend_id) {
-    switch (backend_id) {
 #if defined(SECP256K1_HAVE_CUDA)
-    case 1: return create_cuda_backend();
+    if (backend_id == 1) return create_cuda_backend();
 #endif
 #if defined(SECP256K1_HAVE_OPENCL)
-    case 2: return create_opencl_backend();
+    if (backend_id == 2) return create_opencl_backend();
 #endif
 #if defined(SECP256K1_HAVE_METAL)
-    case 3: return create_metal_backend();
+    if (backend_id == 3) return create_metal_backend();
 #endif
-    default: return nullptr;
-    }
+    (void)backend_id;
+    return nullptr;
 }
 
 bool is_available(uint32_t backend_id) {
