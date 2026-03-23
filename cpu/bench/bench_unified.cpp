@@ -2747,10 +2747,22 @@ int main(int argc, char** argv) {
             bench::DoNotOptimize(pn);
         }, N_SIGN);
 
-        u_musig2_partial_sign = bench_ns([&]{
-            auto s = musig2_partial_sign(snonce1, privkeys[0], key_agg, session, 0);
-            bench::DoNotOptimize(s);
-        }, N_SIGN);
+        // Pre-generate a nonce pool for partial_sign bench (M-03 single-use)
+        {
+            std::vector<MuSig2SecNonce> m2_nonce_pool(static_cast<std::size_t>(N_SIGN));
+            for (int i = 0; i < N_SIGN; ++i) {
+                auto tseed = make_hash(0xBEEFC000ULL + static_cast<std::uint64_t>(i));
+                m2_nonce_pool[static_cast<std::size_t>(i)] =
+                    musig2_nonce_gen(privkeys[0], pk1_x, key_agg.Q_x, msghashes[0],
+                                     tseed.data()).first;
+            }
+            int m2_i = 0;
+            u_musig2_partial_sign = bench_ns([&]{
+                auto s = musig2_partial_sign(m2_nonce_pool[static_cast<std::size_t>(m2_i++)],
+                                             privkeys[0], key_agg, session, 0);
+                bench::DoNotOptimize(s);
+            }, N_SIGN);
+        }
 
         u_musig2_partial_verify = bench_ns([&]{
             bool ok = musig2_partial_verify(ps1, pnonce1, pk1_x, key_agg, session, 0);

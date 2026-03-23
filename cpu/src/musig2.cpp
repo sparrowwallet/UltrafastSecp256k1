@@ -304,7 +304,7 @@ MuSig2Session musig2_start_sign_session(
 // -- Partial Signing ----------------------------------------------------------
 
 Scalar musig2_partial_sign(
-    const MuSig2SecNonce& sec_nonce,
+    MuSig2SecNonce& sec_nonce,
     const Scalar& secret_key,
     const MuSig2KeyAggCtx& key_agg_ctx,
     const MuSig2Session& session,
@@ -358,9 +358,12 @@ Scalar musig2_partial_sign(
     // Scalar +/* are fixed-iteration multi-limb arithmetic -- CT by construction.
     Scalar const result = k + session.e * key_agg_ctx.key_coefficients[signer_index] * d;
 
-    // Erase secret nonce and adjusted signing key from stack.
+    // Erase secret nonce and adjusted signing key from stack, then consume
+    // the caller's secret nonce to enforce single-use (M-03).
     secure_erase(&k, sizeof(k));
     secure_erase(&d, sizeof(d));
+    secure_erase(&sec_nonce.k1, sizeof(sec_nonce.k1));
+    secure_erase(&sec_nonce.k2, sizeof(sec_nonce.k2));
 
     return result;
 }
