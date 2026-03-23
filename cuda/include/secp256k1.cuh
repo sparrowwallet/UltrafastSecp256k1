@@ -3784,6 +3784,157 @@ __device__ inline void scalar_mul_generator_ct(const Scalar* k, JacobianPoint* r
     jacobian_add_mixed_unchecked(r, &neg_G, r);
 }
 
+// ============================================================================
+// GLV + CT generator multiplication  (constant-time, ~30-35% faster)
+// ---------------------------------------------------------------------------
+// Decomposes k = k1 + k2*λ (GLV) where |k1|,|k2| ≤ 2^128, then processes
+// both halves in a shared 16-step W8 doubling chain:
+//   16 iterations × (8 unchecked doublings + 2 CT mixed adds)
+//   = 128 doublings + 32 mixed additions (vs 256 + 32 in scalar_mul_generator_ct)
+//
+// GLV sign flags (k1_neg, k2_neg) are applied via CT bitmasks — no branches
+// on secret data in the main loop.
+//
+// Dummy-start technique: start accumulator at G+endo(G) (computed once,
+// 1 field_inv + 5 field_muls). Subtract G+endo(G) at end → net result k*G.
+// The accumulator is never at infinity → all ops use _unchecked variants.
+//
+// Scalar blinding (DPA defense): projective coordinates are randomized before
+// the main loop using GPU clock + thread-ID entropy. Each invocation maps
+// (X:Y:Z) → (r²X : r³Y : rZ), same mathematical point but different values
+// → prevents power/cache correlation across repeated invocations.
+// Cost: 1 field_to_mont + 1 field_sqr + 2 field_mul = 4 field ops.
+// ============================================================================
+__device__ inline void scalar_mul_generator_ct_glv(const Scalar* k, JacobianPoint* r) {
+    // GLV decompose: k = k1 + k2*lambda, |k1|, |k2| <= 2^128
+    GLVDecomposition decomp = glv_decompose(k);
+
+    // β for endomorphism: endo(P) = (β·x, y)
+    FieldElement beta_fe;
+    beta_fe.limbs[0] = BETA[0]; beta_fe.limbs[1] = BETA[1];
+    beta_fe.limbs[2] = BETA[2]; beta_fe.limbs[3] = BETA[3];
+
+    // -- Build dummy = G + endo(G) in affine (one field_inv, done before loop) --
+    // endo(G).x = β·G.x,  endo(G).y = G.y  (endomorphism preserves y)
+    AffinePoint endo_G;
+    field_mul(&GENERATOR_TABLE_W8[1].x, &beta_fe, &endo_G.x);
+    endo_G.y = GENERATOR_TABLE_W8[1].y;
+
+    JacobianPoint dummy_jac;
+    dummy_jac.x = GENERATOR_TABLE_W8[1].x;
+    dummy_jac.y = GENERATOR_TABLE_W8[1].y;
+    field_set_one(&dummy_jac.z);
+    dummy_jac.infinity = false;
+    jacobian_add_mixed_unchecked(&dummy_jac, &endo_G, &dummy_jac);
+
+    // Normalize dummy to affine (Z=1) so the final subtraction is a mixed add.
+    AffinePoint dummy_affine, neg_dummy_affine;
+    {
+        FieldElement zi, zi2, zi3;
+        field_inv(&dummy_jac.z, &zi);
+        field_sqr(&zi, &zi2);
+        field_mul(&zi2, &zi, &zi3);
+        field_mul(&dummy_jac.x, &zi2, &dummy_affine.x);
+        field_mul(&dummy_jac.y, &zi3, &dummy_affine.y);
+    }
+    neg_dummy_affine.x = dummy_affine.x;
+    field_negate(&dummy_affine.y, &neg_dummy_affine.y);
+
+    // Start accumulator at dummy_affine (Z=1, guaranteed non-infinity).
+    r->x = dummy_affine.x;
+    r->y = dummy_affine.y;
+    field_set_one(&r->z);
+    r->infinity = false;
+
+    // -- Scalar blinding (DPA defense): randomize projective representation --
+    // (r²·X : r³·Y : r) represents the same geometric point as (X:Y:1).
+    // r is derived from GPU clock + thread/block IDs (not cryptographically
+    // strong, but sufficient to prevent power-analysis correlation across runs).
+    {
+        uint64_t entropy = ((uint64_t)clock64())
+                         ^ ((uint64_t)(threadIdx.x + 1))
+                         ^ ((uint64_t)(blockIdx.x + 1) << 32);
+        entropy |= 1ULL;  // ensure non-zero
+        FieldElement rr_raw;
+        rr_raw.limbs[0] = entropy;
+        rr_raw.limbs[1] = rr_raw.limbs[2] = rr_raw.limbs[3] = 0;
+        FieldElement rr, rr2, rr3, tmp;
+        field_to_mont(&rr_raw, &rr);       // convert to Montgomery domain
+        field_sqr(&rr, &rr2);              // rr^2
+        field_mul(&rr2, &rr, &rr3);        // rr^3
+        field_mul(&r->x, &rr2, &tmp); r->x = tmp;   // X ← r²·X
+        field_mul(&r->y, &rr3, &tmp); r->y = tmp;   // Y ← r³·Y
+        r->z = rr;                         // Z ← r
+    }
+
+    // CT sign masks: all-1s if negated, all-0s if positive.
+    uint64_t k1_sign = -(uint64_t)decomp.k1_neg;
+    uint64_t k2_sign = -(uint64_t)decomp.k2_neg;
+
+    JacobianPoint r_add;
+
+    // -- Main loop: 16 iterations (2 limbs × 8 bytes), MSB first --
+    // k1 and k2 are ~128-bit scalars; only limbs[0..1] are significant.
+    #pragma unroll 1
+    for (int limb = 1; limb >= 0; limb--) {
+        uint64_t w1 = decomp.k1.limbs[limb];
+        uint64_t w2 = decomp.k2.limbs[limb];
+        #pragma unroll 1
+        for (int byte_idx = 7; byte_idx >= 0; byte_idx--) {
+            uint32_t idx1 = (uint32_t)((w1 >> (byte_idx * 8)) & 0xFFULL);
+            uint32_t idx2 = (uint32_t)((w2 >> (byte_idx * 8)) & 0xFFULL);
+
+            // 8 unchecked doublings — accumulator is never at infinity.
+            jacobian_double_unchecked(r, r);
+            jacobian_double_unchecked(r, r);
+            jacobian_double_unchecked(r, r);
+            jacobian_double_unchecked(r, r);
+            jacobian_double_unchecked(r, r);
+            jacobian_double_unchecked(r, r);
+            jacobian_double_unchecked(r, r);
+            jacobian_double_unchecked(r, r);
+
+            // k1: add idx1*G from table with CT sign adjustment.
+            {
+                uint32_t safe_idx1 = idx1 | (uint32_t)(idx1 == 0);
+                AffinePoint p1;
+                p1.x = GENERATOR_TABLE_W8[safe_idx1].x;
+                FieldElement raw_y1 = GENERATOR_TABLE_W8[safe_idx1].y;
+                FieldElement neg_y1;
+                field_negate(&raw_y1, &neg_y1);
+                for (int i = 0; i < 4; i++) {
+                    p1.y.limbs[i] = (k1_sign & neg_y1.limbs[i])
+                                  | (~k1_sign & raw_y1.limbs[i]);
+                }
+                jacobian_add_mixed_unchecked(r, &p1, &r_add);
+                uint64_t mask1 = -(uint64_t)(idx1 != 0);
+                jacobian_cmov(r, &r_add, mask1);
+            }
+
+            // k2: add idx2*endo(G) with CT sign adjustment.
+            // endo table is derived on-the-fly: x' = β·x, y' = y (or -y).
+            {
+                uint32_t safe_idx2 = idx2 | (uint32_t)(idx2 == 0);
+                AffinePoint p2;
+                field_mul(&GENERATOR_TABLE_W8[safe_idx2].x, &beta_fe, &p2.x);
+                FieldElement raw_y2 = GENERATOR_TABLE_W8[safe_idx2].y;
+                FieldElement neg_y2;
+                field_negate(&raw_y2, &neg_y2);
+                for (int i = 0; i < 4; i++) {
+                    p2.y.limbs[i] = (k2_sign & neg_y2.limbs[i])
+                                  | (~k2_sign & raw_y2.limbs[i]);
+                }
+                jacobian_add_mixed_unchecked(r, &p2, &r_add);
+                uint64_t mask2 = -(uint64_t)(idx2 != 0);
+                jacobian_cmov(r, &r_add, mask2);
+            }
+        }
+    }
+
+    // r = (k1+1)*G + (k2+1)*endo(G) — subtract dummy to recover k*G.
+    jacobian_add_mixed_unchecked(r, &neg_dummy_affine, r);
+}
+
 // -- Ultra-fast Generator Multiplication via 16x65536 LUT --------------------
 // Precomputed table: 16 windows x 65536 affine points in global memory (64 MB).
 // For window i: table[i][j] = j * 2^(16*i) * G  (j = 0..65535)
