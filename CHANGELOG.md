@@ -5,9 +5,9 @@ All notable changes to UltrafastSecp256k1 are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased] (dev branch — heading to v3.4.0)
+## [3.4.0] - 2026-03-23
 
-> **Development:** v3.3.x dev | Unified Wallet API, multi-chain address formats, message signing, CUDA w8 signing performance
+> Full ABI audit coverage: 155 `ufsecp_*` + 18 `ufsecp_gpu_*` functions, 70-module unified runner (AUDIT-READY), GPU C ABI null-guard path integration.
 
 ### Fixed
 

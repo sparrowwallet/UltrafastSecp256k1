@@ -29,7 +29,7 @@ include(FetchContent)
 FetchContent_Declare(
   secp256k1_fast
   GIT_REPOSITORY https://github.com/shrec/UltrafastSecp256k1.git
-  GIT_TAG        v3.3.0
+  GIT_TAG        v3.4.0
 )
 
 # Disable components you don't need
@@ -72,7 +72,7 @@ A `vcpkg.json` manifest is provided in the repository root:
 ```json
 {
   "name": "ultrafastsecp256k1",
-  "version": "3.3.0"
+  "version": "3.4.0"
 }
 ```
 

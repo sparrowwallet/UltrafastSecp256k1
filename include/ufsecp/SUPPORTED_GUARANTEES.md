@@ -1,7 +1,7 @@
 # Supported Guarantees -- `ufsecp` C ABI
 
-> **Version**: 3.3.0 (ABI 1)
-> **Date**: 2026-02-19
+> **Version**: 3.4.0 (ABI 1)
+> **Date**: 2026-03-23
 
 This document defines what the `ufsecp_*` C ABI promises and where the
 boundary lies.
