@@ -2677,10 +2677,22 @@ int main(int argc, char** argv) {
             bench::DoNotOptimize(nc);
         }, N_SIGN);
 
-        u_frost_sign_partial = bench_ns([&]{
-            auto ps = frost_sign(kp1, nonce1, msghashes[0], ncomms);
-            bench::DoNotOptimize(ps);
-        }, N_SIGN);
+        // Pre-generate a fresh nonce per iteration so the bench does not
+        // reuse a consumed (zeroed) nonce — which would violate H-01 and
+        // produce wrong timing due to hitting the zero-check paths.
+        {
+            std::vector<FrostNonce> bench_nonces(static_cast<std::size_t>(N_SIGN));
+            for (int i = 0; i < N_SIGN; ++i) {
+                auto tseed = make_hash(0xBEEF0000ULL + static_cast<std::uint64_t>(i));
+                bench_nonces[static_cast<std::size_t>(i)] = frost_sign_nonce_gen(1, tseed).first;
+            }
+            int bn_i = 0;
+            u_frost_sign_partial = bench_ns([&]{
+                auto ps = frost_sign(kp1, bench_nonces[static_cast<std::size_t>(bn_i++)],
+                                     msghashes[0], ncomms);
+                bench::DoNotOptimize(ps);
+            }, N_SIGN);
+        }
 
         u_frost_verify_partial = bench_ns([&]{
             bool ok = frost_verify_partial(psig1, ncomm1, kp1.verification_share,

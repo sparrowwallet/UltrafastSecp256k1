@@ -251,7 +251,7 @@ frost_sign_nonce_gen(ParticipantId participant_id,
 
 FrostPartialSig
 frost_sign(const FrostKeyPackage& key_pkg,
-           const FrostNonce& nonce,
+           FrostNonce& nonce,
            const std::array<std::uint8_t, 32>& msg,
            const std::vector<FrostNonceCommitment>& nonce_commitments) {
     // Collect signer IDs
@@ -315,10 +315,13 @@ frost_sign(const FrostKeyPackage& key_pkg,
 
     Scalar const z_i = d + (my_binding * ei) + (lambda_i * s_i * e);
 
-    // Erase secret nonces and signing share from stack.
+    // Erase secret nonces and signing share from stack, then consume the
+    // caller's nonce to enforce single-use (H-01 nonce-reuse prevention).
     secure_erase(&d,   sizeof(d));
     secure_erase(&ei,  sizeof(ei));
     secure_erase(&s_i, sizeof(s_i));
+    secure_erase(&nonce.hiding_nonce,  sizeof(nonce.hiding_nonce));
+    secure_erase(&nonce.binding_nonce, sizeof(nonce.binding_nonce));
 
     return FrostPartialSig{key_pkg.id, z_i};
 }
