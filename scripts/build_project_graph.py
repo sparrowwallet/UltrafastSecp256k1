@@ -788,7 +788,7 @@ def categorize_abi_func(name: str):
     """Categorize a ufsecp_* function name."""
     n = name.replace('ufsecp_', '')
     categories = {
-        'ctx': 'context', 'seckey': 'seckey', 'pubkey': 'pubkey',
+        'gpu': 'gpu', 'ctx': 'context', 'seckey': 'seckey', 'pubkey': 'pubkey',
         'ecdsa': 'ecdsa', 'schnorr': 'schnorr', 'ecdh': 'ecdh',
         'sha256': 'hash', 'sha512': 'hash', 'hash160': 'hash',
         'tagged_hash': 'hash', 'keccak256': 'ethereum',
@@ -1152,9 +1152,10 @@ def populate_source_files(cur: sqlite3.Cursor):
     return count
 
 def populate_abi_functions(cur: sqlite3.Cursor):
-    """Parse ufsecp.h and ufsecp_version.h for all C ABI function declarations."""
+    """Parse ufsecp.h, ufsecp_gpu.h, and ufsecp_version.h for all C ABI function declarations."""
     headers = [
         LIB_ROOT / 'include' / 'ufsecp' / 'ufsecp.h',
+        LIB_ROOT / 'include' / 'ufsecp' / 'ufsecp_gpu.h',
         LIB_ROOT / 'include' / 'ufsecp' / 'ufsecp_version.h',
     ]
     count = 0

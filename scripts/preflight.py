@@ -311,7 +311,7 @@ def check_abi_surface():
     # Scan actual headers (ufsecp.h + ufsecp_version.h)
     actual = set()
     fn_re = re.compile(r'UFSECP_API\s+.*?(ufsecp_\w+)\s*\(')
-    for hdr_name in ('ufsecp.h', 'ufsecp_version.h'):
+    for hdr_name in ('ufsecp.h', 'ufsecp_gpu.h', 'ufsecp_version.h'):
         header = LIB_ROOT / 'include' / 'ufsecp' / hdr_name
         if header.exists():
             with open(header, 'r', errors='replace') as f:
