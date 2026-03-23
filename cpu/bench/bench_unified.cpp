@@ -3170,8 +3170,10 @@ int main(int argc, char** argv) {
         dec_init.complete_handshake(dec_resp.our_ellswift_encoding().data());
         u_session_decrypt_256 = bench_ns([&]{
             auto pkt = dec_init.encrypt(pt_256.data(), pt_256.size());
-            auto dec = dec_resp.decrypt(pkt.data(), pkt.data() + 3, pkt.size() - 3);
-            bench::DoNotOptimize(dec.data());
+            std::vector<std::uint8_t> plaintext;
+            auto ok = dec_resp.decrypt(pkt.data(), pkt.data() + 3, pkt.size() - 3, plaintext);
+            bench::DoNotOptimize(ok);
+            bench::DoNotOptimize(plaintext.data());
         }, N_SIGN);
 
         // Session encrypt 1KB
@@ -3192,8 +3194,10 @@ int main(int argc, char** argv) {
         rt_init.complete_handshake(rt_resp.our_ellswift_encoding().data());
         u_session_roundtrip_256 = bench_ns([&]{
             auto pkt = rt_init.encrypt(pt_256.data(), pt_256.size());
-            auto dec = rt_resp.decrypt(pkt.data(), pkt.data() + 3, pkt.size() - 3);
-            bench::DoNotOptimize(dec.data());
+            std::vector<std::uint8_t> plaintext;
+            auto ok = rt_resp.decrypt(pkt.data(), pkt.data() + 3, pkt.size() - 3, plaintext);
+            bench::DoNotOptimize(ok);
+            bench::DoNotOptimize(plaintext.data());
         }, N_SIGN);
 
         print_header("BIP-324 ENCRYPTED TRANSPORT");

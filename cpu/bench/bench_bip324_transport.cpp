@@ -15,6 +15,7 @@
 #include "secp256k1/benchmark_harness.hpp"
 
 #include <algorithm>
+#include <cstdlib>
 #include <cstdio>
 #include <cstdint>
 #include <cstring>
@@ -84,6 +85,16 @@ struct SessionPair {
     }
 };
 
+static std::vector<std::uint8_t> decrypt_packet(secp256k1::Bip324Session& session,
+                                                const std::vector<std::uint8_t>& packet) {
+    std::vector<std::uint8_t> plaintext;
+    if (!session.decrypt(packet.data(), packet.data() + 3, packet.size() - 3, plaintext)) {
+        std::fprintf(stderr, "BIP-324 transport benchmark decrypt failed\n");
+        std::abort();
+    }
+    return plaintext;
+}
+
 // Percentile from sorted array (linear interpolation)
 static double percentile(const std::vector<double>& sorted, double p) {
     if (sorted.empty()) return 0.0;
@@ -151,7 +162,7 @@ static void bench_transport_mixed(int total_packets) {
         SessionPair sp;
         for (std::size_t i = 0; i < static_cast<std::size_t>(total_packets); ++i) {
             auto pkt = sp.initiator.encrypt(src.data(), schedule[i].payload_size);
-            auto dec = sp.responder.decrypt(pkt.data(), pkt.data() + 3, pkt.size() - 3);
+            auto dec = decrypt_packet(sp.responder, pkt);
             bench::DoNotOptimize(dec);
         }
     });
@@ -235,7 +246,7 @@ static void bench_transport_decoys(int total_packets, double decoy_rate) {
         SessionPair sp;
         for (std::size_t i = 0; i < static_cast<std::size_t>(total_packets); ++i) {
             auto pkt = sp.initiator.encrypt(src.data(), schedule[i].payload_size);
-            auto dec = sp.responder.decrypt(pkt.data(), pkt.data() + 3, pkt.size() - 3);
+            auto dec = decrypt_packet(sp.responder, pkt);
             bench::DoNotOptimize(dec);
         }
     });
@@ -253,7 +264,7 @@ static void bench_transport_decoys(int total_packets, double decoy_rate) {
         for (std::size_t i = 0; i < static_cast<std::size_t>(total_packets); ++i) {
             if (schedule[i].is_decoy) continue; // skip decoys
             auto pkt = sp.initiator.encrypt(src.data(), schedule[i].payload_size);
-            auto dec = sp.responder.decrypt(pkt.data(), pkt.data() + 3, pkt.size() - 3);
+            auto dec = decrypt_packet(sp.responder, pkt);
             bench::DoNotOptimize(dec);
         }
     });
@@ -313,7 +324,7 @@ static void bench_latency_mode(int num_packets) {
             std::size_t sz = rng.range(static_cast<std::uint32_t>(bkt.lo),
                                         static_cast<std::uint32_t>(bkt.hi));
             auto pkt = sp.initiator.encrypt(src.data(), sz);
-            auto dec = sp.responder.decrypt(pkt.data(), pkt.data() + 3, pkt.size() - 3);
+            auto dec = decrypt_packet(sp.responder, pkt);
             bench::DoNotOptimize(dec);
         }
 
@@ -324,7 +335,7 @@ static void bench_latency_mode(int num_packets) {
 
             std::uint64_t t0 = bench::Timer::now();
             auto pkt = sp.initiator.encrypt(src.data(), sz);
-            auto dec = sp.responder.decrypt(pkt.data(), pkt.data() + 3, pkt.size() - 3);
+            auto dec = decrypt_packet(sp.responder, pkt);
             bench::DoNotOptimize(dec);
             std::uint64_t t1 = bench::Timer::now();
 
@@ -354,7 +365,7 @@ static void bench_latency_mode(int num_packets) {
         for (int w = 0; w < 100; ++w) {
             std::size_t sz = rng.range(1, 4096);
             auto pkt = sp.initiator.encrypt(src.data(), sz);
-            auto dec = sp.responder.decrypt(pkt.data(), pkt.data() + 3, pkt.size() - 3);
+            auto dec = decrypt_packet(sp.responder, pkt);
             bench::DoNotOptimize(dec);
         }
 
@@ -368,7 +379,7 @@ static void bench_latency_mode(int num_packets) {
 
             std::uint64_t t0 = bench::Timer::now();
             auto pkt = sp.initiator.encrypt(src.data(), sz);
-            auto dec = sp.responder.decrypt(pkt.data(), pkt.data() + 3, pkt.size() - 3);
+            auto dec = decrypt_packet(sp.responder, pkt);
             bench::DoNotOptimize(dec);
             std::uint64_t t1 = bench::Timer::now();
 
@@ -535,11 +546,8 @@ static void bench_e2e_socket(int num_roundtrips) {
                 }
 
                 // Decrypt
-                auto dec = s_sess.decrypt(
-                    recv_buf.data(),
-                    recv_buf.data() + 3,
-                    wire_sz - 3);
-                if (dec.empty()) {
+                std::vector<std::uint8_t> dec;
+                if (!s_sess.decrypt(recv_buf.data(), recv_buf.data() + 3, wire_sz - 3, dec)) {
                     server_ok.store(false);
                     break;
                 }
@@ -562,7 +570,7 @@ static void bench_e2e_socket(int num_roundtrips) {
 
             std::vector<std::uint8_t> reply_buf(sz + BIP324_OVERHEAD);
             recv_all(client_fd, reply_buf.data(), reply_buf.size());
-            auto rep = c_sess.decrypt(reply_buf.data(), reply_buf.data() + 3, reply_buf.size() - 3);
+            auto rep = decrypt_packet(c_sess, reply_buf);
             bench::DoNotOptimize(rep);
         }
 
@@ -578,7 +586,7 @@ static void bench_e2e_socket(int num_roundtrips) {
             // Client: recv reply + decrypt
             std::vector<std::uint8_t> reply_buf(sz + BIP324_OVERHEAD);
             recv_all(client_fd, reply_buf.data(), reply_buf.size());
-            auto rep = c_sess.decrypt(reply_buf.data(), reply_buf.data() + 3, reply_buf.size() - 3);
+            auto rep = decrypt_packet(c_sess, reply_buf);
             bench::DoNotOptimize(rep);
 
             std::uint64_t t1 = bench::Timer::now();
@@ -616,7 +624,7 @@ static void bench_e2e_socket(int num_roundtrips) {
 
         double mem_ns = H.run(5000, [&]() {
             auto pkt = m_init.encrypt(src.data(), 128);
-            auto dec = m_resp.decrypt(pkt.data(), pkt.data() + 3, pkt.size() - 3);
+            auto dec = decrypt_packet(m_resp, pkt);
             bench::DoNotOptimize(dec);
         });
 

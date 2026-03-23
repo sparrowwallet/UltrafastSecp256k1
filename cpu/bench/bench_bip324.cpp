@@ -19,6 +19,7 @@
 #include "secp256k1/bip324.hpp"
 #include "secp256k1/benchmark_harness.hpp"
 
+#include <cstdlib>
 #include <cstdio>
 #include <cstdint>
 #include <cstring>
@@ -58,6 +59,16 @@ static void print_throughput(const char* label, double ns_per_iter, std::size_t 
     double mb_per_sec = (static_cast<double>(bytes) / (ns_per_iter / 1e9)) / (1024.0 * 1024.0);
     std::printf("  %-38s %8.1f ns   %7.1f MB/s   (%zu B)\n",
                 label, ns_per_iter, mb_per_sec, bytes);
+}
+
+static std::vector<std::uint8_t> decrypt_packet(secp256k1::Bip324Session& session,
+                                                const std::vector<std::uint8_t>& packet) {
+    std::vector<std::uint8_t> plaintext;
+    if (!session.decrypt(packet.data(), packet.data() + 3, packet.size() - 3, plaintext)) {
+        std::fprintf(stderr, "BIP-324 benchmark decrypt failed\n");
+        std::abort();
+    }
+    return plaintext;
 }
 
 // ============================================================================
@@ -328,8 +339,7 @@ int main() {
                 // Encrypt (advances initiator nonce)
                 auto pkt = initiator.encrypt(buf.data(), sz);
                 // Decrypt (advances responder nonce — stays in sync)
-                auto dec = responder.decrypt(
-                    pkt.data(), pkt.data() + 3, pkt.size() - 3);
+                auto dec = decrypt_packet(responder, pkt);
                 bench::DoNotOptimize(dec);
             });
             print_throughput(label, ns, sz);

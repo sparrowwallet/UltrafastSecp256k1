@@ -46,6 +46,24 @@ static const std::uint8_t KEY_B[32] = {
     0xef,0xfe,0xdc,0xba,0x98,0x76,0x54,0x32
 };
 
+static std::vector<std::uint8_t> decrypt_or_empty(Bip324Session& session,
+                                                  const std::vector<std::uint8_t>& packet) {
+    std::vector<std::uint8_t> plaintext;
+    if (!session.decrypt(packet.data(), packet.data() + 3, packet.size() - 3, plaintext)) {
+        return {};
+    }
+    return plaintext;
+}
+
+static std::vector<std::uint8_t> decrypt_cipher_or_empty(Bip324Cipher& cipher,
+                                                         const std::vector<std::uint8_t>& packet) {
+    std::vector<std::uint8_t> plaintext;
+    if (!cipher.decrypt(nullptr, 0, packet.data(), packet.data() + 3, packet.size() - 3, plaintext)) {
+        return {};
+    }
+    return plaintext;
+}
+
 // ============================================================================
 // 1. HKDF-SHA256 tests
 // ============================================================================
@@ -243,7 +261,7 @@ static void test_bip324_cipher() {
     // Decrypt the packet
     Bip324Cipher recv_cipher;
     recv_cipher.init(key);
-    auto dec = recv_cipher.decrypt(nullptr, 0, pkt.data(), pkt.data() + 3, pkt.size() - 3);
+    auto dec = decrypt_cipher_or_empty(recv_cipher, pkt);
     CHECK(!dec.empty(), "Cipher: decrypt succeeds");
     CHECK(dec.size() == payload_len, "Cipher: decrypted size matches");
     CHECK(std::memcmp(dec.data(), payload, payload_len) == 0, "Cipher: roundtrip correct");
@@ -256,15 +274,17 @@ static void test_bip324_cipher() {
     Bip324Cipher misaligned;
     misaligned.init(key);
     // Skip one decrypt to advance counter
-    misaligned.decrypt(nullptr, 0, pkt.data(), pkt.data() + 3, pkt.size() - 3);
+    auto skipped = decrypt_cipher_or_empty(misaligned, pkt);
+    CHECK(!skipped.empty(), "Cipher: initial aligned decrypt succeeds");
     // Now try to decrypt pkt (counter=0) with counter=1
-    auto bad_dec = misaligned.decrypt(nullptr, 0, pkt.data(), pkt.data() + 3, pkt.size() - 3);
+    auto bad_dec = decrypt_cipher_or_empty(misaligned, pkt);
     // This should fail because the nonce doesn't match
     // (pkt was encrypted with counter=0, misaligned is now at counter=1, 
     //  but pkt2 was encrypted with counter=1, and we used pkt for counter=0 slot)
     // Actually the misaligned cipher just decrypted pkt at counter=0, so it's now at counter=1
     // Let's try decrypting pkt again (counter=0 data with counter=1 state)
-    auto bad_dec2 = misaligned.decrypt(nullptr, 0, pkt.data(), pkt.data() + 3, pkt.size() - 3);
+    auto bad_dec2 = decrypt_cipher_or_empty(misaligned, pkt);
+    CHECK(bad_dec.empty(), "Cipher: first misaligned decrypt fails auth");
     CHECK(bad_dec2.empty(), "Cipher: misaligned counter fails auth");
 }
 
@@ -311,7 +331,7 @@ static void test_bip324_session() {
     auto pkt = initiator.encrypt(msg, sizeof(msg) - 1);
     CHECK(!pkt.empty(), "Session: encrypt produces data");
 
-    auto dec = responder.decrypt(pkt.data(), pkt.data() + 3, pkt.size() - 3);
+    auto dec = decrypt_or_empty(responder, pkt);
     CHECK(!dec.empty(), "Session: responder decrypts successfully");
     CHECK(dec.size() == sizeof(msg) - 1, "Session: decrypted size matches");
     CHECK(std::memcmp(dec.data(), msg, sizeof(msg) - 1) == 0,
@@ -320,14 +340,14 @@ static void test_bip324_session() {
     // Encrypt/decrypt: responder → initiator
     const std::uint8_t reply[] = "Reply from responder!";
     auto rpkt = responder.encrypt(reply, sizeof(reply) - 1);
-    auto rdec = initiator.decrypt(rpkt.data(), rpkt.data() + 3, rpkt.size() - 3);
+    auto rdec = decrypt_or_empty(initiator, rpkt);
     CHECK(!rdec.empty(), "Session: initiator decrypts reply");
     CHECK(std::memcmp(rdec.data(), reply, sizeof(reply) - 1) == 0,
           "Session: responder→initiator roundtrip correct");
 
     // Cross-direction: initiator cannot decrypt its own packets
     auto own_pkt = initiator.encrypt(msg, sizeof(msg) - 1);
-    auto cross = initiator.decrypt(own_pkt.data(), own_pkt.data() + 3, own_pkt.size() - 3);
+    auto cross = decrypt_or_empty(initiator, own_pkt);
     CHECK(cross.empty(), "Session: cannot decrypt own packets (different key direction)");
 }
 
@@ -353,7 +373,7 @@ static void test_bip324_sequence() {
 
         // init → resp
         auto pkt = init.encrypt(buf, len);
-        auto dec = resp.decrypt(pkt.data(), pkt.data() + 3, pkt.size() - 3);
+        auto dec = decrypt_or_empty(resp, pkt);
         if (dec.size() != len || std::memcmp(dec.data(), buf, len) != 0) {
             all_ok = false;
             break;
@@ -361,7 +381,7 @@ static void test_bip324_sequence() {
 
         // resp → init
         auto rpkt = resp.encrypt(buf, len);
-        auto rdec = init.decrypt(rpkt.data(), rpkt.data() + 3, rpkt.size() - 3);
+        auto rdec = decrypt_or_empty(init, rpkt);
         if (rdec.size() != len || std::memcmp(rdec.data(), buf, len) != 0) {
             all_ok = false;
             break;
@@ -374,7 +394,7 @@ static void test_bip324_sequence() {
     // (We can't read the counter directly, but we can verify continued operation)
     const std::uint8_t final_msg[] = "final";
     auto fp = init.encrypt(final_msg, 5);
-    auto fd = resp.decrypt(fp.data(), fp.data() + 3, fp.size() - 3);
+    auto fd = decrypt_or_empty(resp, fp);
     CHECK(!fd.empty() && fd.size() == 5, "Post-sequence packet #101 decrypts correctly");
 }
 
@@ -406,12 +426,12 @@ static void test_bip324_determinism() {
     // Verify encrypt→decrypt is consistent across the session
     const std::uint8_t msg[] = "determinism test";
     auto pkt1 = a1.encrypt(msg, sizeof(msg) - 1);
-    auto dec1 = b1.decrypt(pkt1.data(), pkt1.data() + 3, pkt1.size() - 3);
+    auto dec1 = decrypt_or_empty(b1, pkt1);
     CHECK(!dec1.empty() && std::memcmp(dec1.data(), msg, sizeof(msg) - 1) == 0,
           "First encrypt/decrypt in session is correct");
 
     auto pkt2 = a1.encrypt(msg, sizeof(msg) - 1);
-    auto dec2 = b1.decrypt(pkt2.data(), pkt2.data() + 3, pkt2.size() - 3);
+    auto dec2 = decrypt_or_empty(b1, pkt2);
     CHECK(!dec2.empty() && std::memcmp(dec2.data(), msg, sizeof(msg) - 1) == 0,
           "Second encrypt/decrypt (different nonce) is correct");
 
@@ -444,7 +464,7 @@ static void test_bip324_sizes() {
         auto pkt = init.encrypt(payload.data(), sz);
         if (pkt.size() != 3 + sz + 16) { all_ok = false; break; }
 
-        auto dec = resp.decrypt(pkt.data(), pkt.data() + 3, pkt.size() - 3);
+        auto dec = decrypt_or_empty(resp, pkt);
         if (dec.size() != sz || std::memcmp(dec.data(), payload.data(), sz) != 0) {
             all_ok = false;
             break;
@@ -475,7 +495,7 @@ static void test_bip324_tamper() {
     {
         auto bad = pkt;
         bad[0] ^= 0x01;
-        auto dec = resp.decrypt(bad.data(), bad.data() + 3, bad.size() - 3);
+        auto dec = decrypt_or_empty(resp, bad);
         CHECK(dec.empty(), "Tampered header byte 0 → auth failure");
     }
 
@@ -492,7 +512,7 @@ static void test_bip324_tamper() {
     {
         auto bad = pkt2;
         bad[10] ^= 0xFF;
-        auto dec = resp2.decrypt(bad.data(), bad.data() + 3, bad.size() - 3);
+        auto dec = decrypt_or_empty(resp2, bad);
         CHECK(dec.empty(), "Tampered payload → auth failure");
     }
 
@@ -506,7 +526,7 @@ static void test_bip324_tamper() {
     {
         auto bad = pkt3;
         bad[bad.size() - 1] ^= 0x01;
-        auto dec = resp3.decrypt(bad.data(), bad.data() + 3, bad.size() - 3);
+        auto dec = decrypt_or_empty(resp3, bad);
         CHECK(dec.empty(), "Tampered tag → auth failure");
     }
 }
@@ -528,7 +548,7 @@ static void test_bip324_random_keys() {
 
     const std::uint8_t msg[] = "random key message";
     auto pkt = a.encrypt(msg, sizeof(msg) - 1);
-    auto dec = b.decrypt(pkt.data(), pkt.data() + 3, pkt.size() - 3);
+    auto dec = decrypt_or_empty(b, pkt);
     CHECK(!dec.empty() && dec.size() == sizeof(msg) - 1,
           "Random-key session: encrypt/decrypt roundtrip");
     CHECK(std::memcmp(dec.data(), msg, sizeof(msg) - 1) == 0,
