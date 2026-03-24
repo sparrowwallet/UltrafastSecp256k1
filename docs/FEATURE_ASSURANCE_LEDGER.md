@@ -567,8 +567,8 @@ Files with `secure_erase` for secret data cleanup:
 ### Coverage Gaps (items for future work)
 
 1. ~~**ECIES:** No fuzz or adversarial testing (only FFI round-trip)~~ **RESOLVED** -- `test_ecies_regression.cpp` (85 tests: parity tamper, invalid prefix, truncated envelope, tamper matrix, KAT, ABI prefix rejection, pubkey parser consistency, RNG fail-closed)
-2. **ZK range proofs:** No adversarial/malformed proof testing
-3. **Pedersen switch commit:** No adversarial testing
+2. ~~**ZK range proofs:** No adversarial/malformed proof testing~~ **RESOLVED** -- `test_exploit_zk_adversarial.cpp` (14 tests: garbage bytes, all-zero proof, scalar overflow, truncated data, identity pubkey, identity generator, degenerate G==H DLEQ, wrong commitment, overflow e, 64-byte-flip sensitivity)
+3. ~~**Pedersen switch commit:** No adversarial testing~~ **RESOLVED** -- `test_exploit_pedersen_adversarial.cpp` (12 tests: switch roundtrip, zero-blind equivalence, switch binding, zero-commit identity, negation cancellation, imbalanced verify_sum, blind_sum subtraction, switch-as-normal rejection, double-spend detection, generator J independence)
 4. **Ethereum functions:** No differential testing against reference (e.g., ethers.js)
 5. **GPU sign (CUDA-only):** ECDSA/Schnorr signing only on CUDA, not on OpenCL/Metal
 6. **Batch verify GPU:** Only CUDA has batch verify kernels; OpenCL/Metal missing

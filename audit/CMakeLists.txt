@@ -832,6 +832,20 @@ target_compile_definitions(test_exploit_bip32_ckd_hardened_standalone PRIVATE ST
 add_test(NAME exploit_bip32_ckd_hardened COMMAND test_exploit_bip32_ckd_hardened_standalone)
 set_tests_properties(exploit_bip32_ckd_hardened PROPERTIES TIMEOUT 60 LABELS "audit;exploit;bip32;hardened")
 
+# -- PoC: ZK adversarial / malformed inputs — forged proofs, overflow, identity
+add_executable(test_exploit_zk_adversarial_standalone test_exploit_zk_adversarial.cpp)
+audit_target_defaults(test_exploit_zk_adversarial_standalone)
+target_compile_definitions(test_exploit_zk_adversarial_standalone PRIVATE STANDALONE_TEST)
+add_test(NAME exploit_zk_adversarial COMMAND test_exploit_zk_adversarial_standalone)
+set_tests_properties(exploit_zk_adversarial PROPERTIES TIMEOUT 120 LABELS "audit;exploit;zk;adversarial")
+
+# -- PoC: Pedersen adversarial / switch-commit — binding, negation, double-spend
+add_executable(test_exploit_pedersen_adversarial_standalone test_exploit_pedersen_adversarial.cpp)
+audit_target_defaults(test_exploit_pedersen_adversarial_standalone)
+target_compile_definitions(test_exploit_pedersen_adversarial_standalone PRIVATE STANDALONE_TEST)
+add_test(NAME exploit_pedersen_adversarial COMMAND test_exploit_pedersen_adversarial_standalone)
+set_tests_properties(exploit_pedersen_adversarial PROPERTIES TIMEOUT 60 LABELS "audit;exploit;pedersen;adversarial")
+
 # -- ECIES regression + C ABI prefix enforcement ----------------------------
 add_executable(test_ecies_regression_standalone test_ecies_regression.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/../include/ufsecp/ufsecp_impl.cpp)
@@ -893,7 +907,7 @@ if(SECP256K1_BUILD_CROSS_TESTS)
         target_link_options(test_cross_libsecp256k1 PRIVATE "LINKER:/STACK:8388608")
     endif()
     add_test(NAME cross_libsecp256k1 COMMAND test_cross_libsecp256k1)
-    set_tests_properties(cross_libsecp256k1 PROPERTIES TIMEOUT 900)
+    set_tests_properties(cross_libsecp256k1 PROPERTIES TIMEOUT 900 LABELS "audit;exploit;differential;libsecp")
     message(STATUS "  Cross-test vs libsecp256k1: ON (ref: v0.6.0)")
 
     # NOTE: CT vs libsecp benchmark removed -- use cpu/bench/bench_unified instead
@@ -1209,6 +1223,7 @@ set_tests_properties(
     exploit_frost_byzantine exploit_scalar_systematic
     exploit_ecdsa_malleability exploit_glv_kat exploit_aead_integrity
     exploit_batch_schnorr_forge exploit_bip32_ckd_hardened
+    exploit_zk_adversarial exploit_pedersen_adversarial
     PROPERTIES LABELS "audit"
 )
 if(SECP256K1_BUILD_PROTOCOL_TESTS)

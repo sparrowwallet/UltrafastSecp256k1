@@ -9,6 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 > Full ABI audit coverage: 155 `ufsecp_*` + 23 `ufsecp_gpu_*` functions, 70-module unified runner (AUDIT-READY), GPU C ABI null-guard path integration.
 
+### Added
+
+- **ZK adversarial exploit test** (`test_exploit_zk_adversarial.cpp`) — 14 tests covering malformed/forged ZK proof inputs: garbage bytes, all-zero proof, scalar overflow (s ≥ n), truncated data, identity pubkey, identity generator, degenerate G==H DLEQ, wrong commitment for range proof, DLEQ overflow e, exhaustive 64-byte-flip sensitivity. Closes audit coverage gap #2.
+- **Pedersen adversarial exploit test** (`test_exploit_pedersen_adversarial.cpp`) — 12 tests covering switch commitment security and adversarial balance attacks: switch roundtrip, zero-blind equivalence, switch binding, zero-commit→identity, negation cancellation, imbalanced verify_sum (theft detection), blind_sum subtraction, switch-as-normal rejection, double-spend detection, generator J independence. Closes audit coverage gap #3.
+- **Cross-library differential test** (`test_cross_libsecp256k1`) wired into audit label set (`audit;exploit;differential;libsecp`) so it participates in the unified audit runner when `SECP256K1_BUILD_CROSS_TESTS=ON`.
+
 ### Fixed
 
 - **Stable binding validation closure** -- aligned the shared `validate_bindings.sh` flow and wrapper smoke suites across C#, Java, Swift, Python, Go, Rust, Node.js, PHP, Ruby, Dart, and the default React Native contract lane. Fixed wrapper/API drift, zero-length FFI buffer edge cases, Dart `NativeFinalizer` usage, and local Dart smoke-runner execution issues uncovered during the pass.
