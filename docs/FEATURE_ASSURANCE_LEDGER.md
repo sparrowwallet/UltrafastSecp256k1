@@ -462,7 +462,7 @@
 
 ---
 
-## 26. GPU C ABI (`ufsecp_gpu_*`) -- 18 functions
+## 26. GPU C ABI (`ufsecp_gpu_*`) -- 23 functions
 
 Backend-neutral GPU acceleration surface (`ufsecp_gpu.h`). Separate opaque context (`ufsecp_gpu_ctx*`).
 
@@ -493,6 +493,11 @@ Backend-neutral GPU acceleration surface (`ufsecp_gpu.h`). Separate opaque conte
 | `ufsecp_gpu_msm` | Y | Y | Y | - | Multi-scalar multiplication |
 | `ufsecp_gpu_frost_verify_partial_batch` | Y | Y | Y | - | Batch FROST partial verification |
 | `ufsecp_gpu_ecrecover_batch` | Y | Y | Y | - | Recover compressed pubkeys from recoverable ECDSA sigs |
+| `ufsecp_gpu_zk_knowledge_verify_batch` | - | - | - | CUDA only | Batch ZK knowledge proof verification |
+| `ufsecp_gpu_zk_dleq_verify_batch` | - | - | - | CUDA only | Batch DLEQ proof verification |
+| `ufsecp_gpu_bulletproof_verify_batch` | - | - | - | CUDA only | Batch Bulletproof range proof verification |
+| `ufsecp_gpu_bip324_aead_encrypt_batch` | - | - | - | CUDA only | Batch BIP-324 AEAD encrypt |
+| `ufsecp_gpu_bip324_aead_decrypt_batch` | - | - | - | CUDA only | Batch BIP-324 AEAD decrypt |
 
 **Test file:** `audit/test_gpu_abi_gate.cpp` (39 assertions)
 

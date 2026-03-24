@@ -7,7 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [3.4.0] - 2026-03-23
 
-> Full ABI audit coverage: 155 `ufsecp_*` + 18 `ufsecp_gpu_*` functions, 70-module unified runner (AUDIT-READY), GPU C ABI null-guard path integration.
+> Full ABI audit coverage: 155 `ufsecp_*` + 23 `ufsecp_gpu_*` functions, 70-module unified runner (AUDIT-READY), GPU C ABI null-guard path integration.
 
 ### Fixed
 
@@ -46,6 +46,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   64 inversions). 1.93x speedup (5,079 -> 2,634 us).
 - **GPU ZK kernels** -- Pedersen commitment (`pedersen.cuh`) and ZK proof primitives (`zk.cuh`)
   for CUDA backend.
+- **GPU ZK + BIP-324 C ABI** -- 5 new `ufsecp_gpu_*` batch operations wired through the full
+  GpuBackend → C ABI stack: `zk_knowledge_verify_batch`, `zk_dleq_verify_batch`,
+  `bulletproof_verify_batch`, `bip324_aead_encrypt_batch`, `bip324_aead_decrypt_batch`.
+  CUDA fully implemented; OpenCL/Metal stubs with `TODO(parity)`. Shared BIP-324 device
+  code extracted to `cuda/include/bip324.cuh` (ChaCha20-Poly1305 AEAD).
+  GPU C ABI total: 8 → 13 backend-neutral batch operations.
 - **GPU CT ZK proving** (`ct_zk.cuh`) -- constant-time knowledge proof and DLEQ proof
   on CUDA, using the full CT scalar multiplication layer. Deterministic nonce derivation
   with SHA-256 tagged hash and XOR hedging. Batch kernels for both operations.

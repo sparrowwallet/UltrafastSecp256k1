@@ -19,6 +19,11 @@
 | Keccak-256 | Y | - | Y | Y | Y |
 | Pedersen commitment | Y | Y | Y | Y | Y |
 | ZK proofs | Y | Y | Y | Y | Y |
+| ZK knowledge verify batch | - | - | Y | stub | stub |
+| ZK DLEQ verify batch | - | - | Y | stub | stub |
+| Bulletproof verify batch | - | - | Y | stub | stub |
+| BIP-324 AEAD encrypt batch | - | - | Y | stub | stub |
+| BIP-324 AEAD decrypt batch | - | - | Y | stub | stub |
 | Multi-scalar mul | Y | - | Y | Y | Y |
 | CT field ops | - | Y | Y | Y | Y |
 | CT scalar ops | - | Y | Y | Y | Y |
@@ -39,7 +44,11 @@
 
 | Operation | Backend | Tracking note |
 |-----------|---------|---------------|
-| *(none — all parity gaps resolved)* | - | - |
+| `zk_knowledge_verify_batch` | OpenCL, Metal | CUDA implemented; OCL/Metal stubs — kernel port needed |
+| `zk_dleq_verify_batch` | OpenCL, Metal | CUDA implemented; OCL/Metal stubs — kernel port needed |
+| `bulletproof_verify_batch` | OpenCL, Metal | CUDA implemented; OCL/Metal stubs — kernel port needed |
+| `bip324_aead_encrypt_batch` | OpenCL, Metal | CUDA implemented; OCL/Metal stubs — kernel port needed |
+| `bip324_aead_decrypt_batch` | OpenCL, Metal | CUDA implemented; OCL/Metal stubs — kernel port needed |
 
 ### Current permanent exceptions
 

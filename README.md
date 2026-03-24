@@ -104,7 +104,7 @@ All measurements: RTX 5060 Ti (SM 12.0, CUDA 12), batch=16 384, kernel-only thro
 
 - **BIP-352 GPU pipeline at 11.00 M/s** -- full silent payment scanning pipeline on CUDA (91.0 ns/op), 267× faster than CPU
 - **GPU-accelerated secp256k1** -- ECDSA + Schnorr sign/verify on CUDA; ECDSA + Schnorr verify + core ECC on OpenCL; Metal experimental
-- **GPU C ABI (`ufsecp_gpu`)** -- stable FFI for GPU batch ops across CUDA, OpenCL, and Metal (8 ops total; CUDA/OpenCL/Metal all 8/8 implemented)
+- **GPU C ABI (`ufsecp_gpu`)** -- stable FFI for GPU batch ops across CUDA, OpenCL, and Metal (13 ops total; 8/8 core parity + 5 ZK/BIP-324 CUDA-first ops)
 - **Zero-Knowledge cryptographic layer** -- Pedersen commitments, DLEQ proofs, Bulletproof range proofs, Ethereum-compatible Keccak-256
 - **17–67× faster batch operations** -- all-affine Pippenger with touched-bucket optimization
 - **Multi-language bindings** -- Python, Node.js, Rust, Go, C#, Java, Swift, PHP, Ruby, Dart, React Native
