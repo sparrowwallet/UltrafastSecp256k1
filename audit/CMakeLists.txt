@@ -438,6 +438,41 @@ target_compile_definitions(test_exploit_point_group_law_standalone PRIVATE STAND
 add_test(NAME exploit_point_group_law COMMAND test_exploit_point_group_law_standalone)
 set_tests_properties(exploit_point_group_law PROPERTIES TIMEOUT 60 LABELS "audit;exploit;ecc")
 
+# -- PoC: ECDSA key recovery edge cases
+add_executable(test_exploit_ecdsa_recovery_standalone test_exploit_ecdsa_recovery.cpp)
+audit_target_defaults(test_exploit_ecdsa_recovery_standalone)
+target_compile_definitions(test_exploit_ecdsa_recovery_standalone PRIVATE STANDALONE_TEST)
+add_test(NAME exploit_ecdsa_recovery COMMAND test_exploit_ecdsa_recovery_standalone)
+set_tests_properties(exploit_ecdsa_recovery PROPERTIES TIMEOUT 60 LABELS "audit;exploit;ecdsa")
+
+# -- PoC: ECDSA edge cases and normalization
+add_executable(test_exploit_ecdsa_edge_cases_standalone test_exploit_ecdsa_edge_cases.cpp)
+audit_target_defaults(test_exploit_ecdsa_edge_cases_standalone)
+target_compile_definitions(test_exploit_ecdsa_edge_cases_standalone PRIVATE STANDALONE_TEST)
+add_test(NAME exploit_ecdsa_edge_cases COMMAND test_exploit_ecdsa_edge_cases_standalone)
+set_tests_properties(exploit_ecdsa_edge_cases PROPERTIES TIMEOUT 60 LABELS "audit;exploit;ecdsa")
+
+# -- PoC: Taproot key tweak and commitment security
+add_executable(test_exploit_taproot_tweak_standalone test_exploit_taproot_tweak.cpp)
+audit_target_defaults(test_exploit_taproot_tweak_standalone)
+target_compile_definitions(test_exploit_taproot_tweak_standalone PRIVATE STANDALONE_TEST)
+add_test(NAME exploit_taproot_tweak COMMAND test_exploit_taproot_tweak_standalone)
+set_tests_properties(exploit_taproot_tweak PROPERTIES TIMEOUT 60 LABELS "audit;exploit;taproot")
+
+# -- PoC: ChaCha20-Poly1305 nonce reuse and AEAD properties
+add_executable(test_exploit_chacha20_nonce_reuse_standalone test_exploit_chacha20_nonce_reuse.cpp)
+audit_target_defaults(test_exploit_chacha20_nonce_reuse_standalone)
+target_compile_definitions(test_exploit_chacha20_nonce_reuse_standalone PRIVATE STANDALONE_TEST)
+add_test(NAME exploit_chacha20_nonce_reuse COMMAND test_exploit_chacha20_nonce_reuse_standalone)
+set_tests_properties(exploit_chacha20_nonce_reuse PROPERTIES TIMEOUT 60 LABELS "audit;exploit;aead")
+
+# -- PoC: ZK proof soundness (knowledge, DLEQ, range proofs)
+add_executable(test_exploit_zk_proofs_standalone test_exploit_zk_proofs.cpp)
+audit_target_defaults(test_exploit_zk_proofs_standalone)
+target_compile_definitions(test_exploit_zk_proofs_standalone PRIVATE STANDALONE_TEST)
+add_test(NAME exploit_zk_proofs COMMAND test_exploit_zk_proofs_standalone)
+set_tests_properties(exploit_zk_proofs PROPERTIES TIMEOUT 120 LABELS "audit;exploit;zk")
+
 # -- ECIES regression + C ABI prefix enforcement ----------------------------
 add_executable(test_ecies_regression_standalone test_ecies_regression.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/../include/ufsecp/ufsecp_impl.cpp)
@@ -800,6 +835,8 @@ set_tests_properties(
     exploit_ecdh_degenerate exploit_schnorr_edge_cases exploit_ecies_auth
     exploit_batch_soundness exploit_bip32_path_overflow exploit_musig2_nonce_reuse
     exploit_point_group_law
+    exploit_ecdsa_recovery exploit_ecdsa_edge_cases exploit_taproot_tweak
+    exploit_chacha20_nonce_reuse exploit_zk_proofs
     PROPERTIES LABELS "audit"
 )
 if(SECP256K1_BUILD_PROTOCOL_TESTS)
