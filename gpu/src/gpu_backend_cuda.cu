@@ -185,7 +185,13 @@ public:
         std::snprintf(out.name, sizeof(out.name), "%s", prop.name);
         out.global_mem_bytes       = prop.totalGlobalMem;
         out.compute_units          = static_cast<uint32_t>(prop.multiProcessorCount);
+#if CUDART_VERSION >= 13000
+        { int _clk_khz = 0;
+          cudaDeviceGetAttribute(&_clk_khz, cudaDevAttrClockRate, static_cast<int>(device_index));
+          out.max_clock_mhz = static_cast<uint32_t>(_clk_khz / 1000); }
+#else
         out.max_clock_mhz          = static_cast<uint32_t>(prop.clockRate / 1000);
+#endif
         out.max_threads_per_block  = static_cast<uint32_t>(prop.maxThreadsPerBlock);
         out.backend_id             = 1;
         out.device_index           = device_index;
