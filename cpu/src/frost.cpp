@@ -145,6 +145,12 @@ frost_keygen_begin(ParticipantId participant_id,
                    std::uint32_t threshold,
                    std::uint32_t num_participants,
                    const std::array<std::uint8_t, 32>& secret_seed) {
+    // Validate inputs: participant IDs are 1-based; threshold must fit.
+    if (participant_id == 0 || threshold == 0 ||
+        num_participants == 0 || threshold > num_participants) {
+        return {{}, {}};
+    }
+
     // Generate random polynomial of degree (t-1):
     // f_i(x) = a_{i,0} + a_{i,1}*x + ... + a_{i,t-1}*x^{t-1}
     std::vector<Scalar> coeffs(threshold);

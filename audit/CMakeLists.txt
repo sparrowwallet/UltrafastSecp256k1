@@ -748,6 +748,55 @@ target_compile_definitions(test_exploit_backend_divergence_standalone PRIVATE ST
 add_test(NAME exploit_backend_divergence COMMAND test_exploit_backend_divergence_standalone)
 set_tests_properties(exploit_backend_divergence PROPERTIES TIMEOUT 60 LABELS "audit;exploit;ct;backend")
 
+# -- BIP-340 Schnorr official KAT (sign indices 0-3, invalid verify 4-12) ----
+add_executable(test_exploit_schnorr_bip340_kat_standalone test_exploit_schnorr_bip340_kat.cpp)
+audit_target_defaults(test_exploit_schnorr_bip340_kat_standalone)
+target_compile_definitions(test_exploit_schnorr_bip340_kat_standalone PRIVATE STANDALONE_TEST)
+add_test(NAME exploit_schnorr_bip340_kat COMMAND test_exploit_schnorr_bip340_kat_standalone)
+set_tests_properties(exploit_schnorr_bip340_kat PROPERTIES TIMEOUT 60 LABELS "audit;exploit;schnorr;bip340")
+
+# -- RIPEMD-160 KAT (NIST vectors, hash160, ripemd160_32 fast path) ----------
+add_executable(test_exploit_ripemd160_kat_standalone test_exploit_ripemd160_kat.cpp)
+audit_target_defaults(test_exploit_ripemd160_kat_standalone)
+target_compile_definitions(test_exploit_ripemd160_kat_standalone PRIVATE STANDALONE_TEST)
+add_test(NAME exploit_ripemd160_kat COMMAND test_exploit_ripemd160_kat_standalone)
+set_tests_properties(exploit_ripemd160_kat PROPERTIES TIMEOUT 60 LABELS "audit;exploit;hash;ripemd160")
+
+# -- ChaCha20-Poly1305 RFC 8439 KAT (block, stream, Poly1305 MAC, AEAD) ------
+add_executable(test_exploit_chacha20_kat_standalone test_exploit_chacha20_kat.cpp)
+audit_target_defaults(test_exploit_chacha20_kat_standalone)
+target_compile_definitions(test_exploit_chacha20_kat_standalone PRIVATE STANDALONE_TEST)
+add_test(NAME exploit_chacha20_kat COMMAND test_exploit_chacha20_kat_standalone)
+set_tests_properties(exploit_chacha20_kat PROPERTIES TIMEOUT 60 LABELS "audit;exploit;chacha20;rfc8439")
+
+# -- EC point serialization (G coords, 2*G, infinity, parity, associativity) -
+add_executable(test_exploit_point_serialization_standalone test_exploit_point_serialization.cpp)
+audit_target_defaults(test_exploit_point_serialization_standalone)
+target_compile_definitions(test_exploit_point_serialization_standalone PRIVATE STANDALONE_TEST)
+add_test(NAME exploit_point_serialization COMMAND test_exploit_point_serialization_standalone)
+set_tests_properties(exploit_point_serialization PROPERTIES TIMEOUT 60 LABELS "audit;exploit;ec;point")
+
+# -- ECDSA RFC 6979 KAT (determinism, low-S, wrong-key/msg rejection) --------
+add_executable(test_exploit_ecdsa_rfc6979_kat_standalone test_exploit_ecdsa_rfc6979_kat.cpp)
+audit_target_defaults(test_exploit_ecdsa_rfc6979_kat_standalone)
+target_compile_definitions(test_exploit_ecdsa_rfc6979_kat_standalone PRIVATE STANDALONE_TEST)
+add_test(NAME exploit_ecdsa_rfc6979_kat COMMAND test_exploit_ecdsa_rfc6979_kat_standalone)
+set_tests_properties(exploit_ecdsa_rfc6979_kat PROPERTIES TIMEOUT 60 LABELS "audit;exploit;ecdsa;rfc6979")
+
+# -- FROST byzantine fault injection (bad partial, forged aggregate) ---------
+add_executable(test_exploit_frost_byzantine_standalone test_exploit_frost_byzantine.cpp)
+audit_target_defaults(test_exploit_frost_byzantine_standalone)
+target_compile_definitions(test_exploit_frost_byzantine_standalone PRIVATE STANDALONE_TEST)
+add_test(NAME exploit_frost_byzantine COMMAND test_exploit_frost_byzantine_standalone)
+set_tests_properties(exploit_frost_byzantine PROPERTIES TIMEOUT 60 LABELS "audit;exploit;frost;byzantine")
+
+# -- Scalar group law systematic (inverses, identities, overflow, roundtrip) --
+add_executable(test_exploit_scalar_systematic_standalone test_exploit_scalar_systematic.cpp)
+audit_target_defaults(test_exploit_scalar_systematic_standalone)
+target_compile_definitions(test_exploit_scalar_systematic_standalone PRIVATE STANDALONE_TEST)
+add_test(NAME exploit_scalar_systematic COMMAND test_exploit_scalar_systematic_standalone)
+set_tests_properties(exploit_scalar_systematic PROPERTIES TIMEOUT 60 LABELS "audit;exploit;scalar;group")
+
 # -- ECIES regression + C ABI prefix enforcement ----------------------------
 add_executable(test_ecies_regression_standalone test_ecies_regression.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/../include/ufsecp/ufsecp_impl.cpp)
@@ -1120,6 +1169,9 @@ set_tests_properties(
     exploit_sha_kat exploit_bip144_serialization
     exploit_musig2_key_agg exploit_bip32_derivation
     exploit_ct_systematic exploit_backend_divergence
+    exploit_schnorr_bip340_kat exploit_ripemd160_kat exploit_chacha20_kat
+    exploit_point_serialization exploit_ecdsa_rfc6979_kat
+    exploit_frost_byzantine exploit_scalar_systematic
     PROPERTIES LABELS "audit"
 )
 if(SECP256K1_BUILD_PROTOCOL_TESTS)
