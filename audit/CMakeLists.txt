@@ -566,6 +566,18 @@ target_compile_definitions(test_exploit_glv_endomorphism_standalone PRIVATE STAN
 add_test(NAME exploit_glv_endomorphism COMMAND test_exploit_glv_endomorphism_standalone)
 set_tests_properties(exploit_glv_endomorphism PROPERTIES TIMEOUT 60 LABELS "audit;exploit;glv")
 
+add_executable(test_exploit_sha_kat_standalone test_exploit_sha_kat.cpp)
+audit_target_defaults(test_exploit_sha_kat_standalone)
+target_compile_definitions(test_exploit_sha_kat_standalone PRIVATE STANDALONE_TEST)
+add_test(NAME exploit_sha_kat COMMAND test_exploit_sha_kat_standalone)
+set_tests_properties(exploit_sha_kat PROPERTIES TIMEOUT 60 LABELS "audit;exploit;hash")
+
+add_executable(test_exploit_bip144_serialization_standalone test_exploit_bip144_serialization.cpp)
+audit_target_defaults(test_exploit_bip144_serialization_standalone)
+target_compile_definitions(test_exploit_bip144_serialization_standalone PRIVATE STANDALONE_TEST)
+add_test(NAME exploit_bip144_serialization COMMAND test_exploit_bip144_serialization_standalone)
+set_tests_properties(exploit_bip144_serialization PROPERTIES TIMEOUT 60 LABELS "audit;exploit;bip144")
+
 # -- ECIES regression + C ABI prefix enforcement ----------------------------
 add_executable(test_ecies_regression_standalone test_ecies_regression.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/../include/ufsecp/ufsecp_impl.cpp)
@@ -935,6 +947,7 @@ set_tests_properties(
     exploit_pedersen_homomorphism exploit_hkdf_security exploit_batch_schnorr
     exploit_segwit_encoding exploit_private_key exploit_bip143_sighash
     exploit_ecies_roundtrip exploit_ecdh_variants exploit_glv_endomorphism
+    exploit_sha_kat exploit_bip144_serialization
     PROPERTIES LABELS "audit"
 )
 if(SECP256K1_BUILD_PROTOCOL_TESTS)
