@@ -36,7 +36,7 @@ All measurements: RTX 5060 Ti (SM 12.0, CUDA 12), batch=16 384, kernel-only thro
 - **Zero dependencies** -- pure C++20, no Boost, no OpenSSL, compiles anywhere with a conforming compiler
 - **Dual-layer security** -- variable-time FAST path for throughput, constant-time CT path for secret-key operations
 - **12+ platforms** -- x86-64, ARM64, RISC-V, WASM, iOS, Android, ESP32, STM32, CUDA, Metal, OpenCL, ROCm
-- **Audit-first engineering culture** -- 1,000,000+ internal assertions per build, 55 audit modules, 23 CI/CD workflows, 3 formal constant-time verification pipelines, and 1.3M+ nightly differential tests on every commit — security is a continuous process, not a checkbox
+- **Audit-first engineering culture** -- 1,000,000+ internal assertions per build, 55 audit modules, **78 exploit PoC tests across 14 attack categories**, 23 CI/CD workflows, 3 formal constant-time verification pipelines, and 1.3M+ nightly differential tests on every commit — security is a continuous process, not a checkbox
 
 > **Benchmark reproducibility:** All numbers come from pinned compiler/driver/toolkit versions with exact commands and raw logs. See [`docs/BENCHMARKS.md`](docs/BENCHMARKS.md) (methodology) and the [live dashboard](https://shrec.github.io/UltrafastSecp256k1/dev/bench/).
 
@@ -126,6 +126,7 @@ All measurements: RTX 5060 Ti (SM 12.0, CUDA 12), batch=16 384, kernel-only thro
 |--------|-------|
 | Internal audit assertions per build | **~1,000,000+** |
 | Audit modules (`unified_audit_runner`) | **55 modules, 8 sections, 0 failures** |
+| Exploit PoC test files | **78 tests, 14 attack categories, 0 failures** |
 | CI/CD workflows | **23 GitHub Actions workflows** |
 | Build matrix (arch × config × OS) | **7 × 17 × 5 = 595 combinations** |
 | Nightly differential tests | **~1,300,000+ random checks / night** |
@@ -161,6 +162,31 @@ All measurements: RTX 5060 Ti (SM 12.0, CUDA 12), batch=16 384, kernel-only thro
 - Audit results are logged as **structured artifacts** (JSON reports, per-platform logs), not just pass/fail signals
 - **Nightly differential testing** runs ~1.3M random round-trips against reference implementations every night
 - All 55 audit modules return `AUDIT-READY` status. Zero failures across all tested platforms.
+
+### Exploit PoC Test Suite (78 Tests, 14 Categories)
+
+In addition to the 55-module `unified_audit_runner`, UltrafastSecp256k1 ships **78 dedicated exploit-style PoC tests** that actively attempt to break the library — covering every major protocol, primitive, and attack surface.
+Each test in `audit/test_exploit_*.cpp` compiles and runs standalone, verifying that attacks fail, edge cases are handled, and security properties hold under adversarial conditions.
+
+| Category | Tests | Attack Focus |
+|----------|-------|--------------|
+| ECDSA / Signature | 7 | malleability (BIP-62 low-s), RFC 6979 KAT, recovery edge cases, ECDH degenerate inputs |
+| Schnorr / BIP-340 / Batch | 5 | BIP-340 KAT, batch soundness, forge detection in `identify_invalid` |
+| GLV / ECC Math | 11 | endomorphism properties, GLV ±k₁±k₂λ≡k decomposition, Pippenger MSM, multiscalar |
+| BIP-32 / BIP-39 / HD Keys | 7 | depth/path overflow, hardened isolation, xpub guard, fingerprint collision |
+| MuSig2 / FROST | 11 | nonce reuse, rogue-key aggregation, Byzantine participant, DKG, Lagrange duplicate, index-zero |
+| Adaptor Signatures / ZK | 4 | parity attacks, extended adaptor, Pedersen homomorphism, ZK proof properties |
+| Crypto Primitives / AEAD | 11 | ChaCha20-Poly1305 MAC bypass, nonce reuse, HKDF security, SHA/Keccak/RIPEMD KATs |
+| ECIES | 3 | authentication forgery, encryption correctness, roundtrip |
+| Bitcoin / Protocol BIPs | 6 | BIP-143 sighash, BIP-144 serialization, BIP-324 encrypted P2P session, SegWit, Taproot |
+| Address / Wallet / Signing | 6 | address encoding, wallet API, private key handling, Ethereum signing, Bitcoin message signing |
+| Constant-Time / Security | 3 | CT key recovery, systematic CT verification, backend divergence detection |
+| ElligatorSwift | 2 | ElligatorSwift encoding correctness, ElligatorSwift ECDH |
+| Self-Test / Recovery | 2 | self-test API, extended recovery edge cases |
+| Batch Verify | 1 | batch verify correctness math |
+| **Total** | **78** | **0 failures across all categories** |
+
+> All 78 exploit tests live in `audit/test_exploit_*.cpp`. Build with `cmake -S . -B build-audit -G Ninja -DCMAKE_BUILD_TYPE=Release` and run each as a standalone target or via `ctest`.
 
 ### Self-Audit Document Index
 
