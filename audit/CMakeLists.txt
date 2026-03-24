@@ -614,6 +614,18 @@ target_compile_definitions(test_exploit_selftest_api_standalone PRIVATE STANDALO
 add_test(NAME exploit_selftest_api COMMAND test_exploit_selftest_api_standalone)
 set_tests_properties(exploit_selftest_api PROPERTIES TIMEOUT 120 LABELS "audit;exploit;selftest")
 
+add_executable(test_exploit_scalar_group_order_standalone test_exploit_scalar_group_order.cpp)
+audit_target_defaults(test_exploit_scalar_group_order_standalone)
+target_compile_definitions(test_exploit_scalar_group_order_standalone PRIVATE STANDALONE_TEST)
+add_test(NAME exploit_scalar_group_order COMMAND test_exploit_scalar_group_order_standalone)
+set_tests_properties(exploit_scalar_group_order PROPERTIES TIMEOUT 60 LABELS "audit;exploit;scalar")
+
+add_executable(test_exploit_pippenger_msm_standalone test_exploit_pippenger_msm.cpp)
+audit_target_defaults(test_exploit_pippenger_msm_standalone)
+target_compile_definitions(test_exploit_pippenger_msm_standalone PRIVATE STANDALONE_TEST)
+add_test(NAME exploit_pippenger_msm COMMAND test_exploit_pippenger_msm_standalone)
+set_tests_properties(exploit_pippenger_msm PROPERTIES TIMEOUT 120 LABELS "audit;exploit;msm")
+
 # -- ECIES regression + C ABI prefix enforcement ----------------------------
 add_executable(test_ecies_regression_standalone test_ecies_regression.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/../include/ufsecp/ufsecp_impl.cpp)
