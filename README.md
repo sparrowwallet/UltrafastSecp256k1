@@ -42,7 +42,7 @@ All measurements: RTX 5060 Ti (SM 12.0, CUDA 12), batch=16 384, kernel-only thro
 
 > **Why this library, in depth?** See [WHY_ULTRAFASTSECP256K1.md](WHY_ULTRAFASTSECP256K1.md) for a full breakdown of the audit culture, 23-workflow CI/CD pipeline, formal verification layers, and supply-chain hardening that back these claims.
 
-**Quick links:** [Discord](https://discord.gg/sUmW7cc5) * [Benchmarks](docs/BENCHMARKS.md) * [Build Guide](docs/BUILDING.md) * [API Reference](docs/API_REFERENCE.md) * [Binding Usage Standard](docs/BINDINGS_USAGE_STANDARD.md) * [Security Policy](SECURITY.md) * [Threat Model](THREAT_MODEL.md) * [**Why This Library?**](WHY_ULTRAFASTSECP256K1.md) * [Porting Guide](PORTING.md) * [**Sponsor**](https://github.com/sponsors/shrec)
+**Quick links:** [Discord](https://discord.gg/sUmW7cc5) * [Benchmarks](docs/BENCHMARKS.md) * [Community Benchmarks](docs/COMMUNITY_BENCHMARKS.md) * [Build Guide](docs/BUILDING.md) * [API Reference](docs/API_REFERENCE.md) * [Binding Usage Standard](docs/BINDINGS_USAGE_STANDARD.md) * [Security Policy](SECURITY.md) * [Threat Model](THREAT_MODEL.md) * [**Why This Library?**](WHY_ULTRAFASTSECP256K1.md) * [Porting Guide](PORTING.md) * [**Sponsor**](https://github.com/sponsors/shrec)
 
 ---
 
@@ -416,9 +416,13 @@ The full 7-stage BIP-352 scanning pipeline runs entirely on-GPU with zero CPU ro
 | ARM64 CPU (Cortex-A55, Clang 18) | 153,385 ns/op | 1,644× slower |
 | RISC-V 64 (SiFive U74, GCC 13) | 257,996 ns/op | 2,765× slower |
 
+### Community & Contributor Benchmarks
+
+See **[docs/COMMUNITY_BENCHMARKS.md](docs/COMMUNITY_BENCHMARKS.md)** for all hardware results submitted by community members — including RTX 5070 Ti (Blackwell) and a standalone BIP-352 CPU comparison vs libsecp256k1.  Want to add yours? Instructions are in that file.
+
 ### CPU vs libsecp256k1 (standalone external benchmark)
 
-Standalone single-threaded benchmark by [@craigraw](https://github.com/craigraw) ([bench_bip352](https://github.com/craigraw/bench_bip352)). Thank you for the contribution!
+Standalone single-threaded benchmark by [@craigraw](https://github.com/craigraw) ([bench_bip352](https://github.com/craigraw/bench_bip352)) — full results in [docs/COMMUNITY_BENCHMARKS.md](docs/COMMUNITY_BENCHMARKS.md). Thank you for the contribution!
 
 **Full pipeline** (10K points, 11 passes, median, GCC 12.4, `-O3 -march=native`, `USE_ASM_X86_64=1`):
 
@@ -1507,6 +1511,7 @@ We want to acknowledge the teams whose public work informed parts of our journey
 - **[Bitcoin Core](https://github.com/bitcoin/bitcoin)** contributors -- For open specifications (BIP-340 Schnorr, BIP-341 Taproot, RFC 6979) and a correctness-first engineering culture that benefits everyone building in this space.
 - **Pieter Wuille, Jonas Nick, Tim Ruffing** and the libsecp256k1 maintainers -- For publicly sharing research and implementation insights on side-channel resistance, exhaustive testing, field representation trade-offs, and practical optimization techniques. Their published work was valuable to study in the later optimization phase and helped us push our independently built engine further.
 - **[@craigraw](https://github.com/craigraw)** ([Sparrow Wallet](https://sparrowwallet.com)) -- For creating the [bench_bip352](https://github.com/craigraw/bench_bip352) standalone BIP-352 Silent Payments scanning benchmark, which provided an independent, reproducible pipeline comparison between secp256k1 implementations.
+- **Community / GigaChad** -- For running the full CUDA test suite on RTX 5070 Ti (Blackwell), confirming 45/45 tests pass, and identifying the `CMAKE_CUDA_SEPARABLE_COMPILATION` flag required for Blackwell devices. Results in [docs/COMMUNITY_BENCHMARKS.md](docs/COMMUNITY_BENCHMARKS.md).
 
 We share our optimizations, GPU kernels, embedded ports, and cross-platform techniques freely -- because open-source cryptography grows stronger when knowledge flows in every direction.
 

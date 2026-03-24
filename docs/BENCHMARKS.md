@@ -344,12 +344,25 @@ On this board, that moved `bench_unified --quick` `scalar_mul_with_plan` from th
 
 ---
 
-## CUDA Benchmarks — RTX 5070 Ti (Community)
+## Community & Contributor Benchmarks
 
+All hardware results submitted by community members are collected in
+**[docs/COMMUNITY_BENCHMARKS.md](COMMUNITY_BENCHMARKS.md)**.
+
+Current entries:
+
+| # | Hardware | Contributor | Date | Tests |
+|---|----------|-------------|------|------:|
+| 1 | NVIDIA RTX 5070 Ti (Blackwell) | Community / GigaChad | 2026-03-24 | 45/45 |
+| 2 | x86-64 CPU (libsecp baseline) | [@craigraw](https://github.com/craigraw) | 2026-02-xx | — |
+
+### CUDA — RTX 5070 Ti (Blackwell) — 2026-03-24
+
+**Contributor:** Community member (GigaChad) — thank you for running the full test suite and for identifying the `CMAKE_CUDA_SEPARABLE_COMPILATION` flag required for Blackwell devices! 🙏  
 **Hardware:** NVIDIA GeForce RTX 5070 Ti (Blackwell)  
-**Build:** `cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DSECP256K1_BUILD_CUDA=ON -DCMAKE_CUDA_ARCHITECTURES=native`  
-**Tested:** 2026-03-21, 45 tests passed  
-**Note:** Requires `CMAKE_CUDA_SEPARABLE_COMPILATION=ON` (now set automatically in `cuda/CMakeLists.txt`; also baked into all CUDA presets).
+**Build:** `cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DSECP256K1_BUILD_CUDA=ON -DCMAKE_CUDA_ARCHITECTURES=native -DCMAKE_CUDA_SEPARABLE_COMPILATION=ON`  
+**Tested:** 2026-03-24, 45 tests passed  
+**Note:** `CMAKE_CUDA_SEPARABLE_COMPILATION=ON` is required for Blackwell (RTX 50xx) devices. This flag is now set automatically in `cuda/CMakeLists.txt` and baked into all CUDA CMake presets.
 
 | Operation | Time/Op | Throughput |
 |-----------|---------|------------|
