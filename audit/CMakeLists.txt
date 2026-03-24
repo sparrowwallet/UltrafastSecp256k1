@@ -473,6 +473,27 @@ target_compile_definitions(test_exploit_zk_proofs_standalone PRIVATE STANDALONE_
 add_test(NAME exploit_zk_proofs COMMAND test_exploit_zk_proofs_standalone)
 set_tests_properties(exploit_zk_proofs PROPERTIES TIMEOUT 120 LABELS "audit;exploit;zk")
 
+# -- PoC: FROST threshold signing end-to-end (DKG + sign + verify)
+add_executable(test_exploit_frost_signing_standalone test_exploit_frost_signing.cpp)
+audit_target_defaults(test_exploit_frost_signing_standalone)
+target_compile_definitions(test_exploit_frost_signing_standalone PRIVATE STANDALONE_TEST)
+add_test(NAME exploit_frost_signing COMMAND test_exploit_frost_signing_standalone)
+set_tests_properties(exploit_frost_signing PROPERTIES TIMEOUT 120 LABELS "audit;exploit;frost")
+
+# -- PoC: BIP-39 mnemonic entropy and checksum security
+add_executable(test_exploit_bip39_entropy_standalone test_exploit_bip39_entropy.cpp)
+audit_target_defaults(test_exploit_bip39_entropy_standalone)
+target_compile_definitions(test_exploit_bip39_entropy_standalone PRIVATE STANDALONE_TEST)
+add_test(NAME exploit_bip39_entropy COMMAND test_exploit_bip39_entropy_standalone)
+set_tests_properties(exploit_bip39_entropy PROPERTIES TIMEOUT 60 LABELS "audit;exploit;bip39")
+
+# -- PoC: ElligatorSwift (BIP-324) ECDH security
+add_executable(test_exploit_ellswift_standalone test_exploit_ellswift.cpp)
+audit_target_defaults(test_exploit_ellswift_standalone)
+target_compile_definitions(test_exploit_ellswift_standalone PRIVATE STANDALONE_TEST)
+add_test(NAME exploit_ellswift COMMAND test_exploit_ellswift_standalone)
+set_tests_properties(exploit_ellswift PROPERTIES TIMEOUT 60 LABELS "audit;exploit;bip324")
+
 # -- ECIES regression + C ABI prefix enforcement ----------------------------
 add_executable(test_ecies_regression_standalone test_ecies_regression.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/../include/ufsecp/ufsecp_impl.cpp)
@@ -837,6 +858,7 @@ set_tests_properties(
     exploit_point_group_law
     exploit_ecdsa_recovery exploit_ecdsa_edge_cases exploit_taproot_tweak
     exploit_chacha20_nonce_reuse exploit_zk_proofs
+    exploit_frost_signing exploit_bip39_entropy exploit_ellswift
     PROPERTIES LABELS "audit"
 )
 if(SECP256K1_BUILD_PROTOCOL_TESTS)
