@@ -357,6 +357,13 @@ std::pair<ExtendedKey, bool> ExtendedKey::derive_child(uint32_t index) const {
 
     ExtendedKey child{};
     child.chain_code = IR;
+    // Guard: BIP-32 depth is uint8_t (max 255).  depth + 1 would silently wrap
+    // to 0, producing a child at depth 0 with a wrong parent fingerprint.
+    if (depth == 0xFFu) {
+        detail::secure_erase(I.data(), I.size());
+        detail::secure_erase(IL.data(), IL.size());
+        return {ExtendedKey{}, false};
+    }
     child.depth = static_cast<uint8_t>(depth + 1);
     child.child_number = index;
     child.parent_fingerprint = fingerprint();

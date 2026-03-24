@@ -23,9 +23,14 @@ using fast::Scalar;
 template<std::size_t N>
 static Scalar derive_scalar(const std::uint8_t* seed, std::size_t seed_len,
                              const char (&context)[N], std::uint32_t index) {
+    // BIP-340 tagged hash: SHA256(SHA256(tag) || SHA256(tag) || msg)
+    // The double-tag prefix provides domain separation and prevents cross-
+    // protocol hash collisions when the same seed is used in another context.
     SHA256 h;
+    auto tag_hash = SHA256::hash(context, N - 1);
+    h.update(tag_hash.data(), 32);
+    h.update(tag_hash.data(), 32);
     h.update(seed, seed_len);
-    h.update(context, N - 1);
     // Index as big-endian 4 bytes
     std::uint8_t idx_be[4] = {
         std::uint8_t(index >> 24), std::uint8_t(index >> 16),

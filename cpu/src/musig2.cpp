@@ -93,14 +93,20 @@ MuSig2KeyAggCtx musig2_key_agg(const std::vector<std::array<uint8_t, 32>>& pubke
         if (y.square() != y2) return ctx;  // x not on curve
     }
 
-    // L = tagged_hash("KeyAgg list", pk_1 || pk_2 || ... || pk_n)
+    // Sort a canonical copy of the pubkeys so that L is identical regardless
+    // of the order in which callers pass the same set of keys.  Without this,
+    // signers that disagree on ordering derive different aggregate keys.
+    std::vector<std::array<uint8_t, 32>> sorted_keys(pubkeys.begin(), pubkeys.end());
+    std::sort(sorted_keys.begin(), sorted_keys.end());
+
+    // L = tagged_hash("KeyAgg list", sorted_pk_1 || sorted_pk_2 || ... || sorted_pk_n)
     SHA256 l_ctx;
     // Use tagged hash prefix
     auto tag_hash = SHA256::hash("KeyAgg list", 11);
     l_ctx.update(tag_hash.data(), 32);
     l_ctx.update(tag_hash.data(), 32);
     for (std::size_t i = 0; i < n; ++i) {
-        l_ctx.update(pubkeys[i].data(), 32);
+        l_ctx.update(sorted_keys[i].data(), 32);
     }
     auto L = l_ctx.finalize();
 
@@ -108,17 +114,19 @@ MuSig2KeyAggCtx musig2_key_agg(const std::vector<std::array<uint8_t, 32>>& pubke
     // Exception: "second unique key" gets a_i = 1 (optimization, BIP-327)
     ctx.key_coefficients.resize(n);
 
-    // Find second unique key (first key different from pubkeys[0])
-    int second_key_idx = -1;
+    // Find second unique key in the SORTED list (canonical position)
+    const std::array<uint8_t, 32>* second_unique_sorted = nullptr;
     for (std::size_t i = 1; i < n; ++i) {
-        if (pubkeys[i] != pubkeys[0]) {
-            second_key_idx = static_cast<int>(i);
+        if (sorted_keys[i] != sorted_keys[0]) {
+            second_unique_sorted = &sorted_keys[i];
             break;
         }
     }
 
     for (std::size_t i = 0; i < n; ++i) {
-        if (static_cast<int>(i) == second_key_idx) {
+        bool const is_second_unique =
+            second_unique_sorted && (pubkeys[i] == *second_unique_sorted);
+        if (is_second_unique) {
             ctx.key_coefficients[i] = Scalar::one();
         } else {
             // a_i = tagged_hash("KeyAgg coefficient", L || pk_i)

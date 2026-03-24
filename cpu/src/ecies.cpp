@@ -3,7 +3,9 @@
 // ============================================================================
 // Envelope: [33B ephemeral pubkey][16B IV][N bytes AES-256-CTR ciphertext][32B HMAC-SHA256]
 //
-// Key derivation: SHA-512(ECDH_raw_x) -> enc_key (32B) || mac_key (32B)
+// Key derivation: HKDF-SHA256(IKM=ECDH_raw_x, salt="secp256k1-ecies-v1",
+//                             info=ephemeral_pubkey_compressed[33])
+//               -> enc_key (32B) || mac_key (32B)
 // Encryption: AES-256-CTR (software, no OpenSSL dependency)
 // Authentication: HMAC-SHA256(mac_key, ephemeral_pubkey || IV || ciphertext)
 // ============================================================================
@@ -11,7 +13,7 @@
 #include "secp256k1/ecies.hpp"
 #include "secp256k1/ecdh.hpp"
 #include "secp256k1/sha256.hpp"
-#include "secp256k1/sha512.hpp"
+#include "secp256k1/hkdf.hpp"
 #include "secp256k1/ct/point.hpp"
 #include "secp256k1/detail/secure_erase.hpp"
 #include "secp256k1/field.hpp"
@@ -25,7 +27,7 @@
 #elif defined(__APPLE__)
 #  include <Security/SecRandom.h>
 #elif defined(__ANDROID__)
-#  include <cstdio>   // fopen/fread for /dev/urandom
+#  include <stdlib.h>  // arc4random_buf (available Android API 12+)
 #elif defined(__linux__) || defined(__FreeBSD__) || defined(__OpenBSD__)
 #  include <sys/random.h>
 #else
@@ -217,44 +219,6 @@ void aes256_ctr(const std::uint8_t key[32],
     secp256k1::detail::secure_erase(keystream, sizeof(keystream));
 }
 
-// HMAC-SHA256
-std::array<std::uint8_t, 32>
-hmac_sha256(const std::uint8_t* key, std::size_t key_len,
-            const std::uint8_t* data, std::size_t data_len) {
-    std::uint8_t k_pad[64];
-    std::memset(k_pad, 0, 64);
-
-    if (key_len > 64) {
-        auto h = SHA256::hash(key, key_len);
-        std::memcpy(k_pad, h.data(), 32);
-    } else {
-        std::memcpy(k_pad, key, key_len);
-    }
-
-    // ipad
-    std::uint8_t ipad[64];
-    for (int i = 0; i < 64; ++i) ipad[i] = k_pad[i] ^ 0x36;
-
-    SHA256 inner;
-    inner.update(ipad, 64);
-    inner.update(data, data_len);
-    auto inner_hash = inner.finalize();
-
-    // opad
-    std::uint8_t opad[64];
-    for (int i = 0; i < 64; ++i) opad[i] = k_pad[i] ^ 0x5c;
-
-    SHA256 outer;
-    outer.update(opad, 64);
-    outer.update(inner_hash.data(), 32);
-
-    secp256k1::detail::secure_erase(k_pad, sizeof(k_pad));
-    secp256k1::detail::secure_erase(ipad, sizeof(ipad));
-    secp256k1::detail::secure_erase(opad, sizeof(opad));
-    secp256k1::detail::secure_erase(inner_hash.data(), inner_hash.size());
-
-    return outer.finalize();
-}
 
 // CSPRNG fill -- OS-level cryptographic randomness, fail-closed
 void csprng_fill(std::uint8_t* buf, std::size_t len) {
@@ -266,11 +230,10 @@ void csprng_fill(std::uint8_t* buf, std::size_t len) {
     if (SecRandomCopyBytes(kSecRandomDefault, len, buf) != errSecSuccess)
         std::abort();
 #elif defined(__ANDROID__)
-    // Android: /dev/urandom (getrandom requires API 28+, CI targets API 24)
-    FILE* f = std::fopen("/dev/urandom", "rb");
-    if (!f) std::abort();
-    if (std::fread(buf, 1, len, f) != len) { std::fclose(f); std::abort(); }
-    std::fclose(f);
+    // arc4random_buf is available from Android API 12+ and blocks until the
+    // kernel entropy pool is fully seeded.  Unlike /dev/urandom, it will not
+    // return predictable bytes during early boot before entropy is available.
+    arc4random_buf(buf, len);
 #elif defined(__linux__) || defined(__FreeBSD__) || defined(__OpenBSD__)
     // getrandom(2): blocks until entropy available, no EINTR on < 256 bytes
     std::size_t filled = 0;
@@ -329,9 +292,21 @@ ecies_encrypt(const Point& recipient_pubkey,
         return {};
     }
 
-    // 3. Key derivation: SHA-512(shared_x) -> enc_key(32) || mac_key(32)
-    auto kdf = SHA512::hash(shared_x.data(), 32);
+    // Compress ephemeral pubkey now -- used as HKDF info (context binding) and HMAC input.
+    auto eph_comp = eph_pubkey.to_compressed();
+
+    // 3. HKDF-SHA256 key derivation with domain separation and context binding.
+    //    IKM  = ECDH shared secret (x-coordinate)
+    //    salt = fixed domain tag preventing cross-protocol KDF collisions
+    //    info = ephemeral pubkey compressed (binds derived keys to this session)
+    //    OKM  = enc_key (32B) || mac_key (32B)
+    static constexpr std::uint8_t kdf_salt[] = "secp256k1-ecies-v1";
+    auto prk = hkdf_sha256_extract(kdf_salt, sizeof(kdf_salt) - 1,
+                                   shared_x.data(), 32);
     secp256k1::detail::secure_erase(shared_x.data(), 32);
+    std::array<std::uint8_t, 64> kdf{};
+    hkdf_sha256_expand(prk.data(), eph_comp.data(), 33, kdf.data(), 64);
+    secp256k1::detail::secure_erase(prk.data(), 32);
     const std::uint8_t* enc_key = kdf.data();
     const std::uint8_t* mac_key = kdf.data() + 32;
 
@@ -345,7 +320,7 @@ ecies_encrypt(const Point& recipient_pubkey,
 
     // 6. HMAC-SHA256(mac_key, ephemeral_pubkey || iv || ciphertext)
     //    Covers the entire envelope prefix to prevent parity-byte malleability
-    auto eph_comp = eph_pubkey.to_compressed();
+    // (eph_comp already computed above for HKDF info)
     std::vector<std::uint8_t> hmac_data(33 + 16 + plaintext_len);
     std::memcpy(hmac_data.data(), eph_comp.data(), 33);
     std::memcpy(hmac_data.data() + 33, iv, 16);
@@ -389,9 +364,15 @@ ecies_decrypt(const Scalar& privkey,
     // 3. ECDH
     auto shared_x = ecdh_compute_raw(privkey, eph_pubkey);
 
-    // 4. KDF: SHA-512(shared_x)
-    auto kdf = SHA512::hash(shared_x.data(), 32);
+    // 4. HKDF-SHA256 key derivation -- must match encrypt exactly.
+    //    info = ephemeral pubkey bytes as received in the envelope.
+    static constexpr std::uint8_t kdf_salt[] = "secp256k1-ecies-v1";
+    auto prk = hkdf_sha256_extract(kdf_salt, sizeof(kdf_salt) - 1,
+                                   shared_x.data(), 32);
     secp256k1::detail::secure_erase(shared_x.data(), 32);
+    std::array<std::uint8_t, 64> kdf{};
+    hkdf_sha256_expand(prk.data(), envelope, 33, kdf.data(), 64);
+    secp256k1::detail::secure_erase(prk.data(), 32);
     const std::uint8_t* enc_key = kdf.data();
     const std::uint8_t* mac_key = kdf.data() + 32;
 
