@@ -656,6 +656,60 @@ target_compile_definitions(test_exploit_coin_hd_derivation_standalone PRIVATE ST
 add_test(NAME exploit_coin_hd_derivation COMMAND test_exploit_coin_hd_derivation_standalone)
 set_tests_properties(exploit_coin_hd_derivation PROPERTIES TIMEOUT 60 LABELS "audit;exploit;bip44")
 
+add_executable(test_exploit_sha512_kat_standalone test_exploit_sha512_kat.cpp)
+audit_target_defaults(test_exploit_sha512_kat_standalone)
+target_compile_definitions(test_exploit_sha512_kat_standalone PRIVATE STANDALONE_TEST)
+add_test(NAME exploit_sha512_kat COMMAND test_exploit_sha512_kat_standalone)
+set_tests_properties(exploit_sha512_kat PROPERTIES TIMEOUT 60 LABELS "audit;exploit;hash")
+
+add_executable(test_exploit_keccak256_kat_standalone test_exploit_keccak256_kat.cpp)
+audit_target_defaults(test_exploit_keccak256_kat_standalone)
+target_compile_definitions(test_exploit_keccak256_kat_standalone PRIVATE STANDALONE_TEST)
+add_test(NAME exploit_keccak256_kat COMMAND test_exploit_keccak256_kat_standalone)
+set_tests_properties(exploit_keccak256_kat PROPERTIES TIMEOUT 60 LABELS "audit;exploit;hash")
+
+add_executable(test_exploit_ecdh_standalone test_exploit_ecdh.cpp)
+audit_target_defaults(test_exploit_ecdh_standalone)
+target_compile_definitions(test_exploit_ecdh_standalone PRIVATE STANDALONE_TEST)
+add_test(NAME exploit_ecdh COMMAND test_exploit_ecdh_standalone)
+set_tests_properties(exploit_ecdh PROPERTIES TIMEOUT 60 LABELS "audit;exploit;ecdh")
+
+add_executable(test_exploit_bip39_mnemonic_standalone test_exploit_bip39_mnemonic.cpp)
+audit_target_defaults(test_exploit_bip39_mnemonic_standalone)
+target_compile_definitions(test_exploit_bip39_mnemonic_standalone PRIVATE STANDALONE_TEST)
+add_test(NAME exploit_bip39_mnemonic COMMAND test_exploit_bip39_mnemonic_standalone)
+set_tests_properties(exploit_bip39_mnemonic PROPERTIES TIMEOUT 120 LABELS "audit;exploit;bip39")
+
+add_executable(test_exploit_musig2_standalone test_exploit_musig2.cpp)
+audit_target_defaults(test_exploit_musig2_standalone)
+target_compile_definitions(test_exploit_musig2_standalone PRIVATE STANDALONE_TEST)
+add_test(NAME exploit_musig2 COMMAND test_exploit_musig2_standalone)
+set_tests_properties(exploit_musig2 PROPERTIES TIMEOUT 120 LABELS "audit;exploit;musig2")
+
+add_executable(test_exploit_ecies_encryption_standalone test_exploit_ecies_encryption.cpp)
+audit_target_defaults(test_exploit_ecies_encryption_standalone)
+target_compile_definitions(test_exploit_ecies_encryption_standalone PRIVATE STANDALONE_TEST)
+add_test(NAME exploit_ecies_encryption COMMAND test_exploit_ecies_encryption_standalone)
+set_tests_properties(exploit_ecies_encryption PROPERTIES TIMEOUT 60 LABELS "audit;exploit;ecies")
+
+add_executable(test_exploit_wallet_api_standalone test_exploit_wallet_api.cpp)
+audit_target_defaults(test_exploit_wallet_api_standalone)
+target_compile_definitions(test_exploit_wallet_api_standalone PRIVATE STANDALONE_TEST)
+add_test(NAME exploit_wallet_api COMMAND test_exploit_wallet_api_standalone)
+set_tests_properties(exploit_wallet_api PROPERTIES TIMEOUT 60 LABELS "audit;exploit;wallet")
+
+add_executable(test_exploit_frost_dkg_standalone test_exploit_frost_dkg.cpp)
+audit_target_defaults(test_exploit_frost_dkg_standalone)
+target_compile_definitions(test_exploit_frost_dkg_standalone PRIVATE STANDALONE_TEST)
+add_test(NAME exploit_frost_dkg COMMAND test_exploit_frost_dkg_standalone)
+set_tests_properties(exploit_frost_dkg PROPERTIES TIMEOUT 120 LABELS "audit;exploit;frost")
+
+add_executable(test_exploit_taproot_scripts_standalone test_exploit_taproot_scripts.cpp)
+audit_target_defaults(test_exploit_taproot_scripts_standalone)
+target_compile_definitions(test_exploit_taproot_scripts_standalone PRIVATE STANDALONE_TEST)
+add_test(NAME exploit_taproot_scripts COMMAND test_exploit_taproot_scripts_standalone)
+set_tests_properties(exploit_taproot_scripts PROPERTIES TIMEOUT 60 LABELS "audit;exploit;taproot")
+
 # -- ECIES regression + C ABI prefix enforcement ----------------------------
 add_executable(test_ecies_regression_standalone test_ecies_regression.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/../include/ufsecp/ufsecp_impl.cpp)
