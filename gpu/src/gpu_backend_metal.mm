@@ -733,39 +733,43 @@ public:
         return GpuError::Ok;
     }
 
-    /* -- ZK / BIP-324 stubs (not yet implemented on Metal) ----------------- */
-
-    // TODO(parity): knowledge verify — CUDA kernel exists in zk.cuh, needs Metal port
+    /* -- ZK / BIP-324 stubs ------------------------------------------------- */
+    // TODO(parity): zk_knowledge_verify — MSL kernel needed; OpenCL impl wired in
+    //   gpu_backend_opencl.cpp via secp256k1_zk.cl. Tracking: BACKEND_ASSURANCE_MATRIX.md
     GpuError zk_knowledge_verify_batch(
         const uint8_t*, const uint8_t*, const uint8_t*,
         size_t, uint8_t*) override
-    { return set_error(GpuError::Unsupported, "ZK knowledge verify not implemented on Metal"); }
+    { return set_error(GpuError::Unsupported, "ZK knowledge verify not yet implemented on Metal"); }
 
-    // TODO(parity): DLEQ verify — CUDA kernel exists in zk.cuh, needs Metal port
+    // TODO(parity): zk_dleq_verify — MSL kernel needed; OpenCL impl wired in
+    //   gpu_backend_opencl.cpp via secp256k1_zk.cl. Tracking: BACKEND_ASSURANCE_MATRIX.md
     GpuError zk_dleq_verify_batch(
         const uint8_t*, const uint8_t*, const uint8_t*,
         const uint8_t*, const uint8_t*,
         size_t, uint8_t*) override
-    { return set_error(GpuError::Unsupported, "ZK DLEQ verify not implemented on Metal"); }
+    { return set_error(GpuError::Unsupported, "ZK DLEQ verify not yet implemented on Metal"); }
 
-    // TODO(parity): bulletproof verify — CUDA kernel exists in zk.cuh, needs Metal port
+    // PARITY-EXCEPTION(Metal): bulletproof kernel blocked upstream; OpenCL also #if 0.
+    // See docs/BACKEND_ASSURANCE_MATRIX.md row "bulletproof_verify_batch".
     GpuError bulletproof_verify_batch(
         const uint8_t*, const uint8_t*, const uint8_t*,
         size_t, uint8_t*) override
-    { return set_error(GpuError::Unsupported, "bulletproof verify not implemented on Metal"); }
+    { return set_error(GpuError::Unsupported, "bulletproof: kernel pending address-space fixes"); }
 
-    // TODO(parity): BIP-324 AEAD encrypt — CUDA kernel exists in bip324.cuh, needs Metal port
+    // TODO(parity): bip324_aead_encrypt — MSL kernel needed; OpenCL impl wired in
+    //   gpu_backend_opencl.cpp via secp256k1_bip324.cl. Tracking: BACKEND_ASSURANCE_MATRIX.md
     GpuError bip324_aead_encrypt_batch(
         const uint8_t*, const uint8_t*, const uint8_t*,
         const uint32_t*, uint32_t, size_t, uint8_t*) override
-    { return set_error(GpuError::Unsupported, "BIP-324 AEAD encrypt not implemented on Metal"); }
+    { return set_error(GpuError::Unsupported, "BIP-324 AEAD encrypt not yet implemented on Metal"); }
 
-    // TODO(parity): BIP-324 AEAD decrypt — CUDA kernel exists in bip324.cuh, needs Metal port
+    // TODO(parity): bip324_aead_decrypt — MSL kernel needed; OpenCL impl wired in
+    //   gpu_backend_opencl.cpp via secp256k1_bip324.cl. Tracking: BACKEND_ASSURANCE_MATRIX.md
     GpuError bip324_aead_decrypt_batch(
         const uint8_t*, const uint8_t*, const uint8_t*,
         const uint32_t*, uint32_t, size_t,
         uint8_t*, uint8_t*) override
-    { return set_error(GpuError::Unsupported, "BIP-324 AEAD decrypt not implemented on Metal"); }
+    { return set_error(GpuError::Unsupported, "BIP-324 AEAD decrypt not yet implemented on Metal"); }
 
 private:
     std::unique_ptr<secp256k1::metal::MetalRuntime> runtime_;

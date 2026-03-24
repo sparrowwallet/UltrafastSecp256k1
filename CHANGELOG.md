@@ -5,7 +5,18 @@ All notable changes to UltrafastSecp256k1 are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [3.4.0] - 2026-03-23
+## [Unreleased]
+
+### Security / Audit
+- **Ethereum differential KAT** (`audit/test_exploit_ethereum_differential.cpp`) — 10 tests, 15 sub-checks against go-ethereum, web3.py, and ethers.js reference vectors: address derivation (go-ethereum testKey KAT), privkey=1 canonical address, ecrecover with go-ethereum test message hash, EIP-191 hash vs web3.py, sign+ecrecover roundtrip, EIP-155 v encoding, eth_personal_sign roundtrip, tamper detection, keccak256("abc") KAT, anti-collision. Closes assurance gap **#4**.
+- **MuSig2/FROST/adaptor parser robustness fuzz** (`audit/test_fuzz_musig2_frost.cpp`) — 15 tests, 16 sub-checks: musig2 key_agg/nonce_agg/partial_verify/partial_sig_agg with random inputs (5000/3000/2000 rounds each), FROST keygen_finalize/sign/verify_partial/aggregate random inputs, schnorr+ecdsa adaptor random inputs, boundary test (n_signers=0 → must error). Closes assurance gap **#7**.
+- **ClusterFuzzLite expanded to 5 targets**: added `cpu/fuzz/fuzz_ecdsa.cpp` (ECDSA sign→verify invariant, wrong-msg false-positive check, parse_compact_strict robustness) and `cpu/fuzz/fuzz_schnorr.cpp` (BIP-340 sign→verify, adversarial from_bytes verify, wrong-msg check).
+
+### GPU Backend
+- **OpenCL parity**: wired `zk_knowledge_verify_batch`, `zk_dleq_verify_batch`, `bip324_aead_encrypt_batch`, `bip324_aead_decrypt_batch` in `gpu_backend_opencl.cpp` — 4 new kernels matching CUDA surface. Closes assurance gap **#5/#6** (partial; bulletproof batch remains PARITY-EXCEPTION, documented in `BACKEND_ASSURANCE_MATRIX.md`).
+- **Metal stubs** documented with `PARITY-EXCEPTION` / `TODO(parity)` markers for bulletproof batch; other 4 ops have PARITY-EXCEPTION with architectural rationale.
+
+
 
 > Full ABI audit coverage: 155 `ufsecp_*` + 23 `ufsecp_gpu_*` functions, 70-module unified runner (AUDIT-READY), GPU C ABI null-guard path integration.
 

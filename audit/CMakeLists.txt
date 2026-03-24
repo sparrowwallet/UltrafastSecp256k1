@@ -846,6 +846,27 @@ target_compile_definitions(test_exploit_pedersen_adversarial_standalone PRIVATE 
 add_test(NAME exploit_pedersen_adversarial COMMAND test_exploit_pedersen_adversarial_standalone)
 set_tests_properties(exploit_pedersen_adversarial PROPERTIES TIMEOUT 60 LABELS "audit;exploit;pedersen;adversarial")
 
+# -- Ethereum differential: our output vs. go-ethereum/web3.py/ethers.js KATs
+add_executable(test_exploit_ethereum_differential_standalone test_exploit_ethereum_differential.cpp)
+audit_target_defaults(test_exploit_ethereum_differential_standalone)
+target_compile_definitions(test_exploit_ethereum_differential_standalone PRIVATE STANDALONE_TEST)
+add_test(NAME exploit_ethereum_differential COMMAND test_exploit_ethereum_differential_standalone)
+set_tests_properties(exploit_ethereum_differential PROPERTIES TIMEOUT 60 LABELS "audit;exploit;ethereum;differential")
+
+# -- MuSig2/FROST/adaptor parser fuzz (deterministic, no libFuzzer required) --
+add_executable(test_fuzz_musig2_frost_standalone test_fuzz_musig2_frost.cpp)
+audit_target_defaults(test_fuzz_musig2_frost_standalone)
+target_link_libraries(test_fuzz_musig2_frost_standalone PRIVATE ufsecp_static)
+target_include_directories(test_fuzz_musig2_frost_standalone PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/../include
+    ${CMAKE_BINARY_DIR}/include/ufsecp
+    ${CMAKE_CURRENT_SOURCE_DIR}/../cpu/include
+)
+target_compile_definitions(test_fuzz_musig2_frost_standalone PRIVATE
+    STANDALONE_TEST "UFSECP_API=")
+add_test(NAME fuzz_musig2_frost COMMAND test_fuzz_musig2_frost_standalone)
+set_tests_properties(fuzz_musig2_frost PROPERTIES TIMEOUT 120 LABELS "audit;fuzz;musig2;frost;adaptor")
+
 # -- ECIES regression + C ABI prefix enforcement ----------------------------
 add_executable(test_ecies_regression_standalone test_ecies_regression.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/../include/ufsecp/ufsecp_impl.cpp)

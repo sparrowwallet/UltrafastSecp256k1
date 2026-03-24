@@ -142,6 +142,14 @@ public:
         if (frost_kernel_)       { clReleaseKernel(frost_kernel_);       frost_kernel_       = nullptr; }
         if (frost_program_)      { clReleaseProgram(frost_program_);     frost_program_      = nullptr; }
         frost_init_attempted_ = false;
+        if (zk_knowledge_verify_) { clReleaseKernel(zk_knowledge_verify_); zk_knowledge_verify_ = nullptr; }
+        if (zk_dleq_verify_)      { clReleaseKernel(zk_dleq_verify_);     zk_dleq_verify_      = nullptr; }
+        if (zk_program_)          { clReleaseProgram(zk_program_);         zk_program_          = nullptr; }
+        zk_init_attempted_ = false;
+        if (bip324_aead_encrypt_) { clReleaseKernel(bip324_aead_encrypt_); bip324_aead_encrypt_ = nullptr; }
+        if (bip324_aead_decrypt_) { clReleaseKernel(bip324_aead_decrypt_); bip324_aead_decrypt_ = nullptr; }
+        if (bip324_program_)      { clReleaseProgram(bip324_program_);     bip324_program_      = nullptr; }
+        bip324_init_attempted_ = false;
         ctx_.reset();
     }
 
@@ -823,39 +831,432 @@ public:
         return GpuError::Ok;
     }
 
-    /* -- ZK / BIP-324 stubs (not yet implemented on OpenCL) ---------------- */
+    /* -- ZK proof batch operations (OpenCL via secp256k1_zk.cl) ------------- */
 
-    // TODO(parity): knowledge verify — CUDA kernel exists in zk.cuh, needs OpenCL port
     GpuError zk_knowledge_verify_batch(
-        const uint8_t*, const uint8_t*, const uint8_t*,
-        size_t, uint8_t*) override
-    { return set_error(GpuError::Unsupported, "ZK knowledge verify not implemented on OpenCL"); }
+        const uint8_t* proofs64, const uint8_t* pubkeys65,
+        const uint8_t* messages32, size_t count,
+        uint8_t* out_results) override
+    {
+        if (!is_ready()) return set_error(GpuError::Device, "context not initialised");
+        if (count == 0) { clear_error(); return GpuError::Ok; }
+        if (!proofs64 || !pubkeys65 || !messages32 || !out_results)
+            return set_error(GpuError::NullArg, "NULL buffer");
 
-    // TODO(parity): DLEQ verify — CUDA kernel exists in zk.cuh, needs OpenCL port
+        auto err = ensure_zk_kernels();
+        if (err != GpuError::Ok) return err;
+
+        auto* cl_ctx = static_cast<cl_context>(ctx_->native_context());
+        auto* queue  = static_cast<cl_command_queue>(ctx_->native_queue());
+        cl_int clerr;
+
+        /* proofs: 64 bytes → ZKKnowledgeProof { rx[32], Scalar(u64[4]) } */
+        struct ZKKnowledgeProofOCL { uint8_t rx[32]; uint64_t s[4]; };
+        std::vector<ZKKnowledgeProofOCL> h_proofs(count);
+        for (size_t i = 0; i < count; ++i) {
+            const uint8_t* p = proofs64 + i * 64;
+            std::memcpy(h_proofs[i].rx, p, 32);
+            be32_to_le_limbs(p + 32, h_proofs[i].s);
+        }
+
+        /* pubkeys: 65-byte uncompressed → JacobianPoint (Z=1) */
+        std::vector<secp256k1::opencl::JacobianPoint> h_pubs(count);
+        for (size_t i = 0; i < count; ++i) {
+            secp256k1::opencl::AffinePoint aff;
+            if (!pubkey65_to_affine(pubkeys65 + i * 65, &aff))
+                return set_error(GpuError::BadKey, "invalid pubkey");
+            affine_to_jacobian(&aff, &h_pubs[i]);
+        }
+
+        /* bases: secp256k1 generator G repeated count times */
+        secp256k1::opencl::JacobianPoint G_jac = generator_jacobian();
+        std::vector<secp256k1::opencl::JacobianPoint> h_bases(count, G_jac);
+
+        cl_mem d_proofs = clCreateBuffer(cl_ctx, CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR,
+                                         sizeof(ZKKnowledgeProofOCL) * count,
+                                         h_proofs.data(), &clerr);
+        if (clerr != CL_SUCCESS)
+            return set_error(GpuError::Memory, "zk proof buffer alloc");
+
+        cl_mem d_pubs = clCreateBuffer(cl_ctx, CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR,
+                                        sizeof(secp256k1::opencl::JacobianPoint) * count,
+                                        h_pubs.data(), &clerr);
+        if (clerr != CL_SUCCESS) {
+            clReleaseMemObject(d_proofs);
+            return set_error(GpuError::Memory, "zk pubkey buffer alloc");
+        }
+
+        cl_mem d_bases = clCreateBuffer(cl_ctx, CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR,
+                                         sizeof(secp256k1::opencl::JacobianPoint) * count,
+                                         h_bases.data(), &clerr);
+        if (clerr != CL_SUCCESS) {
+            clReleaseMemObject(d_pubs); clReleaseMemObject(d_proofs);
+            return set_error(GpuError::Memory, "zk bases buffer alloc");
+        }
+
+        cl_mem d_msgs = clCreateBuffer(cl_ctx, CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR,
+                                        32 * count, const_cast<uint8_t*>(messages32), &clerr);
+        if (clerr != CL_SUCCESS) {
+            clReleaseMemObject(d_bases); clReleaseMemObject(d_pubs); clReleaseMemObject(d_proofs);
+            return set_error(GpuError::Memory, "zk msg buffer alloc");
+        }
+
+        cl_mem d_res = clCreateBuffer(cl_ctx, CL_MEM_WRITE_ONLY,
+                                       sizeof(int) * count, nullptr, &clerr);
+        if (clerr != CL_SUCCESS) {
+            clReleaseMemObject(d_msgs); clReleaseMemObject(d_bases);
+            clReleaseMemObject(d_pubs); clReleaseMemObject(d_proofs);
+            return set_error(GpuError::Memory, "zk result buffer alloc");
+        }
+
+        cl_uint cl_count = static_cast<cl_uint>(count);
+        clSetKernelArg(zk_knowledge_verify_, 0, sizeof(cl_mem),  &d_proofs);
+        clSetKernelArg(zk_knowledge_verify_, 1, sizeof(cl_mem),  &d_pubs);
+        clSetKernelArg(zk_knowledge_verify_, 2, sizeof(cl_mem),  &d_bases);
+        clSetKernelArg(zk_knowledge_verify_, 3, sizeof(cl_mem),  &d_msgs);
+        clSetKernelArg(zk_knowledge_verify_, 4, sizeof(cl_mem),  &d_res);
+        clSetKernelArg(zk_knowledge_verify_, 5, sizeof(cl_uint), &cl_count);
+
+        size_t global = count;
+        clerr = clEnqueueNDRangeKernel(queue, zk_knowledge_verify_, 1, nullptr,
+                                        &global, nullptr, 0, nullptr, nullptr);
+        if (clerr != CL_SUCCESS) {
+            clReleaseMemObject(d_res); clReleaseMemObject(d_msgs);
+            clReleaseMemObject(d_bases); clReleaseMemObject(d_pubs); clReleaseMemObject(d_proofs);
+            return set_error(GpuError::Launch, "zk_knowledge_verify kernel launch failed");
+        }
+        clFinish(queue);
+
+        std::vector<int> h_res(count);
+        clEnqueueReadBuffer(queue, d_res, CL_TRUE, 0,
+                             sizeof(int) * count, h_res.data(), 0, nullptr, nullptr);
+        for (size_t i = 0; i < count; ++i)
+            out_results[i] = h_res[i] ? 1 : 0;
+
+        clReleaseMemObject(d_res); clReleaseMemObject(d_msgs);
+        clReleaseMemObject(d_bases); clReleaseMemObject(d_pubs); clReleaseMemObject(d_proofs);
+        clear_error();
+        return GpuError::Ok;
+    }
+
     GpuError zk_dleq_verify_batch(
-        const uint8_t*, const uint8_t*, const uint8_t*,
-        const uint8_t*, const uint8_t*,
-        size_t, uint8_t*) override
-    { return set_error(GpuError::Unsupported, "ZK DLEQ verify not implemented on OpenCL"); }
+        const uint8_t* proofs64,
+        const uint8_t* G_pts65, const uint8_t* H_pts65,
+        const uint8_t* P_pts65, const uint8_t* Q_pts65,
+        size_t count, uint8_t* out_results) override
+    {
+        if (!is_ready()) return set_error(GpuError::Device, "context not initialised");
+        if (count == 0) { clear_error(); return GpuError::Ok; }
+        if (!proofs64 || !G_pts65 || !H_pts65 || !P_pts65 || !Q_pts65 || !out_results)
+            return set_error(GpuError::NullArg, "NULL buffer");
 
-    // TODO(parity): bulletproof verify — CUDA kernel exists in zk.cuh, needs OpenCL port
+        auto err = ensure_zk_kernels();
+        if (err != GpuError::Ok) return err;
+
+        auto* cl_ctx = static_cast<cl_context>(ctx_->native_context());
+        auto* queue  = static_cast<cl_command_queue>(ctx_->native_queue());
+        cl_int clerr;
+
+        /* proofs: 64 bytes → ZKDLEQProof { Scalar e(u64[4]), Scalar s(u64[4]) } */
+        struct ZKDLEQProofOCL { uint64_t e[4]; uint64_t s[4]; };
+        std::vector<ZKDLEQProofOCL> h_proofs(count);
+        for (size_t i = 0; i < count; ++i) {
+            const uint8_t* p = proofs64 + i * 64;
+            be32_to_le_limbs(p,      h_proofs[i].e);
+            be32_to_le_limbs(p + 32, h_proofs[i].s);
+        }
+
+        /* 4 point arrays: 65-byte uncompressed → JacobianPoint (Z=1) */
+        std::vector<secp256k1::opencl::JacobianPoint> h_G(count), h_H(count), h_P(count), h_Q(count);
+        for (size_t i = 0; i < count; ++i) {
+            secp256k1::opencl::AffinePoint aff;
+            if (!pubkey65_to_affine(G_pts65 + i * 65, &aff)) return set_error(GpuError::BadKey, "invalid G point");
+            affine_to_jacobian(&aff, &h_G[i]);
+        }
+        for (size_t i = 0; i < count; ++i) {
+            secp256k1::opencl::AffinePoint aff;
+            if (!pubkey65_to_affine(H_pts65 + i * 65, &aff)) return set_error(GpuError::BadKey, "invalid H point");
+            affine_to_jacobian(&aff, &h_H[i]);
+        }
+        for (size_t i = 0; i < count; ++i) {
+            secp256k1::opencl::AffinePoint aff;
+            if (!pubkey65_to_affine(P_pts65 + i * 65, &aff)) return set_error(GpuError::BadKey, "invalid P point");
+            affine_to_jacobian(&aff, &h_P[i]);
+        }
+        for (size_t i = 0; i < count; ++i) {
+            secp256k1::opencl::AffinePoint aff;
+            if (!pubkey65_to_affine(Q_pts65 + i * 65, &aff)) return set_error(GpuError::BadKey, "invalid Q point");
+            affine_to_jacobian(&aff, &h_Q[i]);
+        }
+
+        size_t jp_sz = sizeof(secp256k1::opencl::JacobianPoint) * count;
+
+        cl_mem d_proofs = clCreateBuffer(cl_ctx, CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR,
+                                          sizeof(ZKDLEQProofOCL) * count, h_proofs.data(), &clerr);
+        if (clerr != CL_SUCCESS) return set_error(GpuError::Memory, "dleq proof buf");
+
+        cl_mem d_G = clCreateBuffer(cl_ctx, CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR,
+                                     jp_sz, h_G.data(), &clerr);
+        if (clerr != CL_SUCCESS) {
+            clReleaseMemObject(d_proofs);
+            return set_error(GpuError::Memory, "dleq G buf");
+        }
+
+        cl_mem d_H = clCreateBuffer(cl_ctx, CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR,
+                                     jp_sz, h_H.data(), &clerr);
+        if (clerr != CL_SUCCESS) {
+            clReleaseMemObject(d_G); clReleaseMemObject(d_proofs);
+            return set_error(GpuError::Memory, "dleq H buf");
+        }
+
+        cl_mem d_P = clCreateBuffer(cl_ctx, CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR,
+                                     jp_sz, h_P.data(), &clerr);
+        if (clerr != CL_SUCCESS) {
+            clReleaseMemObject(d_H); clReleaseMemObject(d_G); clReleaseMemObject(d_proofs);
+            return set_error(GpuError::Memory, "dleq P buf");
+        }
+
+        cl_mem d_Q = clCreateBuffer(cl_ctx, CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR,
+                                     jp_sz, h_Q.data(), &clerr);
+        if (clerr != CL_SUCCESS) {
+            clReleaseMemObject(d_P); clReleaseMemObject(d_H);
+            clReleaseMemObject(d_G); clReleaseMemObject(d_proofs);
+            return set_error(GpuError::Memory, "dleq Q buf");
+        }
+
+        cl_mem d_res = clCreateBuffer(cl_ctx, CL_MEM_WRITE_ONLY,
+                                       sizeof(int) * count, nullptr, &clerr);
+        if (clerr != CL_SUCCESS) {
+            clReleaseMemObject(d_Q); clReleaseMemObject(d_P);
+            clReleaseMemObject(d_H); clReleaseMemObject(d_G); clReleaseMemObject(d_proofs);
+            return set_error(GpuError::Memory, "dleq result buf");
+        }
+
+        cl_uint cl_count = static_cast<cl_uint>(count);
+        clSetKernelArg(zk_dleq_verify_, 0, sizeof(cl_mem),  &d_proofs);
+        clSetKernelArg(zk_dleq_verify_, 1, sizeof(cl_mem),  &d_G);
+        clSetKernelArg(zk_dleq_verify_, 2, sizeof(cl_mem),  &d_H);
+        clSetKernelArg(zk_dleq_verify_, 3, sizeof(cl_mem),  &d_P);
+        clSetKernelArg(zk_dleq_verify_, 4, sizeof(cl_mem),  &d_Q);
+        clSetKernelArg(zk_dleq_verify_, 5, sizeof(cl_mem),  &d_res);
+        clSetKernelArg(zk_dleq_verify_, 6, sizeof(cl_uint), &cl_count);
+
+        size_t global = count;
+        clerr = clEnqueueNDRangeKernel(queue, zk_dleq_verify_, 1, nullptr,
+                                        &global, nullptr, 0, nullptr, nullptr);
+        if (clerr != CL_SUCCESS) {
+            clReleaseMemObject(d_res); clReleaseMemObject(d_Q); clReleaseMemObject(d_P);
+            clReleaseMemObject(d_H); clReleaseMemObject(d_G); clReleaseMemObject(d_proofs);
+            return set_error(GpuError::Launch, "zk_dleq_verify kernel launch failed");
+        }
+        clFinish(queue);
+
+        std::vector<int> h_res(count);
+        clEnqueueReadBuffer(queue, d_res, CL_TRUE, 0,
+                             sizeof(int) * count, h_res.data(), 0, nullptr, nullptr);
+        for (size_t i = 0; i < count; ++i)
+            out_results[i] = h_res[i] ? 1 : 0;
+
+        clReleaseMemObject(d_res); clReleaseMemObject(d_Q); clReleaseMemObject(d_P);
+        clReleaseMemObject(d_H); clReleaseMemObject(d_G); clReleaseMemObject(d_proofs);
+        clear_error();
+        return GpuError::Ok;
+    }
+
+    // PARITY-EXCEPTION(OpenCL): bulletproof kernel is #if 0 blocked in secp256k1_zk.cl
+    // pending address-space qualifier fixes (__global/__private params).
+    // See docs/BACKEND_ASSURANCE_MATRIX.md row "bulletproof_verify_batch".
     GpuError bulletproof_verify_batch(
         const uint8_t*, const uint8_t*, const uint8_t*,
         size_t, uint8_t*) override
-    { return set_error(GpuError::Unsupported, "bulletproof verify not implemented on OpenCL"); }
+    { return set_error(GpuError::Unsupported, "bulletproof: OpenCL kernel pending address-space fixes"); }
 
-    // TODO(parity): BIP-324 AEAD encrypt — CUDA kernel exists in bip324.cuh, needs OpenCL port
+    /* -- BIP-324 AEAD batch operations (OpenCL via secp256k1_bip324.cl) ----- */
+
     GpuError bip324_aead_encrypt_batch(
-        const uint8_t*, const uint8_t*, const uint8_t*,
-        const uint32_t*, uint32_t, size_t, uint8_t*) override
-    { return set_error(GpuError::Unsupported, "BIP-324 AEAD encrypt not implemented on OpenCL"); }
+        const uint8_t* keys32, const uint8_t* nonces12,
+        const uint8_t* plaintexts, const uint32_t* sizes,
+        uint32_t max_payload, size_t count, uint8_t* wire_out) override
+    {
+        if (!is_ready()) return set_error(GpuError::Device, "context not initialised");
+        if (count == 0) { clear_error(); return GpuError::Ok; }
+        if (!keys32 || !nonces12 || !plaintexts || !sizes || !wire_out)
+            return set_error(GpuError::NullArg, "NULL buffer");
 
-    // TODO(parity): BIP-324 AEAD decrypt — CUDA kernel exists in bip324.cuh, needs OpenCL port
+        auto err = ensure_bip324_kernels();
+        if (err != GpuError::Ok) return err;
+
+        auto* cl_ctx = static_cast<cl_context>(ctx_->native_context());
+        auto* queue  = static_cast<cl_command_queue>(ctx_->native_queue());
+        cl_int clerr;
+
+        const size_t wire_stride = (size_t)max_payload + 19u; /* BIP324_OVERHEAD = 19 */
+
+        cl_mem d_keys = clCreateBuffer(cl_ctx, CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR,
+                                        32 * count, const_cast<uint8_t*>(keys32), &clerr);
+        if (clerr != CL_SUCCESS) return set_error(GpuError::Memory, "bip324 key buf");
+
+        cl_mem d_nonces = clCreateBuffer(cl_ctx, CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR,
+                                          12 * count, const_cast<uint8_t*>(nonces12), &clerr);
+        if (clerr != CL_SUCCESS) {
+            clReleaseMemObject(d_keys);
+            return set_error(GpuError::Memory, "bip324 nonce buf");
+        }
+
+        cl_mem d_pt = clCreateBuffer(cl_ctx, CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR,
+                                      (size_t)max_payload * count,
+                                      const_cast<uint8_t*>(plaintexts), &clerr);
+        if (clerr != CL_SUCCESS) {
+            clReleaseMemObject(d_nonces); clReleaseMemObject(d_keys);
+            return set_error(GpuError::Memory, "bip324 plaintext buf");
+        }
+
+        cl_mem d_sizes = clCreateBuffer(cl_ctx, CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR,
+                                         sizeof(uint32_t) * count,
+                                         const_cast<uint32_t*>(sizes), &clerr);
+        if (clerr != CL_SUCCESS) {
+            clReleaseMemObject(d_pt); clReleaseMemObject(d_nonces); clReleaseMemObject(d_keys);
+            return set_error(GpuError::Memory, "bip324 sizes buf");
+        }
+
+        cl_mem d_wire = clCreateBuffer(cl_ctx, CL_MEM_WRITE_ONLY,
+                                        wire_stride * count, nullptr, &clerr);
+        if (clerr != CL_SUCCESS) {
+            clReleaseMemObject(d_sizes); clReleaseMemObject(d_pt);
+            clReleaseMemObject(d_nonces); clReleaseMemObject(d_keys);
+            return set_error(GpuError::Memory, "bip324 wire_out buf");
+        }
+
+        cl_uint cl_max = static_cast<cl_uint>(max_payload);
+        cl_int  cl_cnt = static_cast<cl_int>(count);
+        clSetKernelArg(bip324_aead_encrypt_, 0, sizeof(cl_mem),  &d_keys);
+        clSetKernelArg(bip324_aead_encrypt_, 1, sizeof(cl_mem),  &d_nonces);
+        clSetKernelArg(bip324_aead_encrypt_, 2, sizeof(cl_mem),  &d_pt);
+        clSetKernelArg(bip324_aead_encrypt_, 3, sizeof(cl_mem),  &d_sizes);
+        clSetKernelArg(bip324_aead_encrypt_, 4, sizeof(cl_mem),  &d_wire);
+        clSetKernelArg(bip324_aead_encrypt_, 5, sizeof(cl_uint), &cl_max);
+        clSetKernelArg(bip324_aead_encrypt_, 6, sizeof(cl_int),  &cl_cnt);
+
+        size_t global = count;
+        clerr = clEnqueueNDRangeKernel(queue, bip324_aead_encrypt_, 1, nullptr,
+                                        &global, nullptr, 0, nullptr, nullptr);
+        if (clerr != CL_SUCCESS) {
+            clReleaseMemObject(d_wire); clReleaseMemObject(d_sizes);
+            clReleaseMemObject(d_pt); clReleaseMemObject(d_nonces); clReleaseMemObject(d_keys);
+            return set_error(GpuError::Launch, "bip324_encrypt kernel launch failed");
+        }
+        clFinish(queue);
+
+        clEnqueueReadBuffer(queue, d_wire, CL_TRUE, 0,
+                             wire_stride * count, wire_out, 0, nullptr, nullptr);
+
+        clReleaseMemObject(d_wire); clReleaseMemObject(d_sizes);
+        clReleaseMemObject(d_pt); clReleaseMemObject(d_nonces); clReleaseMemObject(d_keys);
+        clear_error();
+        return GpuError::Ok;
+    }
+
     GpuError bip324_aead_decrypt_batch(
-        const uint8_t*, const uint8_t*, const uint8_t*,
-        const uint32_t*, uint32_t, size_t,
-        uint8_t*, uint8_t*) override
-    { return set_error(GpuError::Unsupported, "BIP-324 AEAD decrypt not implemented on OpenCL"); }
+        const uint8_t* keys32, const uint8_t* nonces12,
+        const uint8_t* wire_in, const uint32_t* sizes,
+        uint32_t max_payload, size_t count,
+        uint8_t* plaintext_out, uint8_t* out_valid) override
+    {
+        if (!is_ready()) return set_error(GpuError::Device, "context not initialised");
+        if (count == 0) { clear_error(); return GpuError::Ok; }
+        if (!keys32 || !nonces12 || !wire_in || !sizes || !plaintext_out || !out_valid)
+            return set_error(GpuError::NullArg, "NULL buffer");
+
+        auto err = ensure_bip324_kernels();
+        if (err != GpuError::Ok) return err;
+
+        auto* cl_ctx = static_cast<cl_context>(ctx_->native_context());
+        auto* queue  = static_cast<cl_command_queue>(ctx_->native_queue());
+        cl_int clerr;
+
+        const size_t wire_stride = (size_t)max_payload + 19u;
+
+        cl_mem d_keys = clCreateBuffer(cl_ctx, CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR,
+                                        32 * count, const_cast<uint8_t*>(keys32), &clerr);
+        if (clerr != CL_SUCCESS) return set_error(GpuError::Memory, "bip324d key buf");
+
+        cl_mem d_nonces = clCreateBuffer(cl_ctx, CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR,
+                                          12 * count, const_cast<uint8_t*>(nonces12), &clerr);
+        if (clerr != CL_SUCCESS) {
+            clReleaseMemObject(d_keys);
+            return set_error(GpuError::Memory, "bip324d nonce buf");
+        }
+
+        cl_mem d_wire_in = clCreateBuffer(cl_ctx, CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR,
+                                           wire_stride * count,
+                                           const_cast<uint8_t*>(wire_in), &clerr);
+        if (clerr != CL_SUCCESS) {
+            clReleaseMemObject(d_nonces); clReleaseMemObject(d_keys);
+            return set_error(GpuError::Memory, "bip324d wire_in buf");
+        }
+
+        cl_mem d_sizes = clCreateBuffer(cl_ctx, CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR,
+                                         sizeof(uint32_t) * count,
+                                         const_cast<uint32_t*>(sizes), &clerr);
+        if (clerr != CL_SUCCESS) {
+            clReleaseMemObject(d_wire_in); clReleaseMemObject(d_nonces); clReleaseMemObject(d_keys);
+            return set_error(GpuError::Memory, "bip324d sizes buf");
+        }
+
+        cl_mem d_pt = clCreateBuffer(cl_ctx, CL_MEM_WRITE_ONLY,
+                                      (size_t)max_payload * count, nullptr, &clerr);
+        if (clerr != CL_SUCCESS) {
+            clReleaseMemObject(d_sizes); clReleaseMemObject(d_wire_in);
+            clReleaseMemObject(d_nonces); clReleaseMemObject(d_keys);
+            return set_error(GpuError::Memory, "bip324d plaintext buf");
+        }
+
+        /* ok: kernel writes cl_uint, convert to uint8_t after readback */
+        cl_mem d_ok = clCreateBuffer(cl_ctx, CL_MEM_WRITE_ONLY,
+                                      sizeof(cl_uint) * count, nullptr, &clerr);
+        if (clerr != CL_SUCCESS) {
+            clReleaseMemObject(d_pt); clReleaseMemObject(d_sizes);
+            clReleaseMemObject(d_wire_in); clReleaseMemObject(d_nonces); clReleaseMemObject(d_keys);
+            return set_error(GpuError::Memory, "bip324d ok buf");
+        }
+
+        cl_uint cl_max = static_cast<cl_uint>(max_payload);
+        cl_int  cl_cnt = static_cast<cl_int>(count);
+        clSetKernelArg(bip324_aead_decrypt_, 0, sizeof(cl_mem),  &d_keys);
+        clSetKernelArg(bip324_aead_decrypt_, 1, sizeof(cl_mem),  &d_nonces);
+        clSetKernelArg(bip324_aead_decrypt_, 2, sizeof(cl_mem),  &d_wire_in);
+        clSetKernelArg(bip324_aead_decrypt_, 3, sizeof(cl_mem),  &d_sizes);
+        clSetKernelArg(bip324_aead_decrypt_, 4, sizeof(cl_mem),  &d_pt);
+        clSetKernelArg(bip324_aead_decrypt_, 5, sizeof(cl_mem),  &d_ok);
+        clSetKernelArg(bip324_aead_decrypt_, 6, sizeof(cl_uint), &cl_max);
+        clSetKernelArg(bip324_aead_decrypt_, 7, sizeof(cl_int),  &cl_cnt);
+
+        size_t global = count;
+        clerr = clEnqueueNDRangeKernel(queue, bip324_aead_decrypt_, 1, nullptr,
+                                        &global, nullptr, 0, nullptr, nullptr);
+        if (clerr != CL_SUCCESS) {
+            clReleaseMemObject(d_ok); clReleaseMemObject(d_pt);
+            clReleaseMemObject(d_sizes); clReleaseMemObject(d_wire_in);
+            clReleaseMemObject(d_nonces); clReleaseMemObject(d_keys);
+            return set_error(GpuError::Launch, "bip324_decrypt kernel launch failed");
+        }
+        clFinish(queue);
+
+        clEnqueueReadBuffer(queue, d_pt, CL_TRUE, 0,
+                             (size_t)max_payload * count, plaintext_out, 0, nullptr, nullptr);
+
+        std::vector<cl_uint> h_ok(count);
+        clEnqueueReadBuffer(queue, d_ok, CL_TRUE, 0,
+                             sizeof(cl_uint) * count, h_ok.data(), 0, nullptr, nullptr);
+        for (size_t i = 0; i < count; ++i)
+            out_valid[i] = h_ok[i] ? 1 : 0;
+
+        clReleaseMemObject(d_ok); clReleaseMemObject(d_pt);
+        clReleaseMemObject(d_sizes); clReleaseMemObject(d_wire_in);
+        clReleaseMemObject(d_nonces); clReleaseMemObject(d_keys);
+        clear_error();
+        return GpuError::Ok;
+    }
 
 private:
     std::unique_ptr<secp256k1::opencl::Context> ctx_;
@@ -873,6 +1274,18 @@ private:
     cl_program frost_program_       = nullptr;
     cl_kernel  frost_kernel_        = nullptr;
     bool       frost_init_attempted_ = false;
+
+    /* ZK proof kernel handles (lazy-loaded via secp256k1_zk.cl) */
+    cl_program zk_program_            = nullptr;
+    cl_kernel  zk_knowledge_verify_   = nullptr;
+    cl_kernel  zk_dleq_verify_        = nullptr;
+    bool       zk_init_attempted_     = false;
+
+    /* BIP-324 AEAD kernel handles (lazy-loaded via secp256k1_bip324.cl) */
+    cl_program bip324_program_        = nullptr;
+    cl_kernel  bip324_aead_encrypt_   = nullptr;
+    cl_kernel  bip324_aead_decrypt_   = nullptr;
+    bool       bip324_init_attempted_ = false;
 
     GpuError set_error(GpuError err, const char* msg) {
         last_err_ = err;
@@ -1114,6 +1527,191 @@ private:
         std::memcpy(out->x.limbs, xl.data(), 32);
         std::memcpy(out->y.limbs, yl.data(), 32);
         return true;
+    }
+
+    /** Decompress a 65-byte uncompressed pubkey (04 || x[32] || y[32]) to OpenCL AffinePoint.
+     *  Validates y² == x³+7. Returns false for invalid inputs. */
+    static bool pubkey65_to_affine(const uint8_t pub65[65],
+                                    secp256k1::opencl::AffinePoint* out) {
+        if (pub65[0] != 0x04) return false;
+        secp256k1::fast::FieldElement fe_x, fe_y;
+        if (!secp256k1::fast::FieldElement::parse_bytes_strict(pub65 + 1,  fe_x)) return false;
+        if (!secp256k1::fast::FieldElement::parse_bytes_strict(pub65 + 33, fe_y)) return false;
+        /* Validate point is on curve: y² == x³ + 7 */
+        auto x2  = fe_x * fe_x;
+        auto x3  = x2  * fe_x;
+        auto y2  = fe_y * fe_y;
+        auto rhs = x3  + secp256k1::fast::FieldElement::from_uint64(7);
+        if (y2 != rhs) return false;
+        const auto& xl = fe_x.limbs();
+        const auto& yl = fe_y.limbs();
+        std::memcpy(out->x.limbs, xl.data(), 32);
+        std::memcpy(out->y.limbs, yl.data(), 32);
+        return true;
+    }
+
+    /** Lift an AffinePoint to a JacobianPoint with Z=1. */
+    static void affine_to_jacobian(const secp256k1::opencl::AffinePoint* aff,
+                                    secp256k1::opencl::JacobianPoint* j) {
+        std::memcpy(j->x.limbs, aff->x.limbs, 32);
+        std::memcpy(j->y.limbs, aff->y.limbs, 32);
+        std::memset(j->z.limbs, 0, 32);
+        j->z.limbs[0] = 1; /* Z = 1 (affine lift) */
+        j->infinity   = 0;
+    }
+
+    /** Return the secp256k1 generator G as a JacobianPoint. */
+    static secp256k1::opencl::JacobianPoint generator_jacobian() {
+        static const uint8_t G33[33] = {
+            0x02,
+            0x79, 0xBE, 0x66, 0x7E, 0xF9, 0xDC, 0xBB, 0xAC,
+            0x55, 0xA0, 0x62, 0x95, 0xCE, 0x87, 0x0B, 0x07,
+            0x02, 0x9B, 0xFC, 0xDB, 0x2D, 0xCE, 0x28, 0xD9,
+            0x59, 0xF2, 0x81, 0x5B, 0x16, 0xF8, 0x17, 0x98
+        };
+        secp256k1::opencl::AffinePoint aff;
+        pubkey33_to_affine(G33, &aff);
+        secp256k1::opencl::JacobianPoint j{};
+        affine_to_jacobian(&aff, &j);
+        return j;
+    }
+
+    /* -- Lazy-load ZK proof OpenCL program --------------------------------- */
+    GpuError ensure_zk_kernels() {
+        if (zk_knowledge_verify_ && zk_dleq_verify_) return GpuError::Ok;
+        if (zk_init_attempted_)
+            return set_error(GpuError::Launch, "ZK kernel init previously failed");
+        zk_init_attempted_ = true;
+
+        auto* cl_ctx = static_cast<cl_context>(ctx_->native_context());
+        cl_device_id device = nullptr;
+        clGetContextInfo(cl_ctx, CL_CONTEXT_DEVICES, sizeof(device), &device, nullptr);
+
+        const char* search_paths[] = {
+            "../../opencl/kernels/secp256k1_zk.cl",
+            "../opencl/kernels/secp256k1_zk.cl",
+            "../../../opencl/kernels/secp256k1_zk.cl",
+            "opencl/kernels/secp256k1_zk.cl",
+            "kernels/secp256k1_zk.cl",
+            "../kernels/secp256k1_zk.cl",
+        };
+
+        std::string src, kernel_dir;
+        for (auto* p : search_paths) {
+            src = load_file_to_string(p);
+            if (!src.empty()) {
+                std::filesystem::path fp(p);
+                kernel_dir = fp.parent_path().string();
+                break;
+            }
+        }
+        if (src.empty())
+            return set_error(GpuError::Launch, "secp256k1_zk.cl not found");
+
+        const char* src_ptr = src.c_str();
+        size_t src_len = src.size();
+        cl_int err;
+        zk_program_ = clCreateProgramWithSource(cl_ctx, 1, &src_ptr, &src_len, &err);
+        if (err != CL_SUCCESS)
+            return set_error(GpuError::Launch, "zk clCreateProgramWithSource failed");
+
+        std::string opts = "-cl-std=CL1.2 -cl-fast-relaxed-math -cl-mad-enable";
+        if (!kernel_dir.empty()) opts += " -I " + kernel_dir;
+
+        err = clBuildProgram(zk_program_, 1, &device, opts.c_str(), nullptr, nullptr);
+        if (err != CL_SUCCESS) {
+            size_t log_len = 0;
+            clGetProgramBuildInfo(zk_program_, device, CL_PROGRAM_BUILD_LOG, 0, nullptr, &log_len);
+            std::string log(log_len, '\0');
+            clGetProgramBuildInfo(zk_program_, device, CL_PROGRAM_BUILD_LOG, log_len, log.data(), nullptr);
+            clReleaseProgram(zk_program_); zk_program_ = nullptr;
+            std::string msg = "zk.cl build failed: " + log.substr(0, 200);
+            return set_error(GpuError::Launch, msg.c_str());
+        }
+
+        zk_knowledge_verify_ = clCreateKernel(zk_program_, "zk_knowledge_verify_batch", &err);
+        if (err != CL_SUCCESS) {
+            clReleaseProgram(zk_program_); zk_program_ = nullptr;
+            return set_error(GpuError::Launch, "zk_knowledge_verify_batch kernel not found");
+        }
+
+        zk_dleq_verify_ = clCreateKernel(zk_program_, "zk_dleq_verify_batch", &err);
+        if (err != CL_SUCCESS) {
+            clReleaseKernel(zk_knowledge_verify_); zk_knowledge_verify_ = nullptr;
+            clReleaseProgram(zk_program_); zk_program_ = nullptr;
+            return set_error(GpuError::Launch, "zk_dleq_verify_batch kernel not found");
+        }
+
+        return GpuError::Ok;
+    }
+
+    /* -- Lazy-load BIP-324 AEAD OpenCL program ----------------------------- */
+    GpuError ensure_bip324_kernels() {
+        if (bip324_aead_encrypt_ && bip324_aead_decrypt_) return GpuError::Ok;
+        if (bip324_init_attempted_)
+            return set_error(GpuError::Launch, "BIP-324 kernel init previously failed");
+        bip324_init_attempted_ = true;
+
+        auto* cl_ctx = static_cast<cl_context>(ctx_->native_context());
+        cl_device_id device = nullptr;
+        clGetContextInfo(cl_ctx, CL_CONTEXT_DEVICES, sizeof(device), &device, nullptr);
+
+        const char* search_paths[] = {
+            "../../opencl/kernels/secp256k1_bip324.cl",
+            "../opencl/kernels/secp256k1_bip324.cl",
+            "../../../opencl/kernels/secp256k1_bip324.cl",
+            "opencl/kernels/secp256k1_bip324.cl",
+            "kernels/secp256k1_bip324.cl",
+            "../kernels/secp256k1_bip324.cl",
+        };
+
+        std::string src, kernel_dir;
+        for (auto* p : search_paths) {
+            src = load_file_to_string(p);
+            if (!src.empty()) {
+                std::filesystem::path fp(p);
+                kernel_dir = fp.parent_path().string();
+                break;
+            }
+        }
+        if (src.empty())
+            return set_error(GpuError::Launch, "secp256k1_bip324.cl not found");
+
+        const char* src_ptr = src.c_str();
+        size_t src_len = src.size();
+        cl_int err;
+        bip324_program_ = clCreateProgramWithSource(cl_ctx, 1, &src_ptr, &src_len, &err);
+        if (err != CL_SUCCESS)
+            return set_error(GpuError::Launch, "bip324 clCreateProgramWithSource failed");
+
+        std::string opts = "-cl-std=CL1.2 -cl-fast-relaxed-math -cl-mad-enable";
+        if (!kernel_dir.empty()) opts += " -I " + kernel_dir;
+
+        err = clBuildProgram(bip324_program_, 1, &device, opts.c_str(), nullptr, nullptr);
+        if (err != CL_SUCCESS) {
+            size_t log_len = 0;
+            clGetProgramBuildInfo(bip324_program_, device, CL_PROGRAM_BUILD_LOG, 0, nullptr, &log_len);
+            std::string log(log_len, '\0');
+            clGetProgramBuildInfo(bip324_program_, device, CL_PROGRAM_BUILD_LOG, log_len, log.data(), nullptr);
+            clReleaseProgram(bip324_program_); bip324_program_ = nullptr;
+            std::string msg = "bip324.cl build failed: " + log.substr(0, 200);
+            return set_error(GpuError::Launch, msg.c_str());
+        }
+
+        bip324_aead_encrypt_ = clCreateKernel(bip324_program_, "kernel_bip324_aead_encrypt", &err);
+        if (err != CL_SUCCESS) {
+            clReleaseProgram(bip324_program_); bip324_program_ = nullptr;
+            return set_error(GpuError::Launch, "kernel_bip324_aead_encrypt not found");
+        }
+
+        bip324_aead_decrypt_ = clCreateKernel(bip324_program_, "kernel_bip324_aead_decrypt", &err);
+        if (err != CL_SUCCESS) {
+            clReleaseKernel(bip324_aead_encrypt_); bip324_aead_encrypt_ = nullptr;
+            clReleaseProgram(bip324_program_); bip324_program_ = nullptr;
+            return set_error(GpuError::Launch, "kernel_bip324_aead_decrypt not found");
+        }
+
+        return GpuError::Ok;
     }
 };
 
