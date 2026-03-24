@@ -638,6 +638,12 @@ target_compile_definitions(test_exploit_batch_verify_correctness_standalone PRIV
 add_test(NAME exploit_batch_verify_correctness COMMAND test_exploit_batch_verify_correctness_standalone)
 set_tests_properties(exploit_batch_verify_correctness PROPERTIES TIMEOUT 120 LABELS "audit;exploit;batch")
 
+add_executable(test_exploit_eth_signing_standalone test_exploit_eth_signing.cpp)
+audit_target_defaults(test_exploit_eth_signing_standalone)
+target_compile_definitions(test_exploit_eth_signing_standalone PRIVATE STANDALONE_TEST)
+add_test(NAME exploit_eth_signing COMMAND test_exploit_eth_signing_standalone)
+set_tests_properties(exploit_eth_signing PROPERTIES TIMEOUT 60 LABELS "audit;exploit;ethereum")
+
 # -- ECIES regression + C ABI prefix enforcement ----------------------------
 add_executable(test_ecies_regression_standalone test_ecies_regression.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/../include/ufsecp/ufsecp_impl.cpp)
