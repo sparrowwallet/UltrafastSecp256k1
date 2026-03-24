@@ -590,6 +590,18 @@ target_compile_definitions(test_exploit_bip32_derivation_standalone PRIVATE STAN
 add_test(NAME exploit_bip32_derivation COMMAND test_exploit_bip32_derivation_standalone)
 set_tests_properties(exploit_bip32_derivation PROPERTIES TIMEOUT 60 LABELS "audit;exploit;bip32")
 
+add_executable(test_exploit_adaptor_extended_standalone test_exploit_adaptor_extended.cpp)
+audit_target_defaults(test_exploit_adaptor_extended_standalone)
+target_compile_definitions(test_exploit_adaptor_extended_standalone PRIVATE STANDALONE_TEST)
+add_test(NAME exploit_adaptor_extended COMMAND test_exploit_adaptor_extended_standalone)
+set_tests_properties(exploit_adaptor_extended PROPERTIES TIMEOUT 60 LABELS "audit;exploit;adaptor")
+
+add_executable(test_exploit_chacha20_poly1305_standalone test_exploit_chacha20_poly1305.cpp)
+audit_target_defaults(test_exploit_chacha20_poly1305_standalone)
+target_compile_definitions(test_exploit_chacha20_poly1305_standalone PRIVATE STANDALONE_TEST)
+add_test(NAME exploit_chacha20_poly1305 COMMAND test_exploit_chacha20_poly1305_standalone)
+set_tests_properties(exploit_chacha20_poly1305 PROPERTIES TIMEOUT 60 LABELS "audit;exploit;aead")
+
 # -- ECIES regression + C ABI prefix enforcement ----------------------------
 add_executable(test_ecies_regression_standalone test_ecies_regression.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/../include/ufsecp/ufsecp_impl.cpp)
