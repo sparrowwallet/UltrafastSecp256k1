@@ -2349,10 +2349,6 @@ def load_config():
             if not recursive and path.exists():
                 _NON_RECURSIVE_SOURCE_DIRS.add(str(path.resolve()))
 
-
-def _project_adapter(project):
-    return SOURCE_DIR_ADAPTERS.get(project, LANG_ADAPTER)
-
     # Category rules
     if "category_rules" in cfg:
         CATEGORY_RULES = cfg["category_rules"]
@@ -2385,6 +2381,10 @@ def _project_adapter(project):
         RUNTIME_DATA_ROOT = EXTERNAL_PATHS["runtime_data"]
     if "research_dir" in EXTERNAL_PATHS:
         RESEARCH_DIR = EXTERNAL_PATHS["research_dir"]
+
+
+def _project_adapter(project):
+    return SOURCE_DIR_ADAPTERS.get(project, LANG_ADAPTER)
 
 
 def create_db(preserve_persistent=False):

@@ -8,6 +8,7 @@ exclude_subdir_names = [
   "__pycache__",
   "CMakeFiles",
   ".git",
+  "build",
   "build_bench*",
   "build_rel*",
   "build_opencl*",
@@ -19,6 +20,7 @@ exclude_subdir_names = [
   "target",
   "dist",
   ".pytest_cache",
+  "esp-idf",
 ]
 
 [[source_dirs]]
@@ -38,6 +40,7 @@ optional = true
 label = "benchmarks"
 path = "../benchmarks"
 optional = true
+extensions = ["*.md", "*.txt", "*.json", "*.log"]
 
 [[source_dirs]]
 label = "cuda"
