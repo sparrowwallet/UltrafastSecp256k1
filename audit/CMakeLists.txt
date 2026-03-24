@@ -494,6 +494,30 @@ target_compile_definitions(test_exploit_ellswift_standalone PRIVATE STANDALONE_T
 add_test(NAME exploit_ellswift COMMAND test_exploit_ellswift_standalone)
 set_tests_properties(exploit_ellswift PROPERTIES TIMEOUT 60 LABELS "audit;exploit;bip324")
 
+add_executable(test_exploit_address_generation_standalone test_exploit_address_generation.cpp)
+audit_target_defaults(test_exploit_address_generation_standalone)
+target_compile_definitions(test_exploit_address_generation_standalone PRIVATE STANDALONE_TEST)
+add_test(NAME exploit_address_generation COMMAND test_exploit_address_generation_standalone)
+set_tests_properties(exploit_address_generation PROPERTIES TIMEOUT 60 LABELS "audit;exploit;address")
+
+add_executable(test_exploit_bip324_session_standalone test_exploit_bip324_session.cpp)
+audit_target_defaults(test_exploit_bip324_session_standalone)
+target_compile_definitions(test_exploit_bip324_session_standalone PRIVATE STANDALONE_TEST)
+add_test(NAME exploit_bip324_session COMMAND test_exploit_bip324_session_standalone)
+set_tests_properties(exploit_bip324_session PROPERTIES TIMEOUT 60 LABELS "audit;exploit;bip324")
+
+add_executable(test_exploit_multiscalar_standalone test_exploit_multiscalar.cpp)
+audit_target_defaults(test_exploit_multiscalar_standalone)
+target_compile_definitions(test_exploit_multiscalar_standalone PRIVATE STANDALONE_TEST)
+add_test(NAME exploit_multiscalar COMMAND test_exploit_multiscalar_standalone)
+set_tests_properties(exploit_multiscalar PROPERTIES TIMEOUT 60 LABELS "audit;exploit;msm")
+
+add_executable(test_exploit_pedersen_homomorphism_standalone test_exploit_pedersen_homomorphism.cpp)
+audit_target_defaults(test_exploit_pedersen_homomorphism_standalone)
+target_compile_definitions(test_exploit_pedersen_homomorphism_standalone PRIVATE STANDALONE_TEST)
+add_test(NAME exploit_pedersen_homomorphism COMMAND test_exploit_pedersen_homomorphism_standalone)
+set_tests_properties(exploit_pedersen_homomorphism PROPERTIES TIMEOUT 60 LABELS "audit;exploit;pedersen")
+
 # -- ECIES regression + C ABI prefix enforcement ----------------------------
 add_executable(test_ecies_regression_standalone test_ecies_regression.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/../include/ufsecp/ufsecp_impl.cpp)
@@ -859,6 +883,8 @@ set_tests_properties(
     exploit_ecdsa_recovery exploit_ecdsa_edge_cases exploit_taproot_tweak
     exploit_chacha20_nonce_reuse exploit_zk_proofs
     exploit_frost_signing exploit_bip39_entropy exploit_ellswift
+    exploit_address_generation exploit_bip324_session exploit_multiscalar
+    exploit_pedersen_homomorphism
     PROPERTIES LABELS "audit"
 )
 if(SECP256K1_BUILD_PROTOCOL_TESTS)
