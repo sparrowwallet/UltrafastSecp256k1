@@ -891,6 +891,15 @@ int main() {
             bip352_pipeline_kernel_lut<<<blocks, tpb>>>(
                 d_tweaks, d_scan_key, d_spend, d_gen_lut, d_prefixes, BENCH_N);
         });
+    // pretbl variant: precomputed per-tweak tables in global mem, coalesced reads.
+    // REG:203 so max tpb = floor(65536/203/32)*32 = 320.
+    const int gpu_tpb_pretbl = autotune_gpu_tpb(
+        "GPU pipeline (LUT+pretbl)", BENCH_N, prop.maxThreadsPerBlock,
+        {64, 128, 192, 256, 320},
+        [&](int blocks, int tpb) {
+            bip352_pipeline_kernel_lut_pretbl<<<blocks, tpb>>>(
+                d_tables_P, d_tables_phiP, d_globalz, d_gen_lut, d_prefixes, BENCH_N);
+        });
 
     // ================================================================
     // Phase 4: Full Pipeline Benchmark -- CPU
@@ -1033,23 +1042,68 @@ int main() {
     printf("  validation prefix: 0x%016lx\n", (unsigned long)gpu_lut_validation);
 
     // ================================================================
+    // Phase 5.6: Full Pipeline Benchmark -- GPU + LUT + Pretbl
+    // ================================================================
+    printf("\n--- GPU + LUT + Pretbl (precomputed per-tweak wNAF tables, coalesced reads) ---\n");
+    int pretbl_blocks = (BENCH_N + gpu_tpb_pretbl - 1) / gpu_tpb_pretbl;
+
+    for (int w = 0; w < BENCH_CLOCK_WARMUP; ++w) {
+        bip352_pipeline_kernel_lut_pretbl<<<pretbl_blocks, gpu_tpb_pretbl>>>(
+            d_tables_P, d_tables_phiP, d_globalz, d_gen_lut, d_prefixes, BENCH_N);
+        CUDA_CHECK(cudaDeviceSynchronize());
+    }
+    for (int w = 0; w < BENCH_WARMUP; ++w) {
+        bip352_pipeline_kernel_lut_pretbl<<<pretbl_blocks, gpu_tpb_pretbl>>>(
+            d_tables_P, d_tables_phiP, d_globalz, d_gen_lut, d_prefixes, BENCH_N);
+        CUDA_CHECK(cudaDeviceSynchronize());
+    }
+
+    std::vector<double> gpu_pretbl_times(BENCH_PASSES);
+    for (int p = 0; p < BENCH_PASSES; ++p) {
+        timer.start();
+        for (int r = 0; r < BENCH_MULTI; ++r)
+            bip352_pipeline_kernel_lut_pretbl<<<pretbl_blocks, gpu_tpb_pretbl>>>(
+                d_tables_P, d_tables_phiP, d_globalz, d_gen_lut, d_prefixes, BENCH_N);
+        float ms = timer.stop();
+        gpu_pretbl_times[p] = (double)ms / BENCH_MULTI;
+        printf("  pass %2d: %8.3f ms\n", p + 1, (double)ms / BENCH_MULTI);
+    }
+
+    CUDA_CHECK(cudaMemcpy(h_prefixes.data(), d_prefixes, BENCH_N * sizeof(int64_t), cudaMemcpyDeviceToHost));
+    int64_t gpu_pretbl_validation = h_prefixes[BENCH_N - 1];
+
+    std::sort(gpu_pretbl_times.begin(), gpu_pretbl_times.end());
+    double gpu_pretbl_median = gpu_pretbl_times[BENCH_PASSES / 2];
+    double gpu_pretbl_ns_op  = gpu_pretbl_median * 1e6 / BENCH_N;
+
+    printf("\n  GPU+LUT+Pretbl: %.3f ms / %d ops = %.1f ns/op (%.1f us/op)\n",
+           gpu_pretbl_median, BENCH_N, gpu_pretbl_ns_op, gpu_pretbl_ns_op / 1000.0);
+    printf("  validation prefix: 0x%016lx\n", (unsigned long)gpu_pretbl_validation);
+
+    // ================================================================
     // Phase 6: Comparison summary
     // ================================================================
     printf("\n=== Full Pipeline Comparison ===\n");
     double pipeline_ratio = cpu_ns_op / gpu_ns_op;
     double lut_ratio      = cpu_ns_op / gpu_lut_ns_op;
     double lut_vs_gpu     = gpu_ns_op / gpu_lut_ns_op;
-    printf("  CPU:            %10.1f ns/op\n", cpu_ns_op);
-    printf("  GPU (w=4):      %10.1f ns/op  (%.2fx vs CPU)\n", gpu_ns_op, pipeline_ratio);
-    printf("  GPU+LUT:        %10.1f ns/op  (%.2fx vs CPU, %.2fx vs GPU w=4)\n",
+    double pretbl_ratio   = cpu_ns_op / gpu_pretbl_ns_op;
+    double pretbl_vs_lut  = gpu_lut_ns_op / gpu_pretbl_ns_op;
+    printf("  CPU:                %10.1f ns/op\n", cpu_ns_op);
+    printf("  GPU (w=4):          %10.1f ns/op  (%.2fx vs CPU)\n", gpu_ns_op, pipeline_ratio);
+    printf("  GPU+LUT:            %10.1f ns/op  (%.2fx vs CPU, %.2fx vs GPU w=4)\n",
            gpu_lut_ns_op, lut_ratio, lut_vs_gpu);
+    printf("  GPU+LUT+Pretbl:     %10.1f ns/op  (%.2fx vs CPU, %.2fx vs GPU+LUT)\n",
+           gpu_pretbl_ns_op, pretbl_ratio, pretbl_vs_lut);
 
-    bool prefixes_match = (cpu_validation == gpu_validation) && (cpu_validation == gpu_lut_validation);
+    bool prefixes_match = (cpu_validation == gpu_validation) &&
+                          (cpu_validation == gpu_lut_validation) &&
+                          (cpu_validation == gpu_pretbl_validation);
     printf("  Validation: %s\n",
            prefixes_match ? "[OK] ALL MATCH" : "[FAIL] MISMATCH");
-    printf("    CPU=0x%016lx  GPU=0x%016lx  LUT=0x%016lx\n",
+    printf("    CPU=0x%016lx  GPU=0x%016lx  LUT=0x%016lx  PRETBL=0x%016lx\n",
            (unsigned long)cpu_validation, (unsigned long)gpu_validation,
-           (unsigned long)gpu_lut_validation);
+           (unsigned long)gpu_lut_validation, (unsigned long)gpu_pretbl_validation);
 
     // ================================================================
     // Phase 7: Per-operation breakdown
