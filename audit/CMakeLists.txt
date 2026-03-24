@@ -347,6 +347,97 @@ add_test(NAME exploit_musig2_ordering COMMAND test_exploit_musig2_ordering_stand
 set_tests_properties(exploit_musig2_ordering PROPERTIES
     TIMEOUT 120 LABELS "audit;exploit;musig2")
 
+# -- PoC: FROST polynomial index collision (participant_id * 1000 + j formula)
+add_executable(test_exploit_frost_index_standalone test_exploit_frost_index.cpp)
+audit_target_defaults(test_exploit_frost_index_standalone)
+target_compile_definitions(test_exploit_frost_index_standalone PRIVATE STANDALONE_TEST)
+add_test(NAME exploit_frost_index COMMAND test_exploit_frost_index_standalone)
+set_tests_properties(exploit_frost_index PROPERTIES TIMEOUT 60 LABELS "audit;exploit;frost")
+
+# -- PoC: FROST participant_id=0 secret exposure (x=0 is the secret evaluation point)
+add_executable(test_exploit_frost_participant_zero_standalone test_exploit_frost_participant_zero.cpp)
+audit_target_defaults(test_exploit_frost_participant_zero_standalone)
+target_compile_definitions(test_exploit_frost_participant_zero_standalone PRIVATE STANDALONE_TEST)
+add_test(NAME exploit_frost_participant_zero COMMAND test_exploit_frost_participant_zero_standalone)
+set_tests_properties(exploit_frost_participant_zero PROPERTIES TIMEOUT 60 LABELS "audit;exploit;frost")
+
+# -- PoC: FROST threshold=0 degenerate case (empty polynomial, all-zero shares)
+add_executable(test_exploit_frost_threshold_degenerate_standalone test_exploit_frost_threshold_degenerate.cpp)
+audit_target_defaults(test_exploit_frost_threshold_degenerate_standalone)
+target_compile_definitions(test_exploit_frost_threshold_degenerate_standalone PRIVATE STANDALONE_TEST)
+add_test(NAME exploit_frost_threshold_degenerate COMMAND test_exploit_frost_threshold_degenerate_standalone)
+set_tests_properties(exploit_frost_threshold_degenerate PROPERTIES TIMEOUT 60 LABELS "audit;exploit;frost")
+
+# -- PoC: FROST Lagrange coefficient corruption via duplicate signer IDs
+add_executable(test_exploit_frost_lagrange_duplicate_standalone test_exploit_frost_lagrange_duplicate.cpp)
+audit_target_defaults(test_exploit_frost_lagrange_duplicate_standalone)
+target_compile_definitions(test_exploit_frost_lagrange_duplicate_standalone PRIVATE STANDALONE_TEST)
+add_test(NAME exploit_frost_lagrange_duplicate COMMAND test_exploit_frost_lagrange_duplicate_standalone)
+set_tests_properties(exploit_frost_lagrange_duplicate PROPERTIES TIMEOUT 60 LABELS "audit;exploit;frost")
+
+# -- PoC: Schnorr adaptor signature R.y parity not verified (DoS on atomic swaps)
+add_executable(test_exploit_adaptor_parity_standalone test_exploit_adaptor_parity.cpp)
+audit_target_defaults(test_exploit_adaptor_parity_standalone)
+target_compile_definitions(test_exploit_adaptor_parity_standalone PRIVATE STANDALONE_TEST)
+add_test(NAME exploit_adaptor_parity COMMAND test_exploit_adaptor_parity_standalone)
+set_tests_properties(exploit_adaptor_parity PROPERTIES TIMEOUT 60 LABELS "audit;exploit;adaptor")
+
+# -- PoC: Scalar arithmetic edge cases and invariant violations
+add_executable(test_exploit_scalar_invariants_standalone test_exploit_scalar_invariants.cpp)
+audit_target_defaults(test_exploit_scalar_invariants_standalone)
+target_compile_definitions(test_exploit_scalar_invariants_standalone PRIVATE STANDALONE_TEST)
+add_test(NAME exploit_scalar_invariants COMMAND test_exploit_scalar_invariants_standalone)
+set_tests_properties(exploit_scalar_invariants PROPERTIES TIMEOUT 60 LABELS "audit;exploit;scalar")
+
+# -- PoC: ECDH degenerate input handling (zero key, infinity point, protocol confusion)
+add_executable(test_exploit_ecdh_degenerate_standalone test_exploit_ecdh_degenerate.cpp)
+audit_target_defaults(test_exploit_ecdh_degenerate_standalone)
+target_compile_definitions(test_exploit_ecdh_degenerate_standalone PRIVATE STANDALONE_TEST)
+add_test(NAME exploit_ecdh_degenerate COMMAND test_exploit_ecdh_degenerate_standalone)
+set_tests_properties(exploit_ecdh_degenerate PROPERTIES TIMEOUT 60 LABELS "audit;exploit;ecdh")
+
+# -- PoC: Schnorr signature BIP-340 edge cases (s=0, r>=p, zero msg, determinism)
+add_executable(test_exploit_schnorr_edge_cases_standalone test_exploit_schnorr_edge_cases.cpp)
+audit_target_defaults(test_exploit_schnorr_edge_cases_standalone)
+target_compile_definitions(test_exploit_schnorr_edge_cases_standalone PRIVATE STANDALONE_TEST)
+add_test(NAME exploit_schnorr_edge_cases COMMAND test_exploit_schnorr_edge_cases_standalone)
+set_tests_properties(exploit_schnorr_edge_cases PROPERTIES TIMEOUT 60 LABELS "audit;exploit;schnorr")
+
+# -- PoC: ECIES authentication bypass and ciphertext tampering tests
+add_executable(test_exploit_ecies_auth_standalone test_exploit_ecies_auth.cpp)
+audit_target_defaults(test_exploit_ecies_auth_standalone)
+target_compile_definitions(test_exploit_ecies_auth_standalone PRIVATE STANDALONE_TEST)
+add_test(NAME exploit_ecies_auth COMMAND test_exploit_ecies_auth_standalone)
+set_tests_properties(exploit_ecies_auth PROPERTIES TIMEOUT 120 LABELS "audit;exploit;ecies")
+
+# -- PoC: Schnorr batch verification soundness (invalid sig detection, a_0=1 weight)
+add_executable(test_exploit_batch_soundness_standalone test_exploit_batch_soundness.cpp)
+audit_target_defaults(test_exploit_batch_soundness_standalone)
+target_compile_definitions(test_exploit_batch_soundness_standalone PRIVATE STANDALONE_TEST)
+add_test(NAME exploit_batch_soundness COMMAND test_exploit_batch_soundness_standalone)
+set_tests_properties(exploit_batch_soundness PROPERTIES TIMEOUT 120 LABELS "audit;exploit;batch")
+
+# -- PoC: BIP-32 path parser overflow and boundary conditions
+add_executable(test_exploit_bip32_path_overflow_standalone test_exploit_bip32_path_overflow.cpp)
+audit_target_defaults(test_exploit_bip32_path_overflow_standalone)
+target_compile_definitions(test_exploit_bip32_path_overflow_standalone PRIVATE STANDALONE_TEST)
+add_test(NAME exploit_bip32_path_overflow COMMAND test_exploit_bip32_path_overflow_standalone)
+set_tests_properties(exploit_bip32_path_overflow PROPERTIES TIMEOUT 60 LABELS "audit;exploit;bip32")
+
+# -- PoC: MuSig2 nonce reuse attack (private key recovery, single-use enforcement)
+add_executable(test_exploit_musig2_nonce_reuse_standalone test_exploit_musig2_nonce_reuse.cpp)
+audit_target_defaults(test_exploit_musig2_nonce_reuse_standalone)
+target_compile_definitions(test_exploit_musig2_nonce_reuse_standalone PRIVATE STANDALONE_TEST)
+add_test(NAME exploit_musig2_nonce_reuse COMMAND test_exploit_musig2_nonce_reuse_standalone)
+set_tests_properties(exploit_musig2_nonce_reuse PROPERTIES TIMEOUT 120 LABELS "audit;exploit;musig2")
+
+# -- PoC: Elliptic curve point group law correctness (commutativity, associativity, etc.)
+add_executable(test_exploit_point_group_law_standalone test_exploit_point_group_law.cpp)
+audit_target_defaults(test_exploit_point_group_law_standalone)
+target_compile_definitions(test_exploit_point_group_law_standalone PRIVATE STANDALONE_TEST)
+add_test(NAME exploit_point_group_law COMMAND test_exploit_point_group_law_standalone)
+set_tests_properties(exploit_point_group_law PROPERTIES TIMEOUT 60 LABELS "audit;exploit;ecc")
+
 # -- ECIES regression + C ABI prefix enforcement ----------------------------
 add_executable(test_ecies_regression_standalone test_ecies_regression.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/../include/ufsecp/ufsecp_impl.cpp)
@@ -704,6 +795,11 @@ set_tests_properties(
     parse_strictness
     unified_audit
     exploit_ct_recov exploit_bip32_depth exploit_musig2_ordering
+    exploit_frost_index exploit_frost_participant_zero exploit_frost_threshold_degenerate
+    exploit_frost_lagrange_duplicate exploit_adaptor_parity exploit_scalar_invariants
+    exploit_ecdh_degenerate exploit_schnorr_edge_cases exploit_ecies_auth
+    exploit_batch_soundness exploit_bip32_path_overflow exploit_musig2_nonce_reuse
+    exploit_point_group_law
     PROPERTIES LABELS "audit"
 )
 if(SECP256K1_BUILD_PROTOCOL_TESTS)
