@@ -144,6 +144,7 @@ public:
         frost_init_attempted_ = false;
         if (zk_knowledge_verify_) { clReleaseKernel(zk_knowledge_verify_); zk_knowledge_verify_ = nullptr; }
         if (zk_dleq_verify_)      { clReleaseKernel(zk_dleq_verify_);     zk_dleq_verify_      = nullptr; }
+        if (bp_poly_batch_)       { clReleaseKernel(bp_poly_batch_);       bp_poly_batch_       = nullptr; }
         if (zk_program_)          { clReleaseProgram(zk_program_);         zk_program_          = nullptr; }
         zk_init_attempted_ = false;
         if (bip324_aead_encrypt_) { clReleaseKernel(bip324_aead_encrypt_); bip324_aead_encrypt_ = nullptr; }
@@ -1063,13 +1064,106 @@ public:
         return GpuError::Ok;
     }
 
-    // PARITY-EXCEPTION(OpenCL): bulletproof kernel is #if 0 blocked in secp256k1_zk.cl
-    // pending address-space qualifier fixes (__global/__private params).
-    // See docs/BACKEND_ASSURANCE_MATRIX.md row "bulletproof_verify_batch".
     GpuError bulletproof_verify_batch(
-        const uint8_t*, const uint8_t*, const uint8_t*,
-        size_t, uint8_t*) override
-    { return set_error(GpuError::Unsupported, "bulletproof: OpenCL kernel pending address-space fixes"); }
+        const uint8_t* proofs324, const uint8_t* commitments65,
+        const uint8_t* H_generator65, size_t count,
+        uint8_t* out_results) override
+    {
+        if (!is_ready()) return set_error(GpuError::Device, "context not initialised");
+        if (count == 0) { clear_error(); return GpuError::Ok; }
+        if (!proofs324 || !commitments65 || !H_generator65 || !out_results)
+            return set_error(GpuError::NullArg, "NULL buffer");
+
+        auto err = ensure_zk_kernels();
+        if (err != GpuError::Ok) return err;
+
+        auto* cl_ctx = static_cast<cl_context>(ctx_->native_context());
+        auto* queue  = static_cast<cl_command_queue>(ctx_->native_queue());
+        cl_int clerr;
+
+        /* Parse 324-byte proofs into host-side RangeProofPolyGPU struct.
+         * Wire layout per proof: 4 × 65-byte uncompressed points (A, S, T1, T2)
+         *                      + 2 × 32-byte BE scalars (tau_x, t_hat) = 324 bytes.
+         * GPU struct layout: 4 × AffinePoint(64B) + 2 × Scalar(32B) = 320 bytes. */
+        struct RangeProofPolyOCL {
+            secp256k1::opencl::AffinePoint A, S, T1, T2;
+            secp256k1::opencl::Scalar tau_x, t_hat;
+        };
+        std::vector<RangeProofPolyOCL> h_proofs(count);
+        for (size_t i = 0; i < count; ++i) {
+            const uint8_t* p = proofs324 + i * 324;
+            if (!pubkey65_to_affine(p,       &h_proofs[i].A))  return set_error(GpuError::BadKey, "invalid proof A");
+            if (!pubkey65_to_affine(p + 65,  &h_proofs[i].S))  return set_error(GpuError::BadKey, "invalid proof S");
+            if (!pubkey65_to_affine(p + 130, &h_proofs[i].T1)) return set_error(GpuError::BadKey, "invalid proof T1");
+            if (!pubkey65_to_affine(p + 195, &h_proofs[i].T2)) return set_error(GpuError::BadKey, "invalid proof T2");
+            bytes_to_scalar(p + 260, &h_proofs[i].tau_x);
+            bytes_to_scalar(p + 292, &h_proofs[i].t_hat);
+        }
+
+        std::vector<secp256k1::opencl::AffinePoint> h_commits(count);
+        for (size_t i = 0; i < count; ++i) {
+            if (!pubkey65_to_affine(commitments65 + i * 65, &h_commits[i]))
+                return set_error(GpuError::BadKey, "invalid commitment");
+        }
+
+        secp256k1::opencl::AffinePoint h_gen;
+        if (!pubkey65_to_affine(H_generator65, &h_gen))
+            return set_error(GpuError::BadKey, "invalid H generator");
+
+        cl_mem d_proofs = clCreateBuffer(cl_ctx, CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR,
+                                         sizeof(RangeProofPolyOCL) * count, h_proofs.data(), &clerr);
+        if (clerr != CL_SUCCESS) return set_error(GpuError::Memory, "bp proof buffer");
+
+        cl_mem d_commits = clCreateBuffer(cl_ctx, CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR,
+                                          sizeof(secp256k1::opencl::AffinePoint) * count,
+                                          h_commits.data(), &clerr);
+        if (clerr != CL_SUCCESS) {
+            clReleaseMemObject(d_proofs);
+            return set_error(GpuError::Memory, "bp commit buffer");
+        }
+
+        cl_mem d_hgen = clCreateBuffer(cl_ctx, CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR,
+                                       sizeof(secp256k1::opencl::AffinePoint), &h_gen, &clerr);
+        if (clerr != CL_SUCCESS) {
+            clReleaseMemObject(d_commits); clReleaseMemObject(d_proofs);
+            return set_error(GpuError::Memory, "bp h-gen buffer");
+        }
+
+        cl_mem d_res = clCreateBuffer(cl_ctx, CL_MEM_WRITE_ONLY,
+                                      sizeof(int) * count, nullptr, &clerr);
+        if (clerr != CL_SUCCESS) {
+            clReleaseMemObject(d_hgen); clReleaseMemObject(d_commits); clReleaseMemObject(d_proofs);
+            return set_error(GpuError::Memory, "bp result buffer");
+        }
+
+        cl_uint cl_count = static_cast<cl_uint>(count);
+        clSetKernelArg(bp_poly_batch_, 0, sizeof(cl_mem),  &d_proofs);
+        clSetKernelArg(bp_poly_batch_, 1, sizeof(cl_mem),  &d_commits);
+        clSetKernelArg(bp_poly_batch_, 2, sizeof(cl_mem),  &d_hgen);
+        clSetKernelArg(bp_poly_batch_, 3, sizeof(cl_mem),  &d_res);
+        clSetKernelArg(bp_poly_batch_, 4, sizeof(cl_uint), &cl_count);
+
+        size_t global = count;
+        clerr = clEnqueueNDRangeKernel(queue, bp_poly_batch_, 1, nullptr,
+                                        &global, nullptr, 0, nullptr, nullptr);
+        if (clerr != CL_SUCCESS) {
+            clReleaseMemObject(d_res);   clReleaseMemObject(d_hgen);
+            clReleaseMemObject(d_commits); clReleaseMemObject(d_proofs);
+            return set_error(GpuError::Launch, "bp_poly_batch kernel launch failed");
+        }
+        clFinish(queue);
+
+        std::vector<int> h_res(count);
+        clEnqueueReadBuffer(queue, d_res, CL_TRUE, 0,
+                             sizeof(int) * count, h_res.data(), 0, nullptr, nullptr);
+        for (size_t i = 0; i < count; ++i)
+            out_results[i] = h_res[i] ? 1 : 0;
+
+        clReleaseMemObject(d_res);    clReleaseMemObject(d_hgen);
+        clReleaseMemObject(d_commits); clReleaseMemObject(d_proofs);
+        clear_error();
+        return GpuError::Ok;
+    }
 
     /* -- BIP-324 AEAD batch operations (OpenCL via secp256k1_bip324.cl) ----- */
 
@@ -1279,6 +1373,7 @@ private:
     cl_program zk_program_            = nullptr;
     cl_kernel  zk_knowledge_verify_   = nullptr;
     cl_kernel  zk_dleq_verify_        = nullptr;
+    cl_kernel  bp_poly_batch_         = nullptr;  /* range_proof_poly_batch */
     bool       zk_init_attempted_     = false;
 
     /* BIP-324 AEAD kernel handles (lazy-loaded via secp256k1_bip324.cl) */
@@ -1578,7 +1673,7 @@ private:
 
     /* -- Lazy-load ZK proof OpenCL program --------------------------------- */
     GpuError ensure_zk_kernels() {
-        if (zk_knowledge_verify_ && zk_dleq_verify_) return GpuError::Ok;
+        if (zk_knowledge_verify_ && zk_dleq_verify_ && bp_poly_batch_) return GpuError::Ok;
         if (zk_init_attempted_)
             return set_error(GpuError::Launch, "ZK kernel init previously failed");
         zk_init_attempted_ = true;
@@ -1640,6 +1735,14 @@ private:
             clReleaseKernel(zk_knowledge_verify_); zk_knowledge_verify_ = nullptr;
             clReleaseProgram(zk_program_); zk_program_ = nullptr;
             return set_error(GpuError::Launch, "zk_dleq_verify_batch kernel not found");
+        }
+
+        bp_poly_batch_ = clCreateKernel(zk_program_, "range_proof_poly_batch", &err);
+        if (err != CL_SUCCESS) {
+            clReleaseKernel(zk_dleq_verify_);     zk_dleq_verify_     = nullptr;
+            clReleaseKernel(zk_knowledge_verify_); zk_knowledge_verify_ = nullptr;
+            clReleaseProgram(zk_program_); zk_program_ = nullptr;
+            return set_error(GpuError::Launch, "range_proof_poly_batch kernel not found");
         }
 
         return GpuError::Ok;

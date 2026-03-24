@@ -840,12 +840,82 @@ public:
         return GpuError::Ok;
     }
 
-    // PARITY-EXCEPTION(Metal): bulletproof kernel blocked upstream; OpenCL also #if 0.
-    // See docs/BACKEND_ASSURANCE_MATRIX.md row "bulletproof_verify_batch".
     GpuError bulletproof_verify_batch(
-        const uint8_t*, const uint8_t*, const uint8_t*,
-        size_t, uint8_t*) override
-    { return set_error(GpuError::Unsupported, "bulletproof: kernel pending address-space fixes"); }
+        const uint8_t* proofs324, const uint8_t* commitments65,
+        const uint8_t* H_generator65, size_t count,
+        uint8_t* out_results) override
+    {
+        if (!is_ready()) return set_error(GpuError::Device, "context not initialised");
+        if (count == 0) { clear_error(); return GpuError::Ok; }
+        if (!proofs324 || !commitments65 || !H_generator65 || !out_results)
+            return set_error(GpuError::NullArg, "NULL buffer");
+
+        auto err = ensure_library();
+        if (err != GpuError::Ok) return err;
+
+        /* Convert big-endian 32 bytes → MetalFieldElem (same format as scalar). */
+        auto be32_to_metal_fe = [](const uint8_t be[32]) -> MetalFieldElem {
+            MetalFieldElem fe;
+            for (int i = 0; i < 8; i++) {
+                int base = (7 - i) * 4;
+                fe.limbs[i] = ((uint32_t)be[base]   << 24) |
+                              ((uint32_t)be[base+1]  << 16) |
+                              ((uint32_t)be[base+2]  << 8)  |
+                              ((uint32_t)be[base+3]);
+            }
+            return fe;
+        };
+
+        /* Parse uncompressed point (65 bytes: 04 || x[32] || y[32]) → MetalAffinePoint */
+        auto parse_pt65 = [&be32_to_metal_fe](const uint8_t pt65[65]) -> MetalAffinePoint {
+            return { be32_to_metal_fe(pt65 + 1), be32_to_metal_fe(pt65 + 33) };
+        };
+
+        /* Build GPU-layout RangeProofPolyGPU structs (320 bytes each):
+         *   4 x MetalAffinePoint (A, S, T1, T2) + 2 x MetalScalar256 (tau_x, t_hat)
+         * Wire format per proof (324 bytes): 4 x 65-byte uncompressed + 2 x 32-byte scalars */
+        struct RangeProofPolyMetal {
+            MetalAffinePoint A, S, T1, T2;
+            MetalScalar256 tau_x, t_hat;
+        };
+        static_assert(sizeof(RangeProofPolyMetal) == 320, "struct layout mismatch");
+
+        auto buf_proofs = runtime_->alloc_buffer_shared(count * sizeof(RangeProofPolyMetal));
+        auto* proofs_out = static_cast<RangeProofPolyMetal*>(buf_proofs.contents());
+        for (size_t i = 0; i < count; ++i) {
+            const uint8_t* p = proofs324 + i * 324;
+            proofs_out[i].A    = parse_pt65(p);
+            proofs_out[i].S    = parse_pt65(p + 65);
+            proofs_out[i].T1   = parse_pt65(p + 130);
+            proofs_out[i].T2   = parse_pt65(p + 195);
+            proofs_out[i].tau_x = be32_to_metal_scalar(p + 260);
+            proofs_out[i].t_hat = be32_to_metal_scalar(p + 292);
+        }
+
+        auto buf_commits = runtime_->alloc_buffer_shared(count * sizeof(MetalAffinePoint));
+        auto* commits_out = static_cast<MetalAffinePoint*>(buf_commits.contents());
+        for (size_t i = 0; i < count; ++i)
+            commits_out[i] = parse_pt65(commitments65 + i * 65);
+
+        auto buf_hgen = runtime_->alloc_buffer_shared(sizeof(MetalAffinePoint));
+        *static_cast<MetalAffinePoint*>(buf_hgen.contents()) = parse_pt65(H_generator65);
+
+        auto buf_res = runtime_->alloc_buffer_shared(count * sizeof(uint32_t));
+        uint32_t n32 = (uint32_t)count;
+        auto buf_n   = runtime_->alloc_buffer_shared(sizeof(uint32_t));
+        std::memcpy(buf_n.contents(), &n32, sizeof(n32));
+
+        auto pipe = runtime_->make_pipeline("range_proof_poly_batch");
+        runtime_->dispatch_sync(pipe, (uint32_t)count, 64u,
+                                {&buf_proofs, &buf_commits, &buf_hgen, &buf_res, &buf_n});
+
+        const auto* res = static_cast<const uint32_t*>(buf_res.contents());
+        for (size_t i = 0; i < count; ++i)
+            out_results[i] = res[i] ? 1 : 0;
+
+        clear_error();
+        return GpuError::Ok;
+    }
 
     GpuError bip324_aead_encrypt_batch(
         const uint8_t* keys32, const uint8_t* nonces12,

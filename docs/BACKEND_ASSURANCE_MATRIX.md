@@ -21,7 +21,7 @@
 | ZK proofs | Y | Y | Y | Y | Y |
 | ZK knowledge verify batch | - | - | Y | Y | Y |
 | ZK DLEQ verify batch | - | - | Y | Y | Y |
-| Bulletproof verify batch | - | - | Y | stub | stub |
+| Bulletproof verify batch | - | - | Y | Y | Y |
 | BIP-324 AEAD encrypt batch | - | - | Y | Y | Y |
 | BIP-324 AEAD decrypt batch | - | - | Y | Y | Y |
 | Multi-scalar mul | Y | - | Y | Y | Y |
@@ -44,11 +44,13 @@
 
 | Operation | Backend | Tracking note |
 |-----------|---------|---------------|
-| `bulletproof_verify_batch` | OpenCL, Metal | CUDA implemented; OpenCL/Metal blocked by address-space qualifier issues in kernel — tracked as PARITY-EXCEPTION |
+| *(none — all parity gaps resolved)* | — | — |
 
-> All other ZK and BIP-324 batch operations (`zk_knowledge_verify_batch`,
-> `zk_dleq_verify_batch`, `bip324_aead_encrypt_batch`, `bip324_aead_decrypt_batch`)
-> are now **fully implemented on all three GPU backends** (CUDA, OpenCL, Metal).
+> All ZK and BIP-324 batch operations, including `bulletproof_verify_batch`, are now
+> **fully implemented on all three GPU backends** (CUDA, OpenCL, Metal).
+> OpenCL kernel `#if 0` guard removed; address-space qualifier fix applied to
+> `range_verify_full_impl` (added `__global` to `bp_G`/`bp_H`, local copy in loop).
+> Metal host dispatch wired via `range_proof_poly_batch` kernel.
 > Resolved 2026-03-24.
 
 ### Current permanent exceptions
