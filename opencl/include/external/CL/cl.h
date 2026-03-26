@@ -126,6 +126,14 @@ extern "C" {
 #define CL_DEVICE_IMAGE_SUPPORT                     0x1016
 
 // =============================================================================
+// cl_context_info (needed by gpu/src/gpu_backend_opencl.cpp)
+// =============================================================================
+#define CL_CONTEXT_REFERENCE_COUNT                  0x1080
+#define CL_CONTEXT_DEVICES                          0x1081
+#define CL_CONTEXT_PROPERTIES                       0x1082
+#define CL_CONTEXT_NUM_DEVICES                      0x1083
+
+// =============================================================================
 // cl_mem_flags
 // =============================================================================
 #define CL_MEM_READ_WRITE                           (1 << 0)
@@ -203,6 +211,13 @@ clCreateContext(const cl_context_properties * properties,
                 void (CL_CALLBACK * pfn_notify)(const char *, const void *, size_t, void *),
                 void *                  user_data,
                 cl_int *                errcode_ret) CL_API_SUFFIX__VERSION_1_0;
+
+extern CL_API_ENTRY cl_int CL_API_CALL
+clGetContextInfo(cl_context         context,
+                 cl_context_info    param_name,
+                 size_t             param_value_size,
+                 void *             param_value,
+                 size_t *           param_value_size_ret) CL_API_SUFFIX__VERSION_1_0;
 
 extern CL_API_ENTRY cl_int CL_API_CALL
 clReleaseContext(cl_context context) CL_API_SUFFIX__VERSION_1_0;
