@@ -1,9 +1,6 @@
 name: Nightly Extended Tests
 
 on:
-  schedule:
-    # Daily 03:00 UTC — extended test suite
-    - cron: '0 3 * * *'
   workflow_dispatch:
     inputs:
       differential_multiplier:
