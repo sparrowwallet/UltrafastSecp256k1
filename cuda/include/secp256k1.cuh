@@ -269,7 +269,6 @@ __device__ __forceinline__ uint64_t muladd64(uint64_t a, uint64_t b, uint64_t ad
     carry = hi;
     return lo;
 }
-}
 
 // Forward decls used by Montgomery helpers.
 __device__ inline void mul_256_512(const FieldElement* a, const FieldElement* b, uint64_t r[8]);
